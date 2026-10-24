@@ -517,7 +517,7 @@ tradingView/
 - [x] Wire in `hedgeFund` (editable dependency): reuse stats modules + regime features; port its no-lookahead perturbation tests
 - [x] Optuna parameter search wired to the ledger
 - [x] Event-driven cross-check (freqtrade or nautilus_trader)
-- [ ] FastAPI endpoints + UI backtest panel (markers, equity pane, metrics table)
+- [x] FastAPI endpoints + UI backtest panel (markers, equity pane, metrics table)
 - [x] Tests for engine accounting against hand-calculated examples
 
 **Done when:** an EMA-crossover plan on BTCUSDT 4h shows trades on the chart, metrics, its DSR/PBO, and how it compares with buy-and-hold, and every run appears in the ledger.
