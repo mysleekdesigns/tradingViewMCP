@@ -293,9 +293,9 @@ tradingView/
 5. Apply a dark theme (background, grid, text colors) to match the TradingView look.
 
 ### Checklist
-- [ ] `types.ts` with `Candle`, `Interval`, `SymbolInfo`
-- [ ] `MarketDataProvider` interface
-- [ ] `BinanceProvider.getCandles` with number parsing and time conversion
+- [x] `types.ts` with `Candle`, `Interval`, `SymbolInfo`
+- [x] `MarketDataProvider` interface
+- [x] `BinanceProvider.getCandles` with number parsing and time conversion
 - [ ] `<Chart>` component with candlesticks + volume
 - [ ] Crosshair + OHLCV legend showing values under the cursor (`chart.subscribeCrosshairMove`)
 - [ ] Dark theme

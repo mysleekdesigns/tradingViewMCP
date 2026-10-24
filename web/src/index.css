@@ -18,13 +18,93 @@ body,
 }
 
 .app {
+  position: relative;
   height: 100%;
-  padding: 16px;
-  box-sizing: border-box;
+  overflow: hidden;
 }
 
-.app h1 {
+.app__status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  height: 100%;
+  font-size: 14px;
+  color: #787b86;
+}
+
+.app__status p {
   margin: 0;
-  font-size: 16px;
+}
+
+.app__status--error {
+  color: #ef5350;
+}
+
+.app__status button {
+  padding: 6px 16px;
+  border: 1px solid #2a2e39;
+  border-radius: 4px;
+  background: #1e222d;
+  color: #d1d4dc;
+  font: inherit;
+  cursor: pointer;
+}
+
+.app__status button:hover {
+  background: #2a2e39;
+}
+
+.chart {
+  position: relative;
+  height: 100%;
+  width: 100%;
+}
+
+.chart__canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.chart-legend {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.chart-legend__title {
   font-weight: 600;
+  color: #d1d4dc;
+}
+
+.chart-legend__values {
+  display: flex;
+  gap: 8px;
+}
+
+.chart-legend__field {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.chart-legend__label {
+  color: #787b86;
+}
+
+.chart-legend__values--up .chart-legend__value,
+.chart-legend__values--up .chart-legend__change {
+  color: #26a69a;
+}
+
+.chart-legend__values--down .chart-legend__value,
+.chart-legend__values--down .chart-legend__change {
+  color: #ef5350;
 }
