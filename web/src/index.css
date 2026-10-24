@@ -14,6 +14,7 @@
   --down: #f23645;
   --accent: #2962ff;
   --accent-hover: #1e53e5;
+  --warn: #f7a600;
   --font-ui: 'IBM Plex Sans', -apple-system, 'Segoe UI', sans-serif;
   --font-num: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
   --topbar-h: 48px;
@@ -394,6 +395,64 @@ body,
 
 .statusbar__item--error {
   color: var(--down);
+}
+
+.statusbar__clock {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Connection status (live / connecting / reconnecting / offline) ---------- */
+
+.conn {
+  --conn-color: var(--text-faint);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--conn-color);
+  font-weight: 500;
+}
+
+.conn--live {
+  --conn-color: var(--up);
+}
+
+.conn--connecting,
+.conn--reconnecting {
+  --conn-color: var(--warn);
+}
+
+.conn--offline {
+  --conn-color: var(--down);
+}
+
+.conn__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--conn-color);
+}
+
+.conn--live .conn__dot {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--conn-color) 22%, transparent);
+}
+
+.conn--connecting .conn__dot,
+.conn--reconnecting .conn__dot {
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+/* Header variant: a dot beside the ticker; hover for the label. */
+.conn--compact {
+  align-self: center;
+  padding: 3px;
+  cursor: default;
+}
+
+.conn--compact .conn__dot {
+  width: 7px;
+  height: 7px;
 }
 
 /* ---------- Motion ---------- */

@@ -254,12 +254,6 @@ describe('BinanceProvider.getCandles', () => {
 })
 
 describe('BinanceProvider stubs', () => {
-  it('subscribeCandles is not implemented until Phase 2', () => {
-    expect(() => new BinanceProvider().subscribeCandles('BTCUSDT', '1m', () => {})).toThrow(
-      /Phase 2/,
-    )
-  })
-
   it('getSymbols rejects until Phase 3', async () => {
     await expect(new BinanceProvider().getSymbols()).rejects.toThrow(/Phase 3/)
   })

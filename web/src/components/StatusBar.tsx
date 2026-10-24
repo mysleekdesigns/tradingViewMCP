@@ -1,11 +1,17 @@
+import type { ConnectionStatus } from '../types'
+import { ConnectionIndicator } from './ConnectionStatus'
+
 interface StatusBarProps {
   barCount: number | null
-  loadedAt: string | null
-  /** Why the last refresh failed, while the previous snapshot is still shown. */
+  /** Live-stream state. */
+  status: ConnectionStatus
+  /** "14:08:31" (UTC) of the last REST result or live tick, or null before any data. */
+  lastUpdate: string | null
+  /** Why the last refresh failed, while the previous candles are still shown. */
   refreshError: string | null
 }
 
-export function StatusBar({ barCount, loadedAt, refreshError }: StatusBarProps) {
+export function StatusBar({ barCount, status, lastUpdate, refreshError }: StatusBarProps) {
   return (
     <footer className="statusbar">
       <span className="statusbar__item">Times in UTC</span>
@@ -15,11 +21,13 @@ export function StatusBar({ barCount, loadedAt, refreshError }: StatusBarProps) 
       <span className="statusbar__item statusbar__item--error" role="status">
         {refreshError !== null ? `Refresh failed: ${refreshError}` : ''}
       </span>
-      {loadedAt !== null && (
-        <span className="statusbar__item" title="Data is a snapshot; press Refresh for newer bars">
-          Snapshot loaded {loadedAt} UTC
+      {/* Not a live region: it changes on every tick. */}
+      {lastUpdate !== null && (
+        <span className="statusbar__item statusbar__clock" title="Time of the last price update">
+          Last update {lastUpdate} UTC
         </span>
       )}
+      <ConnectionIndicator status={status} variant="full" />
     </footer>
   )
 }

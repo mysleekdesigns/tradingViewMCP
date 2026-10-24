@@ -1,4 +1,9 @@
-import type { Candle, Interval, SymbolInfo } from '../types'
+import type { Candle, ConnectionStatus, Interval, SymbolInfo } from '../types'
+
+export interface SubscribeOptions {
+  /** Connection state changes. Never called after unsubscribe. */
+  onStatus?: (status: ConnectionStatus) => void
+}
 
 /**
  * Source of public market data. Every exchange-specific detail (hosts, symbol
@@ -17,11 +22,18 @@ export interface MarketDataProvider {
     endTime?: number,
     opts?: { signal?: AbortSignal },
   ): Promise<Candle[]>
-  /** Live candle updates; `closed` is true once the bar is final. Returns an unsubscribe function. */
+  /**
+   * Live candle updates; `closed` is true once the bar is final. The provider
+   * reconnects by itself (with backoff) and reports state through
+   * `opts.onStatus`; after a 'live' that follows 'reconnecting'/'offline' the
+   * caller should re-fetch recent candles via `getCandles` to fill the gap.
+   * Returns an unsubscribe function that tears everything down (idempotent).
+   */
   subscribeCandles(
     symbol: string,
     interval: Interval,
     onCandle: (c: Candle, closed: boolean) => void,
+    opts?: SubscribeOptions,
   ): () => void
   getSymbols(): Promise<SymbolInfo[]>
 }

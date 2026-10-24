@@ -1,4 +1,5 @@
-import type { Interval } from '../types'
+import type { ConnectionStatus, Interval } from '../types'
+import { ConnectionIndicator } from './ConnectionStatus'
 import type { Quote } from './quote'
 
 interface HeaderProps {
@@ -8,6 +9,8 @@ interface HeaderProps {
   interval: Interval
   source: string
   quote: Quote | null
+  /** Live-stream state, shown as a small dot beside the ticker. */
+  status: ConnectionStatus
   loading: boolean
   onRefresh: () => void
   refreshDisabled: boolean
@@ -19,6 +22,7 @@ export function Header({
   interval,
   source,
   quote,
+  status,
   loading,
   onRefresh,
   refreshDisabled,
@@ -33,6 +37,7 @@ export function Header({
 
       <div className="topbar__symbol">
         <span className="topbar__ticker">{symbol}</span>
+        <ConnectionIndicator status={status} variant="compact" />
         <span className="topbar__desc">{description}</span>
       </div>
 
@@ -70,7 +75,7 @@ export function Header({
         // aria-disabled instead of disabled keeps keyboard focus on the button while loading.
         onClick={refreshDisabled || loading ? undefined : onRefresh}
         aria-disabled={refreshDisabled || loading}
-        title="Reload the latest candles"
+        title="Reload recent candles and fill any gap"
       >
         <RefreshIcon spinning={loading} />
         <span>Refresh</span>

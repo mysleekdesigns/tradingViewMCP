@@ -17,3 +17,6 @@ export interface SymbolInfo {
   status: string
   tickSize: number
 }
+
+/** Live-stream connection state reported by `subscribeCandles`. */
+export type ConnectionStatus = 'connecting' | 'live' | 'reconnecting' | 'offline'

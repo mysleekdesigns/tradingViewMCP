@@ -2,6 +2,7 @@ import {
   ColorType,
   CrosshairMode,
   LineStyle,
+  PriceLineSource,
   type CandlestickSeriesPartialOptions,
   type DeepPartial,
   type HistogramSeriesPartialOptions,
@@ -75,6 +76,13 @@ export const candlestickOptions: CandlestickSeriesPartialOptions = {
   borderVisible: false,
   wickUpColor: colors.up,
   wickDownColor: colors.down,
+  // Live price: label on the price scale plus a dotted line across the pane, as on TradingView.
+  // An empty priceLineColor (the default) colours both by the last bar's direction.
+  lastValueVisible: true,
+  priceLineVisible: true,
+  priceLineSource: PriceLineSource.LastBar,
+  priceLineStyle: LineStyle.Dotted,
+  priceLineWidth: 1,
 }
 
 /** Volume sits on its own overlay price scale (id ''), pinned to the bottom 20% of the pane. */

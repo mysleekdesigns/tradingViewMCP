@@ -318,10 +318,10 @@ tradingView/
 5. Reconnect with exponential backoff on `close`/`error`; after reconnecting, re-fetch recent candles via REST to fill any gap.
 
 ### Checklist
-- [ ] WebSocket subscription per symbol/interval
+- [x] WebSocket subscription per symbol/interval
 - [ ] Live `series.update()` for candles and volume
 - [ ] Unsubscribe on symbol/interval change (no leaked sockets)
-- [ ] Auto-reconnect with backoff + gap fill
+- [x] Auto-reconnect with backoff + gap fill
 - [ ] Connection status indicator (live / reconnecting / offline)
 - [ ] Live price line + last price label on the price scale
 

@@ -23,10 +23,14 @@ import {
   watermarkOptions,
   webFonts,
 } from './theme'
+import { planSeriesSync, toCandlestickPoint, toVolumePoint } from './seriesSync'
 import { toCandlestickData, toVolumeData } from './volume'
 
+const volumePalette = { up: colors.volumeUp, down: colors.volumeDown }
+
 interface ChartProps {
-  candles: Candle[]
+  /** Ascending, unique times. The last bar may still be forming and changes on live ticks. */
+  candles: readonly Candle[]
   symbol: string
   interval: Interval
   /** Data source shown in the legend, e.g. "Binance.US". */
@@ -38,6 +42,8 @@ export function Chart({ candles, symbol, interval, source }: ChartProps) {
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const watermarkRef = useRef<ITextWatermarkPluginApi<Time> | null>(null)
+  /** Candles currently in the series; lets live ticks use update() instead of setData(). */
+  const appliedRef = useRef<readonly Candle[] | null>(null)
   const [hoveredTime, setHoveredTime] = useState<number | undefined>(undefined)
   const [fontsReady, setFontsReady] = useState(false)
 
@@ -87,6 +93,7 @@ export function Chart({ candles, symbol, interval, source }: ChartProps) {
       candleSeriesRef.current = null
       volumeSeriesRef.current = null
       watermarkRef.current = null
+      appliedRef.current = null
     }
   }, [])
 
@@ -98,12 +105,23 @@ export function Chart({ candles, symbol, interval, source }: ChartProps) {
   }, [symbol, interval, fontsReady])
 
   // Push data whenever the candles change. Runs after the creation effect on mount.
+  // Live ticks only touch the tail, so they go through update(), which keeps the user's
+  // scroll and zoom; anything else (first load, replaced history) uses setData().
   useEffect(() => {
     const candleSeries = candleSeriesRef.current
     const volumeSeries = volumeSeriesRef.current
     if (!candleSeries || !volumeSeries) return
-    candleSeries.setData(toCandlestickData(candles))
-    volumeSeries.setData(toVolumeData(candles, { up: colors.volumeUp, down: colors.volumeDown }))
+    const plan = planSeriesSync(appliedRef.current, candles)
+    if (plan.kind === 'set') {
+      candleSeries.setData(toCandlestickData(candles))
+      volumeSeries.setData(toVolumeData(candles, volumePalette))
+    } else if (plan.kind === 'update') {
+      for (let i = plan.from; i < candles.length; i++) {
+        candleSeries.update(toCandlestickPoint(candles[i]))
+        volumeSeries.update(toVolumePoint(candles[i], volumePalette))
+      }
+    }
+    appliedRef.current = candles
   }, [candles])
 
   const legend = useMemo(
