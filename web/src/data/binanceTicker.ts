@@ -132,10 +132,13 @@ export function parseMiniTickerMessage(data: unknown): Ticker[] {
 /**
  * One `exchangeInfo.symbols[]` entry. Requires non-empty `symbol`, `baseAsset`,
  * `quoteAsset`, `status` strings and a `PRICE_FILTER` with a finite `tickSize >= 0`
- * (Binance uses 0 to mean "no tick rule"). Anything else is null (skipped).
+ * (Binance uses 0 to mean "no tick rule"). Entries with `isSpotTradingAllowed: false`
+ * (Binance global leveraged tokens such as BTCUPUSDT) are not spot pairs. Anything else is
+ * null (skipped).
  */
 export function parseSymbolInfo(raw: unknown): SymbolInfo | null {
   if (!isRecord(raw)) return null
+  if (raw.isSpotTradingAllowed === false) return null
   const { symbol, baseAsset, quoteAsset, status, filters } = raw
   if (
     !nonEmptyString(symbol) ||

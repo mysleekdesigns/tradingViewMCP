@@ -1,7 +1,5 @@
 import type { Candle, ConnectionStatus } from '../types'
 
-export const BINANCE_US_WS = 'wss://stream.binance.us:9443'
-
 const BACKOFF_BASE_MS = 1_000
 const BACKOFF_CAP_MS = 30_000
 /** Reconnect if no WS message arrives for this long (silent drops). */

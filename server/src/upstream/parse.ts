@@ -64,10 +64,12 @@ export function parseKlines(body: unknown): Candle[] {
 
 /**
  * One `exchangeInfo.symbols[]` entry. Requires non-empty symbol/baseAsset/quoteAsset/status and a
- * PRICE_FILTER with finite tickSize >= 0. Anything else → null (skipped).
+ * PRICE_FILTER with finite tickSize >= 0. Entries with `isSpotTradingAllowed: false` (Binance
+ * global leveraged tokens such as BTCUPUSDT) are not spot pairs. Anything else → null (skipped).
  */
 export function parseSymbolInfo(raw: unknown): SymbolInfo | null {
   if (!isRecord(raw)) return null
+  if (raw.isSpotTradingAllowed === false) return null
   const { symbol, baseAsset, quoteAsset, status, filters } = raw
   if (
     !nonEmptyString(symbol) ||

@@ -40,7 +40,12 @@ describe('app', () => {
   it('GET /api/health answers ok with a working db', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/health' })
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ ok: true, db: true, upstreamSockets: 0 })
+    expect(res.json()).toEqual({
+      ok: true,
+      db: true,
+      upstreamSockets: 0,
+      venue: { id: 'binance', name: 'Binance' },
+    })
   })
 
   it('reports db false when the database is unusable', async () => {

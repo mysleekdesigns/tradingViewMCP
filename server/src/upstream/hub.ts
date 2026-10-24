@@ -1,4 +1,4 @@
-// Upstream WebSocket manager: one Binance(.US) socket per stream key, shared by every
+// Upstream WebSocket manager: one Binance socket per stream key, shared by every
 // listener (browser client), reconnecting with jittered exponential backoff and stale
 // detection. See server/README.md "WebSocket fan-out".
 
@@ -19,7 +19,7 @@ export type HubListener = (event: HubEvent) => void
 
 export interface HubOptions {
   WebSocketImpl: typeof WebSocket
-  /** e.g. `wss://stream.binance.us:9443` (no trailing `/ws`). */
+  /** e.g. `wss://data-stream.binance.vision` (no trailing `/ws`). */
   wsBase: string
   /** `upstreamSockets` is kept equal to the number of upstream sockets currently held. */
   stats: { upstreamSockets: number }
@@ -27,8 +27,9 @@ export interface HubOptions {
   staleTimeoutMs?: number
   /**
    * After this much silence on an open socket, send a `LIST_SUBSCRIPTIONS` request (repeated
-   * while silent); its reply counts as a message. Binance.US kline streams only push on trades,
-   * which can be minutes apart, so without this a healthy quiet stream would go stale. Default 25 s.
+   * while silent); its reply counts as a message. Kline streams can go quiet (Binance.US pushes
+   * only on trades, minutes apart; Binance global pushes every ~2 s but a halted pair is silent),
+   * so without this a healthy quiet stream would go stale. Both hosts answer it. Default 25 s.
    */
   probeAfterMs?: number
   /** Random source in [0, 1) for backoff jitter. Default `Math.random`. */
@@ -233,7 +234,7 @@ export function createHub(opts: HubOptions): Hub {
     entry.receivedOnSocket = false
     syncStats()
     // The stream is subscribed by URL, so an open socket is live even before the first push
-    // (a quiet Binance.US pair can go minutes without a trade).
+    // (a quiet or halted pair can go minutes without a push).
     sock.onopen = () => {
       if (closed || entry.ws !== sock) return
       setStatus(entry, 'live')

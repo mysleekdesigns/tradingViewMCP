@@ -3,6 +3,7 @@
 
 import { INTERVAL_SECONDS } from '../chart/drawings/timeIndex'
 import { LAB_OFFLINE_MESSAGE, LabError } from '../data/labApi'
+import { ARCHIVE_VENUE_ID } from '../data/venue'
 import type {
   BacktestReport,
   LabFeature,
@@ -486,9 +487,22 @@ export function walkForwardHeading(report: Pick<BacktestReport, 'walk_forward_ki
   return { title: 'Walk-forward (out-of-sample folds)', hint: null }
 }
 
-/** Backtests and the chart use different venues; one line for the panel. */
+/** Chart on Binance global (the archive's venue): one line for the panel. */
 export const VENUE_NOTE =
-  'Backtests use Binance global archive data (data.binance.vision); the chart shows Binance.US, so prices can differ slightly and early-2019 trades may predate the chart’s history.'
+  'Chart and backtests use the same Binance spot data: backtests read the verified data.binance.vision archive, the chart reads Binance’s live market data.'
+
+/**
+ * The "Data" line under the report. Same-data wording only when the chart's venue is the
+ * archive's (Binance global); another venue gets an honest "differs" line; unknown (server not
+ * answered yet) states only where backtests come from.
+ */
+export function venueNote(chartVenue: { id: string; name: string } | null): string {
+  if (chartVenue === null) {
+    return 'Backtests read the verified Binance global spot archive (data.binance.vision).'
+  }
+  if (chartVenue.id === ARCHIVE_VENUE_ID) return VENUE_NOTE
+  return `The chart venue (${chartVenue.name}) differs from the backtest archive (Binance global spot, data.binance.vision), so prices and trade times on the chart can differ from the backtest.`
+}
 
 /** "Fee 0.10% · Slippage 0.05% (+50% × bar range) per side". */
 export function costsText(costs: BacktestReport['costs']): string {
@@ -896,6 +910,97 @@ export function historyLoadFailed(
   return (
     state.failed !== null && state.failed.symbol === symbol && state.failed.interval === interval
   )
+}
+
+// ---- Automatic history load + zoom after a backtest ----
+
+/** One report on one market: the unit the automatic load runs at most once for. */
+export function autoHistoryKey(
+  report: Pick<BacktestReport, 'run_id' | 'trial_id' | 'symbol' | 'interval'>,
+): string {
+  return `${report.run_id}#${report.trial_id}@${report.symbol}:${report.interval}`
+}
+
+export interface AutoHistoryState {
+  /** The report+market last handled; null before the first. */
+  key: string | null
+  /**
+   * 'starting' = the automatic load for `key` was asked for and has not been seen running yet;
+   * 'loading' = it is running; 'done' = nothing left to do for `key`.
+   */
+  phase: 'starting' | 'loading' | 'done'
+}
+
+export const initialAutoHistory: AutoHistoryState = { key: null, phase: 'done' }
+
+export interface AutoHistoryInput {
+  /** `autoHistoryKey` of the drawn report, null when no report is drawn on its market. */
+  key: string | null
+  /** History plan for the drawn report (null while there are no bars). */
+  plan: HistoryPlan | null
+  /** A history load is running for this market. */
+  loading: boolean
+  /** The last history load for this market gave up. */
+  failed: boolean
+  /** The exchange has no older bars. */
+  exhausted: boolean
+}
+
+export type AutoHistoryCommand = 'none' | 'start' | 'zoom'
+
+/** As much of the window as the chart can hold is loaded. */
+function historyComplete(plan: HistoryPlan, exhausted: boolean): boolean {
+  return !plan.needed || exhausted || (plan.partial && plan.bars === 0)
+}
+
+/**
+ * Drives the automatic "load history, then zoom to the trades" once per report and market.
+ *  - A new key: an unreachable window does nothing (the bar explains it); a needed load starts
+ *    ('start'); otherwise the chart already holds the window and zooms ('zoom').
+ *  - While its load runs: nothing. When the load ends: 'zoom' if the window start (or the bar
+ *    limit, or the exchange's first bar) was reached; nothing if the user stopped it or it failed.
+ *  - The same key never starts again, so stopping, scrolling away, or revisiting the market
+ *    leaves the chart alone. Respecting cooldowns, Retry-After, and offline is the history
+ *    load's own job.
+ */
+export function autoHistoryStep(
+  state: AutoHistoryState,
+  input: AutoHistoryInput,
+): { state: AutoHistoryState; command: AutoHistoryCommand } {
+  const { key, plan } = input
+  if (key === null || plan === null) return { state, command: 'none' }
+  if (state.key !== key) {
+    if (plan.unreachable) return { state: { key, phase: 'done' }, command: 'none' }
+    if (plan.needed && !input.exhausted) {
+      return { state: { key, phase: 'starting' }, command: 'start' }
+    }
+    return { state: { key, phase: 'done' }, command: 'zoom' }
+  }
+  if (state.phase === 'starting') {
+    // Wait until the load is seen running, so a stale read right after 'start' cannot end it.
+    return input.loading
+      ? { state: { key, phase: 'loading' }, command: 'none' }
+      : { state, command: 'none' }
+  }
+  if (state.phase !== 'loading' || input.loading) return { state, command: 'none' }
+  const done: AutoHistoryState = { key, phase: 'done' }
+  if (!input.failed && historyComplete(plan, input.exhausted))
+    return { state: done, command: 'zoom' }
+  return { state: done, command: 'none' }
+}
+
+/** "Trades are in 2019-01-01 → 2025-10-01 · loading history… 12 of 137 trades on chart". */
+export function historyLoadingText(
+  window: { start: number; end: number },
+  onChart: number,
+  total: number,
+): string {
+  return `Trades are in ${fmtDate(window.start)} → ${fmtDate(window.end)} · loading history… ${fmtInt(onChart)} of ${fmtInt(total)} trades on chart`
+}
+
+/** Why nothing is loaded for an unreachable window, with what to do instead. */
+export function unreachableText(windowEnd: number): string {
+  return `The design window ends ${fmtDate(windowEnd)}; at this interval it lies beyond the ${fmtInt(MAX_HISTORY_BARS)}-bar chart limit. Use 1h, 4h or 1d to see the trade markers.`
 }
 
 /** Zoom range for one trade, with context on both sides (open trades run to `windowEnd`). */

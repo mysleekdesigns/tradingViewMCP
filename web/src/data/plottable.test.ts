@@ -15,7 +15,7 @@ function traded(time: number, close: number, volume = 2): Candle {
   return { time, open: close - 0.5, high: close + 1, low: close - 1, close, volume }
 }
 
-/** What Binance.US returns for an interval with no trades: flat at the previous close, volume 0. */
+/** What Binance returns for an interval with no trades: flat at the previous close, volume 0. */
 function flat(time: number, price: number): Candle {
   return { time, open: price, high: price, low: price, close: price, volume: 0 }
 }
@@ -188,7 +188,7 @@ describe('indicators over the plotted series', () => {
       for (let step = 0; step < 400; step++) {
         const roll = r()
         if (forming === null || roll < 0.15) {
-          // A new bar opens with no trade yet (Binance.US sends it flat at the last price).
+          // A new bar opens with no trade yet (Binance sends it flat at the last price).
           time += M
           forming = flat(time, price)
         } else if (roll < 0.75) {

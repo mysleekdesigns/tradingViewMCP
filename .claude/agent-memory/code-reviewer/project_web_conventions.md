@@ -6,7 +6,7 @@ metadata:
 ---
 
 Confirmed conventions (Phase 1 review + UI pass, 2026-10-24):
-- Provider is Binance.US (`BINANCE_US_REST` in src/data/binance.ts); `fetchFn`/`baseUrl`/`timeoutMs` injectable. `MarketDataError` kinds include network, bad-symbol, rate-limited (429), banned (418), region-blocked, http, parse, aborted; `retryAfter` in seconds. Requests use `AbortSignal.any([caller, timeout])`; candles sorted and deduped by time.
+- Direct provider defaults to Binance vision hosts (`BINANCE_REST` in src/data/venue.ts, see [[market-venue]]); `fetchFn`/`baseUrl`/`timeoutMs` injectable. `MarketDataError` kinds include network, bad-symbol, rate-limited (429), banned (418), region-blocked, http, parse, aborted; `retryAfter` in seconds. Requests use `AbortSignal.any([caller, timeout])`; candles sorted and deduped by time.
 - Provider API takes/returns UNIX seconds; the ms/s conversion lives only in binance.ts.
 - Chart.tsx: chart created in a `[]` effect; data pushed in a `[candles]` effect via refs; watermark (`createTextWatermark`) text updated in a `[symbol, interval]` effect; cleanup unsubscribes, detaches watermark, then `chart.remove()`. StrictMode-safe.
 - App.tsx: one fetch effect keyed on `attempt` with `stale` flag + AbortController; Retry-After disables Retry/Refresh via a timer effect.

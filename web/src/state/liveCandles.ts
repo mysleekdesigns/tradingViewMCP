@@ -10,7 +10,7 @@ export type LoadState =
   | {
       kind: 'ready'
       /**
-       * Every bar the exchange returned, traded or not (Binance.US also returns flat
+       * Every bar the exchange returned, traded or not (Binance also returns flat
        * zero-volume bars for intervals without trades). The pagination cursor, gap fills, and
        * the quote use these.
        */
@@ -48,7 +48,7 @@ export interface LiveCandlesOptions {
   symbol: string
   interval: Interval
   limit: number
-  /** Data source name used in error messages, e.g. "Binance.US". */
+  /** Data source name used in error messages, e.g. "Binance". */
   source: string
   /**
    * Most bars (raw, traded or not) loadOlder grows the history to, unless called with

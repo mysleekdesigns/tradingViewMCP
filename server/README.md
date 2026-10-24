@@ -1,10 +1,13 @@
 # server/ — local backend (Phase 5)
 
 Fastify + `@fastify/websocket` + `better-sqlite3`, TypeScript, ESM. Single-user local app:
-binds to `127.0.0.1` only. Market data is public (Binance.US); no API keys anywhere.
+binds to `127.0.0.1` only. Market data is public (Binance global spot via Binance's
+market-data-only hosts); no API keys anywhere.
 
 - Port: `TV_PORT` env, default `8787`. Host is always `127.0.0.1`.
 - Database: `TV_DB_PATH` env, default `server/data/app.db` (gitignored). Tests use `:memory:`.
+- Market data venue: `TV_MARKET_VENUE` env, `binance` (default) or `binance-us`. See "Market
+  data venue" below.
 - Alerts: `TV_DESKTOP_NOTIFY` (`auto` | `always` | `off`, default `auto`) and optional
   `TV_ALERT_WEBHOOK_URL` (secret; environment only). See "Alerts" below.
 - Run: `npm run dev` (tsx watch). From the repo root, `npm run dev` starts server + web together.
@@ -16,6 +19,42 @@ binds to `127.0.0.1` only. Market data is public (Binance.US); no API keys anywh
   else, including a missing `Host`, gets `403 {"error":"http","message":"host not allowed"}`
   before routing, so a page whose domain re-resolves to 127.0.0.1 cannot read or change data.
   Use `http://localhost:…` or `http://127.0.0.1:…`, never a custom hostname.
+
+## Market data venue
+
+All upstream hosts are named once, in `src/venue.ts`:
+
+| `TV_MARKET_VENUE`   | REST                              | WebSocket                          |
+| ------------------- | --------------------------------- | ---------------------------------- |
+| `binance` (default) | `https://data-api.binance.vision` | `wss://data-stream.binance.vision` |
+| `binance-us`        | `https://api.binance.us`          | `wss://stream.binance.us:9443`     |
+
+`binance` uses Binance's documented
+[market-data-only domains](https://developers.binance.com/docs/binance-spot-api-docs/faqs/market_data_only):
+the same `/api/v3` payloads and streams as Binance.com (global spot), reachable where
+`api.binance.com` answers 451. It is the same venue as the lab's `data.binance.vision` archive.
+Binance.US was too thin to chart (most 1m bars on mid-cap pairs had no trades).
+
+- **Rate limits** (read live from `exchangeInfo.rateLimits` on 2026-10-24): `REQUEST_WEIGHT`
+  6000 per minute; the limiter keeps 20% headroom, follows `X-MBX-USED-WEIGHT-1M`, honours
+  `Retry-After` on 429 and stops calling on 418. Measured weights: klines 2, exchangeInfo 20,
+  ticker/24hr (≤ 20 symbols) 2. `exchangeInfo` is requested with `showPermissionSets=false`
+  (17.8 MB → 6.8 MB). Symbols with `isSpotTradingAllowed: false` (leveraged tokens) are
+  dropped from `/api/symbols`.
+- **Streams** follow Binance.com rules: connections close at 24 h (the hub reconnects with
+  backoff), the server pings and Node answers pongs, one stream per upstream socket.
+  `LIST_SUBSCRIPTIONS` is answered on both hosts.
+- **Cache never mixes venues.** `kv_cache` key `market_venue` records the venue the cached
+  market data came from. Once the server is listening (a start that fails, e.g. port in use,
+  never touches the cache), if the marker is absent or differs from `TV_MARKET_VENUE`, one
+  transaction deletes every row of `candles`, `candle_ranges` and `kv_cache` (symbol list),
+  then records the venue; the result is logged as `market data venue`. Watchlists, layouts,
+  drawings, alerts and alert history are kept. Same venue → the cache is kept. After a change
+  the server loads the new symbol list and logs once (warn) the active-alert and watchlist
+  symbols the new venue does not list (names only; nothing is deleted).
+- **One server per database.** Startup creates `<TV_DB_PATH>.lock` (exclusive create, holding
+  the pid) and removes it on shutdown. A second server on the same database refuses to start
+  with a message naming the running pid; a lock left by a dead process is taken over.
 
 ## Contract (shared by server and `web/src/data/server.ts`)
 
@@ -44,7 +83,9 @@ where `ErrorKind` is one of the web `MarketDataErrorKind` values:
 
 ### REST
 
-- `GET /api/health` → `200 { "ok": true, "db": true, "upstreamSockets": number }`
+- `GET /api/health` →
+  `200 { "ok": true, "db": true, "upstreamSockets": number, "venue": { "id": "binance" | "binance-us", "name": string } }`
+  (the web app labels the chart and the Strategy Tester data note from `venue`)
 - `GET /api/candles?symbol=BTCUSDT&interval=1h&limit=500[&endTime=<sec>]` → `Candle[]`
   - Same semantics as `MarketDataProvider.getCandles`: ascending, unique times, at most `limit`
     (1..1000, default 500) bars whose open time is `<= endTime` (default: now). The last row may
@@ -57,8 +98,8 @@ where `ErrorKind` is one of the web `MarketDataErrorKind` values:
     are recorded in `candle_ranges`, so gaps and pre-listing ranges are never refetched.
   - If only the fresh tail fails upstream (`rate-limited`, `banned`, `network`), the cached closed
     bars are returned without the forming bar instead of an error.
-- `GET /api/symbols` → `SymbolInfo[]` (all, unfiltered). Cached in SQLite (`kv_cache`), TTL 1 h;
-  a failed refresh serves the stale copy if one exists.
+- `GET /api/symbols` → `SymbolInfo[]` (all statuses; non-spot leveraged tokens dropped).
+  Cached in SQLite (`kv_cache`), TTL 1 h; a failed refresh serves the stale copy if one exists.
 - `GET /api/tickers?symbols=BTCUSDT,ETHUSDT` → `Ticker[]` (unknown symbols omitted; empty list →
   `[]` without an upstream call). Not cached.
 - `GET /api/watchlists/:id` → `{ "id": string, "items": string[], "updatedAt": number }` or 404.
@@ -91,9 +132,10 @@ are attached, and closes it when the last one leaves.
   (browsers cannot see protocol pings), plus a protocol ping. Clients treat no message for 60 s
   as stale.
 - Upstream `live` means the exchange socket is open (the stream is subscribed by URL), not
-  that a push has arrived: Binance.US kline streams push only on trades, which can be minutes
-  apart on liquid-looking pairs. After 25 s of upstream silence the server sends
-  `{"method":"LIST_SUBSCRIPTIONS","id":n}` (repeated while silent); its reply counts as
+  that a push has arrived: a kline stream can go quiet (Binance global pushes every ~2 s, but a
+  halted pair is silent; Binance.US pushes only on trades, minutes apart). After 25 s of
+  upstream silence the server sends `{"method":"LIST_SUBSCRIPTIONS","id":n}` (repeated while
+  silent); its reply counts as
   traffic, so a quiet but healthy socket is kept and only one that answers nothing for 60 s is
   reconnected. Backoff resets only once a message arrives.
 - When the last client leaves, the upstream socket is kept for a ~5 s grace period so a quick
@@ -181,12 +223,15 @@ gets one `triggered` per alert, but desktop and webhook get **one notification p
 ```
 server/
 ├── src/
-│   ├── index.ts            # entry: open DB, build app, listen on 127.0.0.1
+│   ├── index.ts            # entry: config, notifiers, startServer, signal handling
 │   ├── app.ts              # buildApp(deps) → FastifyInstance; owns the shared upstream hub
-│   ├── config.ts           # env parsing (port, db path, desktop notify mode, webhook URL)
+│   ├── config.ts           # env parsing (port, db path, venue, desktop notify mode, webhook URL)
+│   ├── startup.ts          # lock → open DB → listen → venue check → orphan report
+│   ├── dbLock.ts           # <db>.lock: one server per database file
+│   ├── venue.ts            # venue hosts, cache check (market_venue), orphaned symbols
 │   ├── types.ts            # Candle, SymbolInfo, Ticker, Interval, INTERVAL_SECONDS
 │   ├── db/                 # openDb(path) + numbered migrations (2 = alerts)
-│   ├── upstream/           # Binance.US REST client (rate limit + retry), upstream sockets
+│   ├── upstream/           # Binance REST client (rate limit + retry), upstream sockets
 │   ├── alerts/             # types, evaluate (pure), store (SQLite), engine, notify
 │   └── routes/             # candles, symbols, stream, persistence, alerts
 └── test/

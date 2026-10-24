@@ -101,7 +101,7 @@ function setup(limit = 3) {
       symbol: 'BTCUSDT',
       interval: '1h',
       limit,
-      source: 'Binance.US',
+      source: 'Binance',
       now: () => clock,
     },
     (s) => snapshots.push(s),
@@ -260,7 +260,7 @@ describe('LiveCandlesController', () => {
     expect(latest().load).toEqual({
       kind: 'error',
       title: 'Unknown symbol "BTCUSDT"',
-      message: 'Binance.US does not list this pair. Check the symbol and try again.',
+      message: 'Binance does not list this pair. Check the symbol and try again.',
     })
   })
 
@@ -1314,7 +1314,7 @@ describe('describeError', () => {
     [new Error('boom'), 'Could not load market data'],
   ]
   it.each(cases)('maps %s to a title', (err, title) => {
-    expect(describeError(err, 'BTCUSDT', 'Binance.US').title).toBe(title)
+    expect(describeError(err, 'BTCUSDT', 'Binance').title).toBe(title)
   })
 
   it('includes the HTTP status for unexpected responses', () => {

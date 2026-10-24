@@ -153,8 +153,8 @@ def archive_cli_hint(symbol: str, interval: str, now: pd.Timestamp | None = None
 
 
 def default_loader(cfg: LabConfig) -> CandleLoader:
-    """Parquet-only loader (the Binance.com archive). The server's SQLite cache is Binance.US
-    and is deliberately never mixed in for research."""
+    """Parquet-only loader (the verified Binance.com archive). The server's SQLite cache holds
+    live Binance bars without checksums and is deliberately never mixed in for research."""
 
     def load(symbol: str, interval: str, end: pd.Timestamp) -> pd.DataFrame:
         folder = Path(cfg.parquet_dir) / symbol / interval

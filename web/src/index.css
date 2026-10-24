@@ -650,6 +650,53 @@ body,
   pointer-events: none;
 }
 
+/* Backtest history auto-load: same spot as the hint, but interactive (Stop). */
+.history-chip {
+  position: absolute;
+  bottom: 34px;
+  left: 10px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 90px);
+  padding: 3px 4px 3px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  color: var(--text);
+  font-size: 12px;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 28%);
+}
+
+.history-chip__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-chip__stop {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.history-chip__stop:hover {
+  border-color: var(--text-muted);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.history-chip__stop:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .history-hint__spinner {
   width: 10px;
   height: 10px;

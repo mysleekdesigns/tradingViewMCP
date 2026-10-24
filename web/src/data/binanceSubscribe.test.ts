@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Candle, ConnectionStatus } from '../types'
 import { BinanceProvider } from './binance'
+import { BINANCE_US_WS } from './venue'
 
 /** Minimal stand-in for the browser WebSocket; tests drive its events. */
 class FakeWebSocket {
@@ -100,8 +101,15 @@ describe('BinanceProvider.subscribeCandles', () => {
     expect(last().url).toBe('wss://example.test:9443/ws/btcusdt@kline_1m')
   })
 
-  it('defaults to the Binance.US stream host', () => {
+  it('defaults to the Binance market-data-only stream host', () => {
     const p = new BinanceProvider({ WebSocketImpl: WS })
+    const un = p.subscribeCandles('ethusdt', '4h', () => {})
+    expect(last().url).toBe('wss://data-stream.binance.vision/ws/ethusdt@kline_4h')
+    un()
+  })
+
+  it('can still be pointed at Binance.US', () => {
+    const p = new BinanceProvider({ WebSocketImpl: WS, wsBaseUrl: BINANCE_US_WS })
     const un = p.subscribeCandles('ethusdt', '4h', () => {})
     expect(last().url).toBe('wss://stream.binance.us:9443/ws/ethusdt@kline_4h')
     un()

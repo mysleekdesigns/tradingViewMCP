@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ConnectionStatus, Ticker } from '../types'
-import { BINANCE_US_REST, BinanceProvider } from './binance'
+import { BinanceProvider } from './binance'
+import { BINANCE_REST } from './venue'
 import {
   changePct,
   normalizeSymbol,
@@ -10,7 +11,7 @@ import {
 } from './binanceTicker'
 import { MarketDataError } from './provider'
 
-// ---------- fixtures (inline, shaped like real Binance.US payloads) ----------
+// ---------- fixtures (inline, shaped like real Binance payloads) ----------
 
 function rest24hr(symbol: string, last: string, open: string, closeTime = 1792868669656) {
   return {
@@ -193,7 +194,7 @@ describe('BinanceProvider.getTickers', () => {
     const out = await new BinanceProvider({ fetchFn }).getTickers(['ethusdt', 'BTCUSDT', 'ETHUSDT'])
     expect(fetchFn).toHaveBeenCalledTimes(1)
     const url = urlOf(fetchFn, 0)
-    expect(url.origin).toBe(BINANCE_US_REST)
+    expect(url.origin).toBe(BINANCE_REST)
     expect(url.pathname).toBe('/api/v3/ticker/24hr')
     expect(url.searchParams.get('symbols')).toBe('["ETHUSDT","BTCUSDT"]')
     // Input order, numbers parsed.
@@ -374,10 +375,10 @@ describe('BinanceProvider.subscribeTickers', () => {
     return { pushes, statuses, unsubscribe }
   }
 
-  it('opens exactly one socket on !miniTicker@arr (Binance.US host by default)', () => {
+  it('opens exactly one socket on !miniTicker@arr (vision stream host by default)', () => {
     const un = new BinanceProvider({ WebSocketImpl: WS }).subscribeTickers(() => {})
     expect(FakeWebSocket.instances).toHaveLength(1)
-    expect(lastWs().url).toBe('wss://stream.binance.us:9443/ws/!miniTicker@arr')
+    expect(lastWs().url).toBe('wss://data-stream.binance.vision/ws/!miniTicker@arr')
     un()
   })
 

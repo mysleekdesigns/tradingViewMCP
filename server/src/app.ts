@@ -10,6 +10,7 @@ import streamRoutes from './routes/stream.ts'
 import symbolsRoutes from './routes/symbols.ts'
 import { ApiError } from './types.ts'
 import { createHub, type Hub } from './upstream/hub.ts'
+import { DEFAULT_VENUE_ID, VENUES, type VenueId } from './venue.ts'
 
 export interface AppDeps {
   db: Db
@@ -19,10 +20,12 @@ export interface AppDeps {
   WebSocketImpl?: typeof WebSocket
   /** Millisecond clock. Default `Date.now`. */
   now?: () => number
-  /** Default `https://api.binance.us`. */
+  /** Default `https://data-api.binance.vision` (venue `binance`). */
   restBase?: string
-  /** Default `wss://stream.binance.us:9443`. */
+  /** Default `wss://data-stream.binance.vision` (venue `binance`). */
   wsBase?: string
+  /** Venue reported by `/api/health` so the UI can name it. Default `binance`. */
+  venue?: VenueInfo
   /**
    * Alert notifiers (desktop / webhook). Default: none, so tests never spawn processes or
    * reach the network. `index.ts` builds the real ones from config.
@@ -32,6 +35,11 @@ export interface AppDeps {
   desktopNotifyMode?: DesktopNotifyMode
   /** Minimum seconds between two triggers of the same `every` alert. Default 60. */
   alertCooldownSec?: number
+}
+
+export interface VenueInfo {
+  id: VenueId
+  name: string
 }
 
 export interface AppStats {
@@ -45,8 +53,8 @@ export type RouteOptions = Required<Omit<AppDeps, 'db'>> & {
   hub: Hub
 }
 
-export const DEFAULT_REST_BASE = 'https://api.binance.us'
-export const DEFAULT_WS_BASE = 'wss://stream.binance.us:9443'
+export const DEFAULT_REST_BASE = VENUES[DEFAULT_VENUE_ID].restBase
+export const DEFAULT_WS_BASE = VENUES[DEFAULT_VENUE_ID].wsBase
 
 interface ErrorBody {
   error: string
@@ -98,6 +106,7 @@ export async function buildApp(
     alertNotifier: deps.alertNotifier ?? {},
     desktopNotifyMode: deps.desktopNotifyMode ?? 'auto',
     alertCooldownSec: deps.alertCooldownSec ?? DEFAULT_ALERT_COOLDOWN_SEC,
+    venue: deps.venue ?? { id: DEFAULT_VENUE_ID, name: VENUES[DEFAULT_VENUE_ID].name },
     stats,
     hub,
   }
@@ -155,7 +164,12 @@ export async function buildApp(
     } catch {
       db = false
     }
-    return { ok: true, db, upstreamSockets: stats.upstreamSockets }
+    return {
+      ok: true,
+      db,
+      upstreamSockets: stats.upstreamSockets,
+      venue: { id: routeOptions.venue.id, name: routeOptions.venue.name },
+    }
   })
 
   await app.register(candlesRoutes, routeOptions)

@@ -1,12 +1,13 @@
 // Which bars the chart plots.
 //
-// Binance.US returns a kline for every interval, even when no trade happened in it: such a bar
-// has volume 0 and open = high = low = close = the previous close, and draws as a flat dash.
-// TradingView builds bars from trades, so an interval without trades has no bar at all. We do
-// the same: bars with no volume are left out of everything the chart shows (price series,
-// volume, indicators, legend, drawings index, backtest overlay, bar count). The raw bars stay
-// in the controller for pagination, gap fills, and the quote. Nothing is forward-filled or
-// synthesised; times stay in UNIX seconds.
+// Binance returns a kline for every interval, even when no trade happened in it (rare on Binance
+// global, common on thin venues such as Binance.US): such a bar has volume 0 and
+// open = high = low = close = the previous close, and draws as a flat dash. TradingView builds
+// bars from trades, so an interval without trades has no bar at all. We do the same: bars with
+// no volume are left out of everything the chart shows (price series, volume, indicators,
+// legend, drawings index, backtest overlay, bar count). The raw bars stay in the controller for
+// pagination, gap fills, and the quote. Nothing is forward-filled or synthesised; times stay in
+// UNIX seconds.
 
 import type { Candle } from '../types'
 

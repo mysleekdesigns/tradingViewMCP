@@ -26,7 +26,7 @@ const free: OlderHistoryState = {
 const base = {
   symbol: 'SUIUSDT',
   interval: '1m' as const,
-  exchange: 'Binance.US',
+  exchange: 'Binance',
   raw,
   maxBars: 20_000,
   ...free,
@@ -34,7 +34,7 @@ const base = {
 
 describe('noTradesCopy', () => {
   it('names the exchange in the title', () => {
-    expect(noTradesCopy(base).title).toBe('No trades in this period on Binance.US')
+    expect(noTradesCopy(base).title).toBe('No trades in this period on Binance')
   })
 
   it('quotes the symbol, interval, bar count, and UTC span of the empty window', () => {
@@ -75,7 +75,7 @@ describe('noTradesCopy', () => {
   it('disables the button with a reason during a Retry-After window', () => {
     expect(noTradesCopy({ ...base, retryBlocked: true })).toMatchObject({
       actionDisabled: true,
-      note: 'Binance.US asked us to wait before the next request.',
+      note: 'Binance asked us to wait before the next request.',
     })
   })
 

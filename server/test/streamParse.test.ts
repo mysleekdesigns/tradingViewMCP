@@ -6,7 +6,7 @@ import {
   parseMiniTickerMessage,
 } from '../src/upstream/streamParse.ts'
 
-// Real-shaped Binance.US kline push (prices/volumes as strings, times in ms).
+// Real-shaped Binance kline push (prices/volumes as strings, times in ms).
 const kline = {
   e: 'kline',
   E: 1_700_000_123_456,

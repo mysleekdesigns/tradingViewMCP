@@ -20,6 +20,7 @@ CREATE TABLE candles (
   open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL,
   volume REAL NOT NULL, PRIMARY KEY (symbol, interval, time)
 ) WITHOUT ROWID;
+CREATE TABLE kv_cache (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
 """
 
 
@@ -30,9 +31,13 @@ def write_months(root: Path, symbol: str, interval: str, candles: pd.DataFrame) 
         chunk.to_parquet(folder / f"{period}.parquet")
 
 
-def make_db(path: Path, symbol: str, interval: str, candles: pd.DataFrame) -> None:
+def make_db(
+    path: Path, symbol: str, interval: str, candles: pd.DataFrame, venue: str | None = "binance"
+) -> None:
     conn = sqlite3.connect(path)
     conn.executescript(SERVER_SCHEMA)
+    if venue is not None:
+        conn.execute("INSERT INTO kv_cache VALUES ('market_venue', ?, 0)", (venue,))
     rows = [
         (symbol, interval, int(t.timestamp()), r.open, r.high, r.low, r.close, r.volume)
         for t, r in candles.iterrows()
@@ -140,6 +145,30 @@ def test_sqlite_is_opened_read_only(
         assert db.read_bytes() == before
     finally:
         db.chmod(0o644)
+
+
+@pytest.mark.parametrize(
+    ("venue", "named"),
+    [("binance-us", r"'binance-us'"), (None, r"no market_venue marker")],
+)
+def test_sqlite_from_another_venue_is_refused(
+    tmp_path: Path, jan_feb: pd.DataFrame, fixed_now: pd.Timestamp, venue: str | None, named: str
+) -> None:
+    db = tmp_path / "app.db"
+    make_db(db, "BTCUSDT", "4h", make_candles(3, seed=1, start="2024-03-01"), venue=venue)
+    with pytest.raises(ValueError, match=named):
+        load_candles("BTCUSDT", "4h", parquet_dir=tmp_path, sqlite_path=db)
+
+
+def test_sqlite_without_kv_cache_table_is_refused(
+    tmp_path: Path, jan_feb: pd.DataFrame, fixed_now: pd.Timestamp
+) -> None:
+    db = tmp_path / "app.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(SERVER_SCHEMA.split("CREATE TABLE kv_cache")[0])
+    conn.close()
+    with pytest.raises(ValueError, match="no market_venue marker"):
+        load_candles("BTCUSDT", "4h", parquet_dir=tmp_path, sqlite_path=db)
 
 
 def test_sqlite_missing_file_raises(tmp_path: Path, jan_feb: pd.DataFrame) -> None:

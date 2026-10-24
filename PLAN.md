@@ -258,7 +258,7 @@ tradingView/
 - [x] `cd web && npm install && npm install lightweight-charts`
 - [x] Run `npm run dev` and confirm the page loads at `http://localhost:5173`
 - [x] Add ESLint/Prettier (optional but recommended)
-- [x] Decide data provider based on region (Binance / Binance.US / Coinbase) — **Decided 2026-10-24: Binance.US** (`api.binance.us`, `wss://stream.binance.us:9443`); `api.binance.com` returns HTTP 451 from the owner's IP.
+- [x] Decide data provider based on region (Binance / Binance.US / Coinbase) — **Decided 2026-10-24: Binance.US** (`api.binance.us`, `wss://stream.binance.us:9443`); `api.binance.com` returns HTTP 451 from the owner's IP. **Changed 2026-10-24 (Phase 7):** Binance's market-data-only hosts (`data-api.binance.vision`, `wss://data-stream.binance.vision`), because Binance.US was too thin to chart (SUIUSDT 1m: 419/500 bars with no trades) and the lab's archive is Binance global; `TV_MARKET_VENUE=binance-us` switches back.
 
 **Done when:** blank React page runs locally.
 

@@ -12,6 +12,7 @@ import {
   type ReactNode,
 } from 'react'
 import { DEFAULT_DISCLAIMER, LEDGER_PAGE_SIZE, type LabClient } from '../data/labApi'
+import type { VenueInfo } from '../data/venue'
 import type {
   BacktestReport,
   LabFeature,
@@ -41,6 +42,7 @@ import {
   fmtRatio,
   fmtSignedPct,
   formatMetric,
+  historyLoadingText,
   metricsTable,
   pageInfo,
   pageOffset,
@@ -55,7 +57,8 @@ import {
   templateIntervalNote,
   tradeFocusable,
   tradeFocusRange,
-  VENUE_NOTE,
+  unreachableText,
+  venueNote,
   walkForwardHeading,
   walkForwardRows,
   type HistoryPlan,
@@ -102,6 +105,8 @@ export interface BacktestPanelProps {
   height: number
   onResize(height: number): void
   formatPrice(symbol: string, price: number): string
+  /** The chart's market-data venue; null until the server reports it. */
+  chartVenue: VenueInfo | null
 }
 
 type Tab = 'overview' | 'robustness' | 'trades' | 'ledger'
@@ -130,6 +135,7 @@ export const BacktestPanel = memo(function BacktestPanel(props: BacktestPanelPro
     height,
     onResize,
     formatPrice,
+    chartVenue,
   } = props
   const ids = useId()
   const [tab, setTab] = useState<Tab>('overview')
@@ -332,7 +338,7 @@ export const BacktestPanel = memo(function BacktestPanel(props: BacktestPanelPro
           ) : (
             <>
               <ReportBar report={report} {...props} />
-              {tab === 'overview' && <OverviewTab report={report} />}
+              {tab === 'overview' && <OverviewTab report={report} chartVenue={chartVenue} />}
               {tab === 'robustness' && <RobustnessTab report={report} />}
               {tab === 'trades' && (
                 <TradesTab
@@ -779,14 +785,27 @@ function ReportBar({
                   className="tester__chart-note tester__chart-note--muted tester__chart-note--wrap"
                   title="Older bars at this interval would exceed what the chart can hold. A higher interval shows the whole window."
                 >
-                  The design window ends {fmtDate(report.window.end)}; at this interval it lies
-                  beyond the {fmtInt(MAX_HISTORY_BARS)}-bar chart limit
+                  {unreachableText(report.window.end)}
                 </span>
               ) : link.historyLoading ? (
-                <button type="button" className="tester__btn" onClick={onStopHistory}>
-                  <span className="tester__spinner tester__spinner--small" aria-hidden="true" />
-                  Loading history… ~{fmtInt(h.bars)} bars left
-                </button>
+                <>
+                  <span
+                    className="tester__chart-note tester__chart-note--wrap"
+                    role="status"
+                    title={`About ${fmtInt(h.bars)} older bars left to load`}
+                  >
+                    <span className="tester__spinner tester__spinner--small" aria-hidden="true" />
+                    {historyLoadingText(report.window, link.tradesOnChart, report.trades.length)}
+                  </span>
+                  <button
+                    type="button"
+                    className="tester__btn"
+                    title="Stop loading older bars"
+                    onClick={onStopHistory}
+                  >
+                    Stop
+                  </button>
+                </>
               ) : link.historyFailed ? (
                 <>
                   <span className="tester__chart-note tester__chart-note--warn" role="status">
@@ -868,7 +887,13 @@ function ReportBar({
 // Overview
 // ---------------------------------------------------------------------------------------------
 
-const OverviewTab = memo(function OverviewTab({ report }: { report: BacktestReport }) {
+const OverviewTab = memo(function OverviewTab({
+  report,
+  chartVenue,
+}: {
+  report: BacktestReport
+  chartVenue: VenueInfo | null
+}) {
   const tiles = summaryTiles(report)
   const rows = metricsTable(report)
   return (
@@ -943,7 +968,7 @@ const OverviewTab = memo(function OverviewTab({ report }: { report: BacktestRepo
         <span className="tester__costs-label">Costs used</span> {costsText(report.costs)}
       </p>
       <p className="tester__costs">
-        <span className="tester__costs-label">Data</span> {VENUE_NOTE}
+        <span className="tester__costs-label">Data</span> {venueNote(chartVenue)}
       </p>
     </div>
   )

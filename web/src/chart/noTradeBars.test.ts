@@ -1,4 +1,4 @@
-// Chart behaviour when bars without trades are not plotted (thin Binance.US pairs).
+// Chart behaviour when bars without trades are not plotted (thin or halted pairs).
 
 import type { SeriesMarker, UTCTimestamp } from 'lightweight-charts'
 import { describe, expect, it } from 'vitest'

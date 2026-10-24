@@ -652,9 +652,10 @@ describe('walkForwardHeading', () => {
 })
 
 describe('venue note', () => {
-  it('names both data sources', () => {
+  it('says chart and backtests share the Binance spot data', () => {
     expect(VENUE_NOTE).toContain('data.binance.vision')
-    expect(VENUE_NOTE).toContain('Binance.US')
+    expect(VENUE_NOTE).toContain('same Binance spot data')
+    expect(VENUE_NOTE).not.toContain('Binance.US')
   })
 })
 

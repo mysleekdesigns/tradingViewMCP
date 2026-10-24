@@ -198,6 +198,39 @@ export function tradesOnChart(trades: readonly LabTrade[], firstBar: number | nu
   return trades.filter((t) => t.entry_time >= firstBar).length
 }
 
+/** Most bars the automatic zoom after a backtest shows: readable candles, like TradingView. */
+export const TRADES_ZOOM_MAX_BARS = 300
+/** Bars of context on each side of the trades. */
+const TRADES_ZOOM_PAD_BARS = 5
+
+/**
+ * Where the chart zooms once a backtest's history is loaded: the trades, ending at the most
+ * recent one (as TradingView's strategy tester does). All trades when they span at most
+ * `maxBars` bars, else the last `maxBars` bars up to the last trade's exit (an open trade runs
+ * to the window end), with a few bars of padding. No trades: the last `maxBars` bars of the
+ * window. `step` is the interval in seconds. The chart clamps the range to its loaded bars.
+ */
+export function tradesZoomRange(
+  trades: readonly Pick<LabTrade, 'entry_time' | 'exit_time'>[],
+  window: { start: number; end: number },
+  step: number,
+  maxBars = TRADES_ZOOM_MAX_BARS,
+): { from: number; to: number } {
+  const span = Math.max(1, maxBars) * step
+  if (trades.length === 0) {
+    return { from: Math.max(window.start, window.end - span), to: window.end }
+  }
+  let first = Infinity
+  let last = -Infinity
+  for (const t of trades) {
+    first = Math.min(first, t.entry_time)
+    last = Math.max(last, t.exit_time ?? window.end, t.entry_time)
+  }
+  const pad = TRADES_ZOOM_PAD_BARS * step
+  const to = last + pad
+  return { from: Math.max(first - pad, to - span), to }
+}
+
 export type FocusPlan =
   | { kind: 'apply'; from: number; to: number }
   /** The whole range is older than the first loaded bar (load more history first). */

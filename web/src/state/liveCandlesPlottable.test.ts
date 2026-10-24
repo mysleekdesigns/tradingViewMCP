@@ -1,4 +1,4 @@
-// LiveCandlesController with bars that had no trades (Binance.US returns a flat, zero-volume
+// LiveCandlesController with bars that had no trades (Binance returns a flat, zero-volume
 // kline for every interval without trades). `load.candles` keeps every raw bar; `load.bars`
 // is what the chart plots.
 
@@ -79,7 +79,7 @@ async function ready(initial: Candle[], maxBars?: number) {
       symbol: 'SUIUSDT',
       interval: '1m',
       limit: 3,
-      source: 'Binance.US',
+      source: 'Binance',
       maxBars,
       now: () => 1,
     },

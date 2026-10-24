@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { BINANCE_US_REST, BinanceProvider, parseKline } from './binance'
+import { BinanceProvider, parseKline } from './binance'
+import { BINANCE_US_REST } from './venue'
 import { MarketDataError } from './provider'
 
 // Inline fixture: two real-shaped Binance kline rows (strings for prices, ms times),
@@ -93,11 +94,17 @@ describe('parseKline', () => {
 })
 
 describe('BinanceProvider.getCandles', () => {
-  it('builds the klines URL against Binance.US by default with an uppercased symbol', async () => {
+  it('can still be pointed at Binance.US', async () => {
+    const fetchFn = fakeFetch(async () => jsonResponse([ROW_A]))
+    await new BinanceProvider({ fetchFn, baseUrl: BINANCE_US_REST }).getCandles('BTCUSDT', '1h')
+    expect(new URL(String(fetchFn.mock.calls[0][0])).origin).toBe('https://api.binance.us')
+  })
+
+  it('builds the klines URL against the vision host by default with an uppercased symbol', async () => {
     const fetchFn = fakeFetch(async () => jsonResponse([ROW_A]))
     await new BinanceProvider({ fetchFn }).getCandles('btcusdt', '1h')
     const url = new URL(String(fetchFn.mock.calls[0][0]))
-    expect(url.origin).toBe(BINANCE_US_REST)
+    expect(url.origin).toBe('https://data-api.binance.vision')
     expect(url.pathname).toBe('/api/v3/klines')
     expect(url.searchParams.get('symbol')).toBe('BTCUSDT')
     expect(url.searchParams.get('interval')).toBe('1h')

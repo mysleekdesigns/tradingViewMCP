@@ -1,6 +1,5 @@
 import type { Candle, Interval, SymbolInfo, Ticker } from '../types'
 import {
-  BINANCE_US_WS,
   DEFAULT_STALE_TIMEOUT_MS,
   openReconnectingSocket,
   parseKlineMessage,
@@ -13,8 +12,13 @@ import {
   parseTicker24hr,
 } from './binanceTicker'
 import { MarketDataError, type MarketDataProvider, type SubscribeOptions } from './provider'
+import { BINANCE_REST, BINANCE_WS, DIRECT_VENUE, type VenueInfo } from './venue'
 
-export const BINANCE_US_REST = 'https://api.binance.us'
+/**
+ * exchangeInfo query: `showPermissionSets=false` drops the per-symbol permission matrix
+ * (17.8 MB → 6.8 MB on Binance global, 2026-10-24) without changing any field we read.
+ */
+const EXCHANGE_INFO_QUERY = 'showPermissionSets=false'
 
 const MAX_LIMIT = 1000
 const DEFAULT_TIMEOUT_MS = 10_000
@@ -122,6 +126,7 @@ export class BinanceProvider implements MarketDataProvider {
   private readonly wsBaseUrl: string
   private readonly WebSocketImpl: typeof WebSocket | undefined
   private readonly staleTimeoutMs: number
+  private readonly venue: VenueInfo
   /** Memoized exchangeInfo; cleared when the fetch fails so the next call retries. */
   private symbolsPromise: Promise<SymbolInfo[]> | null = null
 
@@ -132,12 +137,15 @@ export class BinanceProvider implements MarketDataProvider {
     wsBaseUrl?: string
     WebSocketImpl?: typeof WebSocket
     staleTimeoutMs?: number
+    /** Venue reported by getVenue; pass `{ id: 'binance-us', ... }` with the Binance.US hosts. */
+    venue?: VenueInfo
   }) {
-    this.baseUrl = (opts?.baseUrl ?? BINANCE_US_REST).replace(/\/+$/, '')
+    this.venue = opts?.venue ?? DIRECT_VENUE
+    this.baseUrl = (opts?.baseUrl ?? BINANCE_REST).replace(/\/+$/, '')
     // Bind so the global fetch is not called with a foreign `this`.
     this.fetchFn = opts?.fetchFn ?? ((input, init) => globalThis.fetch(input, init))
     this.timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    this.wsBaseUrl = (opts?.wsBaseUrl ?? BINANCE_US_WS).replace(/\/+$/, '')
+    this.wsBaseUrl = (opts?.wsBaseUrl ?? BINANCE_WS).replace(/\/+$/, '')
     this.WebSocketImpl = opts?.WebSocketImpl
     this.staleTimeoutMs = opts?.staleTimeoutMs ?? DEFAULT_STALE_TIMEOUT_MS
   }
@@ -281,6 +289,10 @@ export class BinanceProvider implements MarketDataProvider {
    * caller aborting must not cancel it for others); each caller's own signal only
    * rejects that caller's promise with 'aborted'.
    */
+  getVenue(): Promise<VenueInfo> {
+    return Promise.resolve(this.venue)
+  }
+
   getSymbols(opts?: { signal?: AbortSignal }): Promise<SymbolInfo[]> {
     if (opts?.signal?.aborted) {
       return Promise.reject(new MarketDataError('aborted', 'Request for symbols was cancelled'))
@@ -296,7 +308,11 @@ export class BinanceProvider implements MarketDataProvider {
   }
 
   private async fetchSymbols(): Promise<SymbolInfo[]> {
-    const body = await this.requestJson('/api/v3/exchangeInfo', null, 'exchange info')
+    const body = await this.requestJson(
+      '/api/v3/exchangeInfo',
+      new URLSearchParams(EXCHANGE_INFO_QUERY),
+      'exchange info',
+    )
     if (body === null || typeof body !== 'object' || Array.isArray(body)) {
       throw new MarketDataError('parse', 'Expected an exchangeInfo object')
     }
@@ -313,7 +329,7 @@ export class BinanceProvider implements MarketDataProvider {
   }
 
   /**
-   * One request: GET /api/v3/ticker/24hr?symbols=["A","B"] (Binance.US supports it). Input
+   * One request: GET /api/v3/ticker/24hr?symbols=["A","B"] (both Binance hosts support it). Input
    * is trimmed, uppercased, de-duplicated; entries that are not valid symbol syntax are
    * dropped locally. Binance fails the WHOLE request with -1121 if any symbol is unknown,
    * so on bad-symbol with more than one symbol we fall back to one `symbol=X` request per

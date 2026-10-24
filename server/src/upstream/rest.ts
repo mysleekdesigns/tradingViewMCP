@@ -1,5 +1,5 @@
-// Binance.US public REST client: request-weight limiter, in-flight cap, GET coalescing, retry,
-// and error mapping to ApiError. Public market-data endpoints only; never sends API keys.
+// Binance public REST client (data-api.binance.vision by default): request-weight limiter,
+// in-flight cap, GET coalescing, retry, and error mapping to ApiError. Public market-data endpoints only; never sends API keys.
 import type { Db } from '../db/index.ts'
 import { ApiError, type Candle, type Interval, type Ticker } from '../types.ts'
 import {
@@ -12,23 +12,34 @@ import {
 } from './parse.ts'
 
 /**
- * Binance.US REQUEST_WEIGHT limit per 1 minute. Confirmed live from
- * `GET https://api.binance.us/api/v3/exchangeInfo` → rateLimits (2026-10-24): 6000. Resynced from
- * exchangeInfo whenever the symbol list is refreshed.
+ * REQUEST_WEIGHT limit per 1 minute. Confirmed live from
+ * `GET https://data-api.binance.vision/api/v3/exchangeInfo` → rateLimits (2026-10-24): 6000
+ * (api.binance.us reported the same). Resynced from exchangeInfo whenever the symbol list is
+ * refreshed.
  */
 export const DEFAULT_WEIGHT_LIMIT_1M = 6000
 /** Stay under this share of the limit so other users of the IP (e.g. the browser) have room. */
 export const WEIGHT_SAFETY = 0.8
 /**
- * Endpoint weights, measured live on api.binance.us from `X-MBX-USED-WEIGHT-1M` deltas:
- * klines = 2 for any limit 1..1000, exchangeInfo = 20, ticker/24hr with `symbol` or a small
- * `symbols` list = 2. Larger `symbols` lists follow Binance's table (21-100 → 40, 101+ → 80).
+ * Endpoint weights, measured live on data-api.binance.vision (2026-10-24) and earlier on
+ * api.binance.us from `X-MBX-USED-WEIGHT-1M` deltas: klines = 2 for any limit 1..1000,
+ * exchangeInfo = 20, ticker/24hr with `symbol` or a small `symbols` list = 2. Larger `symbols`
+ * lists follow Binance's table (21-100 → 40, 101+ → 80).
  */
 export const WEIGHT = { klines: 2, exchangeInfo: 20 } as const
 export function tickerWeight(count: number): number {
   if (count <= 20) return 2
   if (count <= 100) return 40
   return 80
+}
+
+/**
+ * exchangeInfo query. `showPermissionSets=false` drops the per-symbol permission matrix
+ * (17.8 MB → 6.8 MB on Binance global, 2026-10-24) without changing any field we read; both
+ * Binance hosts accept it.
+ */
+export const EXCHANGE_INFO_PARAMS: Readonly<Record<string, string>> = {
+  showPermissionSets: 'false',
 }
 
 export const MAX_IN_FLIGHT = 4
@@ -336,7 +347,9 @@ export function createRestClient(opts: RestClientOptions): RestClient {
       return parseKlines(await getJson('/api/v3/klines', params, WEIGHT.klines))
     },
     async exchangeInfo() {
-      const info = parseExchangeInfo(await getJson('/api/v3/exchangeInfo', {}, WEIGHT.exchangeInfo))
+      const info = parseExchangeInfo(
+        await getJson('/api/v3/exchangeInfo', EXCHANGE_INFO_PARAMS, WEIGHT.exchangeInfo),
+      )
       if (info.weightLimit1m !== undefined) weightLimit = info.weightLimit1m
       return info
     },

@@ -7,6 +7,7 @@ import {
   type MarketDataProvider,
   type SubscribeOptions,
 } from './provider'
+import { parseVenueInfo, type VenueInfo } from './venue'
 
 /**
  * `MarketDataProvider` backed by the local server (`server/`, contract in `server/README.md`).
@@ -345,6 +346,17 @@ export class ServerProvider implements MarketDataProvider {
       })
     }
     return withAbort(this.symbolsPromise, opts?.signal, 'symbols')
+  }
+
+  /** The server's market-data venue, from `GET /api/health` → `venue`. */
+  async getVenue(opts?: { signal?: AbortSignal }): Promise<VenueInfo> {
+    const body = await this.requestJson('/api/health', null, 'server health', opts?.signal)
+    const venue =
+      body !== null && typeof body === 'object' && !Array.isArray(body)
+        ? parseVenueInfo((body as { venue?: unknown }).venue)
+        : null
+    if (venue === null) throw new MarketDataError('parse', 'Server health has no venue')
+    return venue
   }
 
   async getTickers(symbols: readonly string[], opts?: { signal?: AbortSignal }): Promise<Ticker[]> {

@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import { BINANCE_US_REST, BinanceProvider } from './binance'
+import { BinanceProvider } from './binance'
 import { parseSymbolInfo } from './binanceTicker'
 import { MarketDataError } from './provider'
+import { BINANCE_REST } from './venue'
 
-// Inline fixture shaped like a real Binance.US exchangeInfo response (trimmed).
+// Inline fixture shaped like a real Binance exchangeInfo response (trimmed).
 function symbolEntry(
   symbol: string,
   base: string,
@@ -94,13 +95,26 @@ describe('parseSymbolInfo', () => {
   ])('returns null for %s', (_label, raw) => {
     expect(parseSymbolInfo(raw)).toBeNull()
   })
+
+  it('skips non-spot entries (Binance global leveraged tokens)', () => {
+    const lev = {
+      ...symbolEntry('BTCUPUSDT', 'BTCUP', 'USDT', 'BREAK'),
+      isSpotTradingAllowed: false,
+    }
+    expect(parseSymbolInfo(lev)).toBeNull()
+    const spot = { ...symbolEntry('SUIUSDT', 'SUI', 'USDT'), isSpotTradingAllowed: true }
+    expect(parseSymbolInfo(spot)?.symbol).toBe('SUIUSDT')
+  })
 })
 
 describe('BinanceProvider.getSymbols', () => {
-  it('GETs /api/v3/exchangeInfo on Binance.US and returns all valid symbols unfiltered', async () => {
+  it('GETs /api/v3/exchangeInfo on the vision host and returns all valid symbols unfiltered', async () => {
     const fetchFn = fakeFetch(async () => jsonResponse(EXCHANGE_INFO))
     const symbols = await new BinanceProvider({ fetchFn }).getSymbols()
-    expect(String(fetchFn.mock.calls[0][0])).toBe(`${BINANCE_US_REST}/api/v3/exchangeInfo`)
+    expect(String(fetchFn.mock.calls[0][0])).toBe(
+      'https://data-api.binance.vision/api/v3/exchangeInfo?showPermissionSets=false',
+    )
+    expect(BINANCE_REST).toBe('https://data-api.binance.vision')
     expect(symbols).toEqual([
       {
         symbol: 'BTCUSDT',

@@ -141,7 +141,7 @@ interface ChartProps {
   historyStart?: number | null
   symbol: string
   interval: Interval
-  /** Data source shown in the legend, e.g. "Binance.US". */
+  /** Data source shown in the legend, e.g. "Binance · local server". */
   source: string
   /** How the main series draws. Switching replaces the main series; volume stays. */
   chartType: ChartType

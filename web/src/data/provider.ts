@@ -1,4 +1,5 @@
 import type { Candle, ConnectionStatus, Interval, SymbolInfo, Ticker } from '../types'
+import type { VenueInfo } from './venue'
 
 export interface SubscribeOptions {
   /** Connection state changes. Never called after unsubscribe. */
@@ -41,6 +42,11 @@ export interface MarketDataProvider {
    * cached, so the next call retries.
    */
   getSymbols(opts?: { signal?: AbortSignal }): Promise<SymbolInfo[]>
+  /**
+   * The venue the data comes from (e.g. `{ id: 'binance', name: 'Binance' }`), for labels.
+   * Optional: providers that cannot tell leave it out.
+   */
+  getVenue?(opts?: { signal?: AbortSignal }): Promise<VenueInfo>
   /**
    * Rolling 24h stats for the given symbols over REST, used to seed the watchlist before
    * the ticker stream delivers. Unknown symbols are omitted from the result. An empty

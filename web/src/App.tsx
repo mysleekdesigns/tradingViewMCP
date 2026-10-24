@@ -7,7 +7,8 @@ import {
   useState,
   type CSSProperties,
 } from 'react'
-import { buildChartData, tradesOnChart } from './chart/backtestOverlay'
+import { buildChartData, tradesOnChart, tradesZoomRange } from './chart/backtestOverlay'
+import { INTERVAL_SECONDS } from './chart/drawings/timeIndex'
 import { Chart } from './chart/Chart'
 import {
   DEFAULT_DRAWING_STYLE,
@@ -24,8 +25,12 @@ import { BacktestPanel, type BacktestChartLink } from './components/BacktestPane
 import {
   clampDockHeight,
   HISTORY_RETRY_MS,
+  autoHistoryKey,
+  autoHistoryStep,
   historyLoadFailed,
+  historyLoadingText,
   historyLoadReducer,
+  initialAutoHistory,
   historyPlan,
   initialHistoryLoad,
   initTesterState,
@@ -61,6 +66,7 @@ import { createDrawingsClient } from './data/drawingsApi'
 import { createLabClient } from './data/labApi'
 import type { MarketDataProvider } from './data/provider'
 import { ServerProvider } from './data/server'
+import { DIRECT_VENUE, VENUE_NAME, venueLabels, type VenueInfo } from './data/venue'
 import { getIndicatorDef } from './indicators/registry'
 import { useAlerts } from './state/alerts'
 import {
@@ -88,7 +94,8 @@ import { useSymbols } from './state/useSymbols'
 import { useWatchlist } from './state/watchlist'
 import type { ChartType, Interval } from './types'
 
-// Default: the local server (cache + fan-out). `VITE_DATA_SOURCE=direct` talks to Binance.US.
+// Default: the local server (cache + fan-out). `VITE_DATA_SOURCE=direct` talks to Binance's
+// market-data-only hosts (data-api / data-stream.binance.vision) from the browser.
 const DIRECT = import.meta.env.VITE_DATA_SOURCE === 'direct'
 const provider: MarketDataProvider = DIRECT ? new BinanceProvider() : new ServerProvider()
 // Module-level so the hooks see stable clients. Direct mode has no local server: drawings stay
@@ -98,9 +105,13 @@ const alertsClient = DIRECT ? null : createAlertsClient()
 // The Python lab (backtests + ledger) is its own service behind the `/lab` proxy, in both modes.
 const labClient = createLabClient()
 
-/** The exchange the data comes from (in both modes). */
-const EXCHANGE = 'Binance.US'
-const SOURCE = DIRECT ? EXCHANGE : `${EXCHANGE} · local server`
+/**
+ * Source name inside chart error messages. Stable for the app's lifetime, so learning the
+ * server's venue later does not restart the candle stream. Labels use `venueLabels` instead.
+ */
+const ERROR_SOURCE = DIRECT ? VENUE_NAME : 'the local server'
+/** Retry interval while the server has not reported its venue yet. */
+const VENUE_RETRY_MS = 5000
 const LIMIT = 500
 /** How long a small error notice (e.g. a failed alert delete) stays up. */
 const NOTICE_MS = 6000
@@ -214,7 +225,31 @@ function App() {
     return () => clearTimeout(t)
   }, [notice])
 
-  const live = useLiveCandles(provider, symbol, interval, LIMIT, SOURCE, MAX_HISTORY_BARS)
+  // The venue the chart's data comes from: fixed in direct mode, reported by the server else.
+  const [venue, setVenue] = useState<VenueInfo | null>(DIRECT ? DIRECT_VENUE : null)
+  useEffect(() => {
+    if (venue !== null || provider.getVenue === undefined) return
+    const ctrl = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const ask = (): void => {
+      provider.getVenue?.({ signal: ctrl.signal }).then(
+        (v) => {
+          if (!ctrl.signal.aborted) setVenue(v)
+        },
+        () => {
+          if (!ctrl.signal.aborted) timer = setTimeout(ask, VENUE_RETRY_MS)
+        },
+      )
+    }
+    ask()
+    return () => {
+      ctrl.abort()
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }, [venue])
+  const { exchange: EXCHANGE, source: SOURCE } = venueLabels(venue, DIRECT)
+
+  const live = useLiveCandles(provider, symbol, interval, LIMIT, ERROR_SOURCE, MAX_HISTORY_BARS)
   const { load } = live
   const symbolList = useSymbols(provider)
   const watchlist = useWatchlist()
@@ -453,6 +488,38 @@ function App() {
     },
     [symbol, interval],
   )
+
+  // Once per report and market: load the history back to the design window start (same path
+  // as "Load full history"), then zoom to the most recent trades. Stopping it, a failed load,
+  // or an unreachable window ends it without a zoom; the same report never starts again.
+  const autoHistoryRef = useRef(initialAutoHistory)
+  const autoKey = backtestDrawn && report !== null ? autoHistoryKey(report) : null
+  useEffect(() => {
+    const { state, command } = autoHistoryStep(autoHistoryRef.current, {
+      key: autoKey,
+      plan: history,
+      loading: historyActive,
+      failed: historyFailed,
+      exhausted: historyExhausted,
+    })
+    autoHistoryRef.current = state
+    if (command === 'start' && history !== null) {
+      dispatchHistory({ type: 'start', target: { symbol, interval, target: history.target } })
+    } else if (command === 'zoom' && report !== null) {
+      const r = tradesZoomRange(report.trades, report.window, INTERVAL_SECONDS[interval])
+      focusChartRange(r.from, r.to)
+    }
+  }, [
+    autoKey,
+    history,
+    historyActive,
+    historyFailed,
+    historyExhausted,
+    report,
+    symbol,
+    interval,
+    focusChartRange,
+  ])
 
   // The chart handled a request: drop it so a remounted chart does not replay it.
   const focusDone = useCallback((key: number, result: FocusPlan['kind']) => {
@@ -727,11 +794,25 @@ function App() {
             onDelete={() => deleteDrawing(selectedDrawing.id)}
           />
         )}
-        {load.kind === 'ready' && load.bars.length > 0 && live.loadingOlder && (
-          <div className="history-hint" role="status">
+        {historyActive && report !== null ? (
+          <div className="history-chip" role="status">
             <span className="history-hint__spinner" aria-hidden="true" />
-            Loading older bars…
+            <span className="history-chip__text">
+              {historyLoadingText(report.window, onChartCount, report.trades.length)}
+            </span>
+            <button type="button" className="history-chip__stop" onClick={stopBacktestHistory}>
+              Stop
+            </button>
           </div>
+        ) : (
+          load.kind === 'ready' &&
+          load.bars.length > 0 &&
+          live.loadingOlder && (
+            <div className="history-hint" role="status">
+              <span className="history-hint__spinner" aria-hidden="true" />
+              Loading older bars…
+            </div>
+          )
         )}
         {load.kind === 'loading' && (
           <LoadingView label={`Loading ${symbol} ${interval} from ${SOURCE}…`} />
@@ -799,6 +880,7 @@ function App() {
           height={dockHeight}
           onResize={resizeDock}
           formatPrice={formatSymbolPrice}
+          chartVenue={venue}
         />
       )}
       <SidebarRail

@@ -15,7 +15,8 @@ uv run python -m lab.data.archive BTCUSDT 4h 2018-01 2026-09   # Binance public 
 
 Data comes from `data.binance.vision` (Binance global spot), verified against the published
 SHA-256 checksums. Missing bars stay missing (never forward-filled); zero-volume bars are kept but
-marked untradeable. The server's SQLite cache holds Binance.US bars and is never mixed in.
+marked untradeable. The server's SQLite cache now holds Binance global bars from the same venue,
+but the lab still reads only the verified archive.
 
 ## Run
 

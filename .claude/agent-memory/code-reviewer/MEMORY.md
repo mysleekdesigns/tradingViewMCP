@@ -6,3 +6,4 @@
 - [Phase 6 drawings/alerts](project_web_phase6_drawings_alerts.md) — controller/LWC event policy, lifecycle order confirmed; main gaps fixed; open: Escape gated off after rail-button focus
 - [Phase 7 Strategy Tester](project_web_phase7_tester.md) — labApi contract, overlay pane lifecycle confirmed; open: history-load stall, intraday cap, focus reapply, per-tick rerender
 - [No-trade bars](project_web_no_trade_bars.md) — raw `candles` vs plotted `bars` split, which consumer uses which; open: sparse-pair paging, empty-view clicks
+- [Market venue](project_market_venue.md) — TV_MARKET_VENUE binance|binance-us, live-verified limits/sizes; open: web label fixed, pre-listen clear

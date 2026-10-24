@@ -3,7 +3,9 @@
 The Phase 5 server keeps CLOSED bars in ``server/data/app.db`` table
 ``candles(symbol, interval, time, open, high, low, close, volume)`` with ``time`` = bar open time
 in UNIX seconds. It is opened read-only; only bars newer than the last Parquet bar are appended,
-so the archive always wins on overlap. Missing bars stay absent (never forward-filled).
+so the archive always wins on overlap. Missing bars stay absent (never forward-filled). The cache
+is used only when its ``kv_cache.market_venue`` marker says ``binance`` (Binance global spot, the
+archive's venue); any other or missing venue is refused rather than mixed in.
 """
 
 from __future__ import annotations
@@ -19,6 +21,25 @@ from lab.data.archive import _utc_now
 from lab.types import CANDLE_COLUMNS, interval_seconds, validate_candles
 
 _MONTH_FILE_RE = re.compile(r"^(\d{4})-(\d{2})\.parquet$")
+
+#: The only server-cache venue that matches the data.binance.vision archive (Binance global spot).
+ARCHIVE_VENUE = "binance"
+_VENUE_SQL = "SELECT value FROM kv_cache WHERE key = 'market_venue'"
+
+
+def _check_venue(conn: sqlite3.Connection, path: Path) -> None:
+    """Raise ``ValueError`` unless the server cache is marked as Binance global spot."""
+    try:
+        row = conn.execute(_VENUE_SQL).fetchone()
+    except sqlite3.Error:
+        row = None
+    venue = None if row is None else str(row[0])
+    if venue != ARCHIVE_VENUE:
+        found = "no market_venue marker" if venue is None else f"market_venue {venue!r}"
+        raise ValueError(
+            f"server cache {str(path)!r} has {found}, not {ARCHIVE_VENUE!r} (Binance global "
+            "spot, the archive's venue); refusing to mix its bars with the archive"
+        )
 
 
 def _as_utc(ts: pd.Timestamp | None, name: str) -> pd.Timestamp | None:
@@ -68,6 +89,7 @@ def _read_sqlite(
     uri = f"{path.resolve().as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     try:
+        _check_venue(conn, path)
         rows = conn.execute(sql, params).fetchall()
     except sqlite3.Error as exc:
         raise ValueError(f"cannot read candles from sqlite {str(path)!r}: {exc}") from exc
@@ -95,7 +117,8 @@ def load_candles(
     """Candles for ``symbol``/``interval`` on the half-open window ``[start, end)``.
 
     Concatenates ``parquet_dir/{SYMBOL}/{interval}/*.parquet``; if ``sqlite_path`` is given,
-    appends closed bars from the server cache that are newer than the last Parquet bar.
+    appends closed bars from the server cache that are newer than the last Parquet bar; the cache
+    must be marked ``market_venue = 'binance'`` or ``ValueError`` names the venue it holds.
     Naive ``start``/``end`` are read as UTC. Raises ``ValueError`` naming symbol/interval (and the
     download command) if no Parquet data exists.
     """
