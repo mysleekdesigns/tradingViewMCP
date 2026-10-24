@@ -374,12 +374,12 @@ tradingView/
 5. Settings dialog per indicator (period, source, color); persist active indicators per layout.
 
 ### Checklist
-- [ ] Indicator registry + "Add indicator" menu
-- [ ] Overlays: SMA, EMA, Bollinger Bands, VWAP
-- [ ] Pane indicators: RSI (with 30/70 lines), MACD (line + signal + histogram), Stochastic
-- [ ] Volume moving average
-- [ ] Settings dialog (inputs + colors)
-- [ ] Remove/hide indicator from the legend
+- [x] Indicator registry + "Add indicator" menu
+- [x] Overlays: SMA, EMA, Bollinger Bands, VWAP
+- [x] Pane indicators: RSI (with 30/70 lines), MACD (line + signal + histogram), Stochastic
+- [x] Volume moving average
+- [x] Settings dialog (inputs + colors)
+- [x] Remove/hide indicator from the legend
 - [x] Incremental recompute on live ticks
 - [x] Unit tests for each indicator against known values (Vitest)
 
