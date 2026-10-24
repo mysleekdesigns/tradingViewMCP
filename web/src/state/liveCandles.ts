@@ -1,4 +1,4 @@
-import { applyLiveCandle, mergeCandles } from '../data/candleStore'
+import { applyLiveCandle, mergeCandles, prependOlder } from '../data/candleStore'
 import { MarketDataError, type MarketDataProvider } from '../data/provider'
 import type { Candle, ConnectionStatus, Interval } from '../types'
 
@@ -20,6 +20,10 @@ export interface LiveCandlesSnapshot {
   retryBlocked: boolean
   /** Wall-clock time (ms since epoch) of the last applied REST result or live tick. */
   lastUpdate: number | null
+  /** An older-history page request (loadOlder) is running. */
+  loadingOlder: boolean
+  /** The exchange returned nothing older than the first bar on screen; loadOlder is a no-op. */
+  historyExhausted: boolean
 }
 
 export interface LiveCandlesOptions {
@@ -42,6 +46,8 @@ export const initialSnapshot: LiveCandlesSnapshot = {
   refreshError: null,
   retryBlocked: false,
   lastUpdate: null,
+  loadingOlder: false,
+  historyExhausted: false,
 }
 
 /** User-facing title and message for a failed REST load. */
@@ -122,10 +128,58 @@ function overlapsStart(existing: readonly Candle[], start: number): boolean {
   return existing.some((c) => c.time === start)
 }
 
+/** Block used for a 429 without a usable Retry-After header (seconds). */
+export const DEFAULT_RATE_LIMIT_BLOCK_S = 60
+/** Block used for a 418 (IP ban) without a usable Retry-After header (seconds). */
+export const DEFAULT_BAN_BLOCK_S = 120
+
+/**
+ * Seconds to block requests after `err`: its Retry-After on a 429/418, a default when that
+ * header is missing or unusable, and 0 for any other error.
+ */
+function retryAfterSeconds(err: unknown): number {
+  if (!(err instanceof MarketDataError)) return 0
+  const banned = err.kind === 'banned' || err.status === 418
+  const limited = err.kind === 'rate-limited' || err.status === 429
+  if (!banned && !limited) return 0
+  const { retryAfter } = err
+  if (retryAfter !== undefined && Number.isFinite(retryAfter) && retryAfter > 0) return retryAfter
+  return banned ? DEFAULT_BAN_BLOCK_S : DEFAULT_RATE_LIMIT_BLOCK_S
+}
+
+const INTERVAL_SECONDS: Record<Interval, number> = {
+  '1m': 60,
+  '5m': 300,
+  '15m': 900,
+  '1h': 3_600,
+  '4h': 14_400,
+  '1d': 86_400,
+  '1w': 604_800,
+}
+/** Binance weekly bars open on Monday 00:00 UTC; the UNIX epoch was a Thursday. */
+const WEEK_OFFSET_S = 4 * 86_400
+
+/** Open time (UNIX seconds) of the bar containing `nowSec`. */
+function barOpenTime(nowSec: number, interval: Interval): number {
+  const len = INTERVAL_SECONDS[interval]
+  const offset = interval === '1w' ? WEEK_OFFSET_S : 0
+  return Math.floor((nowSec - offset) / len) * len + offset
+}
+
+function browserOffline(): boolean {
+  return typeof navigator !== 'undefined' && navigator.onLine === false
+}
+
 type FetchReason = 'initial' | 'reload' | 'gap-fill'
 
-/** Automatic retries of a failed gap fill, and the delay before each (ms). */
+/**
+ * Automatic retries of a failed gap fill, and the delay before each (ms). Also the
+ * escalating cooldown after failed older pages (capped at the last entry).
+ */
 export const GAP_FILL_RETRY_DELAYS_MS: readonly number[] = [2_000, 4_000, 8_000]
+
+/** Largest page the exchange returns per klines request. */
+export const MAX_PAGE = 1000
 
 /**
  * Framework-free owner of one symbol/interval's candles: REST snapshot + WebSocket ticks,
@@ -158,6 +212,25 @@ export class LiveCandlesController {
   /** Automatic retries already used by the current gap fill. */
   private gapFillRetries = 0
   private gapRetryTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * In-flight older-history page. Separate from `inflight` so live ticks and gap fills do
+   * not cancel it; reload, a replaced window, and stop() abort it.
+   */
+  private olderInflight: { controller: AbortController; token: number } | null = null
+  private nextOlderToken = 0
+  /** The current refreshError was set by a failed older page (cleared by the next success). */
+  private refreshErrorFromOlder = false
+  /** Consecutive failed older pages; sets the cooldown length. */
+  private olderFailures = 0
+  /** Running while loadOlder is cooling down after a failed page; loadOlder is a no-op. */
+  private olderCooldownTimer: ReturnType<typeof setTimeout> | null = null
+  /** Wall-clock time (ms) of the last live tick received. */
+  private lastTickAt: number | null = null
+  /**
+   * The bar live-ticked since the last REST apply, and whether a closed (x: true) tick was
+   * seen for it. REST rows are authoritative, so a REST apply resets this to null.
+   */
+  private liveBar: { time: number; closed: boolean } | null = null
 
   constructor(opts: LiveCandlesOptions, listener: LiveCandlesListener) {
     this.opts = opts
@@ -176,9 +249,14 @@ export class LiveCandlesController {
     this.emit(initialSnapshot)
     const { provider, symbol, interval } = this.opts
     try {
-      this.unsubscribe = provider.subscribeCandles(symbol, interval, (c) => this.onCandle(c), {
-        onStatus: (status) => this.onStatus(status),
-      })
+      this.unsubscribe = provider.subscribeCandles(
+        symbol,
+        interval,
+        (c, closed) => this.onCandle(c, closed),
+        {
+          onStatus: (status) => this.onStatus(status),
+        },
+      )
     } catch {
       this.update({ status: 'offline' })
     }
@@ -194,6 +272,107 @@ export class LiveCandlesController {
     this.fetch('reload')
   }
 
+  /**
+   * Fetch one page of candles older than the first bar on screen and prepend it. No-op
+   * unless candles are on screen and no older page is running, history is not exhausted,
+   * no Retry-After window is active, the cooldown after a failed page has passed, and the
+   * browser is not offline, so repeated calls yield one request at a time.
+   */
+  loadOlder(): void {
+    if (!this.started || this.stopped) return
+    if (browserOffline() || this.olderCooldownTimer !== null) return
+    const { load, loadingOlder, historyExhausted, retryBlocked } = this.snapshot
+    if (load.kind !== 'ready' || load.candles.length === 0) return
+    if (loadingOlder || historyExhausted || retryBlocked || this.olderInflight !== null) return
+
+    const controller = new AbortController()
+    const token = ++this.nextOlderToken
+    this.olderInflight = { controller, token }
+    this.update({ loadingOlder: true })
+
+    const { provider, symbol, interval, limit } = this.opts
+    const page = Math.min(limit, MAX_PAGE)
+    const endTime = load.candles[0].time - 1
+    let request: Promise<Candle[]>
+    try {
+      request = provider.getCandles(symbol, interval, page, endTime, {
+        signal: controller.signal,
+      })
+    } catch (err) {
+      request = Promise.reject(err)
+    }
+    void request.then(
+      (older) => this.onOlderFetched(token, older),
+      (err: unknown) => this.onOlderFailed(token, err),
+    )
+  }
+
+  /** Abort a running older page and drop its late result. */
+  private cancelOlder(): void {
+    if (this.olderInflight === null) return
+    this.olderInflight.controller.abort()
+    this.olderInflight = null
+    if (this.snapshot.loadingOlder) this.update({ loadingOlder: false })
+  }
+
+  private isCurrentOlder(token: number): boolean {
+    return !this.stopped && this.olderInflight !== null && this.olderInflight.token === token
+  }
+
+  private onOlderFetched(token: number, older: Candle[]): void {
+    if (!this.isCurrentOlder(token)) return
+    this.olderInflight = null
+    this.resetOlderCooldown()
+    const { load } = this.snapshot
+    if (load.kind !== 'ready') {
+      this.update({ loadingOlder: false })
+      return
+    }
+    // Ticks during the request only touched the right edge; prepend onto what is on screen.
+    const candles = prependOlder(load.candles, older)
+    const clearError = this.refreshErrorFromOlder
+    this.refreshErrorFromOlder = false
+    if (candles === load.candles) {
+      this.update({
+        loadingOlder: false,
+        historyExhausted: true,
+        ...(clearError ? { refreshError: null } : {}),
+      })
+      return
+    }
+    this.update({
+      load: { kind: 'ready', candles },
+      loadingOlder: false,
+      lastUpdate: this.now(),
+      ...(clearError ? { refreshError: null } : {}),
+    })
+  }
+
+  private onOlderFailed(token: number, err: unknown): void {
+    if (!this.isCurrentOlder(token)) return
+    this.olderInflight = null
+    if (err instanceof MarketDataError && err.kind === 'aborted') {
+      this.update({ loadingOlder: false })
+      return
+    }
+    // Escalating cooldown so a failing (e.g. offline) request is not repeated per drag frame.
+    const step = Math.min(this.olderFailures, GAP_FILL_RETRY_DELAYS_MS.length - 1)
+    this.olderFailures += 1
+    if (this.olderCooldownTimer !== null) clearTimeout(this.olderCooldownTimer)
+    this.olderCooldownTimer = setTimeout(() => {
+      this.olderCooldownTimer = null
+    }, GAP_FILL_RETRY_DELAYS_MS[step])
+    const blockFor = retryAfterSeconds(err)
+    const error = describeError(err, this.opts.symbol, this.opts.source)
+    this.refreshErrorFromOlder = true
+    this.update({
+      loadingOlder: false,
+      refreshError: error.title,
+      ...(blockFor > 0 ? { retryBlocked: true } : {}),
+    })
+    if (blockFor > 0) this.startRetryBlock(blockFor)
+  }
+
   /** Unsubscribe, abort in-flight requests, and drop late results. Idempotent. */
   stop(): void {
     if (this.stopped) return
@@ -202,11 +381,20 @@ export class LiveCandlesController {
     this.unsubscribe = null
     this.inflight?.controller.abort()
     this.inflight = null
+    this.olderInflight?.controller.abort()
+    this.olderInflight = null
     if (this.retryTimer !== null) clearTimeout(this.retryTimer)
     this.retryTimer = null
     this.clearGapRetry()
+    this.resetOlderCooldown()
     this.pendingGapFill = false
     this.pending.clear()
+  }
+
+  private resetOlderCooldown(): void {
+    this.olderFailures = 0
+    if (this.olderCooldownTimer !== null) clearTimeout(this.olderCooldownTimer)
+    this.olderCooldownTimer = null
   }
 
   private clearGapRetry(): void {
@@ -233,13 +421,15 @@ export class LiveCandlesController {
     this.emit({ ...this.snapshot, ...patch })
   }
 
-  private onCandle(c: Candle): void {
+  private onCandle(c: Candle, closed = false): void {
     if (this.stopped) return
+    this.lastTickAt = this.now()
     const { load } = this.snapshot
     if (load.kind !== 'ready') {
       this.pending.set(c.time, c)
       return
     }
+    this.trackRollover(load.candles, c, closed)
     if (this.inflight !== null) this.pending.set(c.time, c)
     const candles = applyLiveCandle(load.candles, c)
     if (candles === load.candles) return
@@ -256,9 +446,45 @@ export class LiveCandlesController {
     const { load } = this.snapshot
     // The initial request (still loading) already covers the gap.
     if (load.kind === 'ready') {
+      if (this.noBarMissed(load.candles)) return
+
       this.gapFillRetries = 0
       this.requestGapFill()
     } else if (load.kind === 'error' && !this.snapshot.retryBlocked) this.fetch('reload')
+  }
+
+  /**
+   * A tick opened a new bar while the previous live-ticked bar never got its closed tick:
+   * its final values were missed (e.g. during a silent reconnect), so repair them over REST.
+   * Fires once per rollover; the first tick after a REST apply never fires.
+   */
+  private trackRollover(candles: readonly Candle[], c: Candle, closed: boolean): void {
+    const prev = this.liveBar
+    if (prev !== null && c.time <= prev.time) {
+      // Same bar (or a late tick for an older one): only remember a closed tick.
+      if (c.time === prev.time) prev.closed ||= closed
+      return
+    }
+    const lastTime = candles.length > 0 ? candles[candles.length - 1].time : null
+    this.liveBar = { time: c.time, closed }
+    if (prev === null || lastTime === null || c.time <= lastTime) return
+    if (prev.time === lastTime && !prev.closed) {
+      this.gapFillRetries = 0
+      this.requestGapFill()
+    }
+  }
+
+  /**
+   * True when no bar can have been missed during the drop: the last tick was under one
+   * interval ago and the bar open now is still the last candle on screen. The next tick
+   * carries that bar's cumulative OHLCV, so no REST gap fill is needed.
+   */
+  private noBarMissed(candles: readonly Candle[]): boolean {
+    if (this.lastTickAt === null || candles.length === 0) return false
+    const nowMs = this.now()
+    const { interval } = this.opts
+    if (nowMs - this.lastTickAt >= INTERVAL_SECONDS[interval] * 1000) return false
+    return barOpenTime(Math.floor(nowMs / 1000), interval) === candles[candles.length - 1].time
   }
 
   private fetch(reason: FetchReason, isRetry = false): void {
@@ -267,6 +493,10 @@ export class LiveCandlesController {
     this.clearGapRetry()
     this.pendingGapFill = false
     if (!isRetry) this.gapFillRetries = 0
+    // A reload or initial load may replace the window; a stale older page must not land on
+    // it. A gap fill keeps the older page running (it only aborts it if it replaces).
+    if (reason !== 'gap-fill') this.cancelOlder()
+    if (reason === 'reload') this.resetOlderCooldown()
     const controller = new AbortController()
     const token = ++this.nextToken
     this.inflight = { controller, token, reason }
@@ -304,8 +534,10 @@ export class LiveCandlesController {
     this.gapFillRetries = 0
     const { load } = this.snapshot
     let candles: readonly Candle[]
+    let replaced: boolean
     if (load.kind !== 'ready') {
       candles = fresh
+      replaced = true
     } else {
       // If the fresh window starts after the older candles on screen without sharing a bar
       // with them, bars may be missing in between (live ticks during the outage only add
@@ -315,25 +547,35 @@ export class LiveCandlesController {
       candles = disjoint
         ? fresh
         : keepUnchangedIdentity(load.candles, mergeCandles(load.candles, fresh))
+      replaced = disjoint
+    }
+    // A different window: an older page computed for the old one is stale, and the new
+    // window's history has not been probed yet.
+    if (replaced) {
+      this.cancelOlder()
+      this.resetOlderCooldown()
     }
     // Ticks that arrived during the request are newer than (or as new as) its rows.
     const ticks = [...this.pending.values()].sort((a, b) => a.time - b.time)
     this.pending.clear()
     for (const c of ticks) candles = applyLiveCandle(candles, c)
+    this.liveBar = null
     this.update({
       load: { kind: 'ready', candles },
       refreshing: false,
       refreshError: null,
       lastUpdate: this.now(),
+      ...(replaced ? { historyExhausted: false } : {}),
     })
+    this.refreshErrorFromOlder = false
   }
 
   private onFetchFailed(token: number, err: unknown): void {
     if (!this.isCurrent(token) || this.inflight === null) return
     const { reason } = this.inflight
     this.inflight = null
-    const retryAfter = err instanceof MarketDataError ? err.retryAfter : undefined
-    const blockFor = retryAfter !== undefined && retryAfter > 0 ? retryAfter : 0
+    const blockFor = retryAfterSeconds(err)
+    this.refreshErrorFromOlder = false
     const error = describeError(err, this.opts.symbol, this.opts.source)
     const { load } = this.snapshot
     if (load.kind === 'ready') {
@@ -348,18 +590,24 @@ export class LiveCandlesController {
         retryBlocked: blockFor > 0,
       })
     }
-    if (blockFor > 0) {
-      if (this.retryTimer !== null) clearTimeout(this.retryTimer)
-      this.retryTimer = setTimeout(() => {
-        this.retryTimer = null
-        this.update({ retryBlocked: false })
-        if (this.pendingGapFill && !this.stopped && this.snapshot.load.kind === 'ready') {
-          this.fetch('gap-fill', true)
-        }
-        this.pendingGapFill = false
-      }, blockFor * 1000)
-    }
+    if (blockFor > 0) this.startRetryBlock(blockFor)
     if (reason === 'gap-fill' && load.kind === 'ready') this.scheduleGapRetry(blockFor > 0)
+  }
+
+  /**
+   * (Re)start the Retry-After window: retryBlocked is already set by the caller; it clears
+   * after `seconds`, then a deferred gap fill runs.
+   */
+  private startRetryBlock(seconds: number): void {
+    if (this.retryTimer !== null) clearTimeout(this.retryTimer)
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null
+      this.update({ retryBlocked: false })
+      if (this.pendingGapFill && !this.stopped && this.snapshot.load.kind === 'ready') {
+        this.fetch('gap-fill', true)
+      }
+      this.pendingGapFill = false
+    }, seconds * 1000)
   }
 
   /** Retry a failed gap fill with increasing delay; never inside a Retry-After block. */

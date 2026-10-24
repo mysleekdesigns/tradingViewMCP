@@ -1,12 +1,21 @@
-import type { ConnectionStatus, Interval } from '../types'
+import type { ChartType, ConnectionStatus, Interval } from '../types'
+import { ChartTypeMenu } from './ChartTypeMenu'
 import { ConnectionIndicator } from './ConnectionStatus'
 import type { Quote } from './quote'
+import { TimeframeToolbar } from './TimeframeToolbar'
 
 interface HeaderProps {
   symbol: string
-  /** Human name of the pair, e.g. "Bitcoin / TetherUS". */
+  /** Pair description, e.g. "BTC / USDT"; empty until the symbol list loads. */
   description: string
   interval: Interval
+  onIntervalChange: (interval: Interval) => void
+  chartType: ChartType
+  onChartTypeChange: (type: ChartType) => void
+  /** Opens the symbol search dialog. */
+  onOpenSearch: () => void
+  watchlistOpen: boolean
+  onToggleWatchlist: () => void
   source: string
   quote: Quote | null
   /** Live-stream state, shown as a small dot beside the ticker. */
@@ -20,6 +29,12 @@ export function Header({
   symbol,
   description,
   interval,
+  onIntervalChange,
+  chartType,
+  onChartTypeChange,
+  onOpenSearch,
+  watchlistOpen,
+  onToggleWatchlist,
   source,
   quote,
   status,
@@ -36,14 +51,42 @@ export function Header({
       <div className="topbar__divider" aria-hidden="true" />
 
       <div className="topbar__symbol">
-        <span className="topbar__ticker">{symbol}</span>
+        <button
+          type="button"
+          className="symbol-btn"
+          onClick={onOpenSearch}
+          aria-haspopup="dialog"
+          aria-label={`Symbol ${symbol}. Change symbol`}
+          title="Change symbol (Ctrl/Cmd+K, or just start typing)"
+        >
+          <svg
+            className="symbol-btn__glass"
+            width="14"
+            height="14"
+            viewBox="0 0 16 16"
+            aria-hidden="true"
+          >
+            <circle cx="7" cy="7" r="4.75" fill="none" stroke="currentColor" strokeWidth="1.5" />
+            <path
+              d="M10.5 10.5 14 14"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+            />
+          </svg>
+          <span className="topbar__ticker">{symbol}</span>
+        </button>
         <ConnectionIndicator status={status} variant="compact" />
-        <span className="topbar__desc">{description}</span>
+        {description !== '' && <span className="topbar__desc">{description}</span>}
       </div>
 
-      <span className="topbar__interval" title="Timeframe">
-        {interval}
-      </span>
+      <div className="topbar__divider" aria-hidden="true" />
+
+      <TimeframeToolbar value={interval} onChange={onIntervalChange} />
+
+      <div className="topbar__divider" aria-hidden="true" />
+
+      <ChartTypeMenu value={chartType} onChange={onChartTypeChange} />
 
       <div className="topbar__divider" aria-hidden="true" />
 
@@ -79,6 +122,33 @@ export function Header({
       >
         <RefreshIcon spinning={loading} />
         <span>Refresh</span>
+      </button>
+
+      <button
+        type="button"
+        className="icon-btn icon-btn--toggle"
+        aria-pressed={watchlistOpen}
+        aria-label="Watchlist"
+        title={watchlistOpen ? 'Hide watchlist' : 'Show watchlist'}
+        onClick={onToggleWatchlist}
+      >
+        <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+          <rect
+            x="2.5"
+            y="3"
+            width="13"
+            height="12"
+            rx="1.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.3"
+          />
+          <path
+            d="M11 3v12M12.8 6.5h1.2M12.8 9h1.2M12.8 11.5h1.2"
+            stroke="currentColor"
+            strokeWidth="1.3"
+          />
+        </svg>
       </button>
     </header>
   )

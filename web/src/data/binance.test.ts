@@ -253,8 +253,19 @@ describe('BinanceProvider.getCandles', () => {
   })
 })
 
-describe('BinanceProvider stubs', () => {
-  it('getSymbols rejects until Phase 3', async () => {
-    await expect(new BinanceProvider().getSymbols()).rejects.toThrow(/Phase 3/)
+describe('BinanceProvider error mapping is shared across endpoints', () => {
+  it('getTickers maps HTTP 429 to rate-limited with Retry-After', async () => {
+    const fetchFn = fakeFetch(
+      async () => new Response('', { status: 429, headers: { 'Retry-After': '7' } }),
+    )
+    const err = await new BinanceProvider({ fetchFn }).getTickers(['BTCUSDT']).catch((e) => e)
+    expect(err).toBeInstanceOf(MarketDataError)
+    expect(err.kind).toBe('rate-limited')
+    expect(err.retryAfter).toBe(7)
+  })
+
+  it('getSymbols maps HTTP 451 to region-blocked', async () => {
+    const fetchFn = fakeFetch(async () => new Response('', { status: 451 }))
+    await expectKind(new BinanceProvider({ fetchFn }).getSymbols(), 'region-blocked', 451)
   })
 })

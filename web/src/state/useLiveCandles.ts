@@ -20,6 +20,8 @@ interface Entry {
 export interface UseLiveCandles extends LiveCandlesSnapshot {
   /** Re-fetch recent candles over REST (ignored during a Retry-After window). */
   reload: () => void
+  /** Fetch one page of older candles and prepend it (no-op while one is running). */
+  loadOlder: () => void
 }
 
 function sameParams(a: Params, b: Params): boolean {
@@ -63,5 +65,6 @@ export function useLiveCandles(
       : null
   const controller = current?.controller ?? null
   const reload = useCallback(() => controller?.reload(), [controller])
-  return { ...(current?.snapshot ?? initialSnapshot), reload }
+  const loadOlder = useCallback(() => controller?.loadOlder(), [controller])
+  return { ...(current?.snapshot ?? initialSnapshot), reload, loadOlder }
 }

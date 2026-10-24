@@ -340,14 +340,14 @@ tradingView/
 - **Infinite history:** `chart.timeScale().subscribeVisibleLogicalRangeChange` — when the user scrolls near the left edge, fetch older candles with `endTime = oldestCandle.time*1000 - 1` and `setData([...older, ...existing])`.
 
 ### Checklist
-- [ ] Timeframe toolbar (1m, 5m, 15m, 1h, 4h, 1D, 1W)
-- [ ] Symbol search modal with keyboard shortcut
-- [ ] Watchlist sidebar: add/remove/reorder, persisted
-- [ ] Live watchlist prices + % change (green/red)
-- [ ] Click watchlist row → load symbol
-- [ ] Load older history when scrolling left
-- [ ] Remember last symbol + timeframe across reloads
-- [ ] Chart types: candles, hollow candles, line, area, Heikin-Ashi (optional)
+- [x] Timeframe toolbar (1m, 5m, 15m, 1h, 4h, 1D, 1W)
+- [x] Symbol search modal with keyboard shortcut
+- [x] Watchlist sidebar: add/remove/reorder, persisted
+- [x] Live watchlist prices + % change (green/red)
+- [x] Click watchlist row → load symbol
+- [x] Load older history when scrolling left
+- [x] Remember last symbol + timeframe across reloads
+- [x] Chart types: candles, hollow candles, line, area, Heikin-Ashi (optional)
 
 **Done when:** you can browse any pair on any timeframe and scroll back through history.
 

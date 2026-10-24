@@ -218,7 +218,8 @@ describe('BinanceProvider.subscribeCandles', () => {
     expect(first.closeCalls).toBe(0)
     vi.advanceTimersByTime(1)
     expect(first.closeCalls).toBe(1)
-    expect(statuses[statuses.length - 1]).toBe('reconnecting')
+    // The socket had opened and was healthy: an idle stale reconnect is silent.
+    expect(statuses).toEqual(['connecting', 'live'])
     vi.advanceTimersByTime(1000)
     expect(FakeWebSocket.instances).toHaveLength(2)
   })
@@ -237,7 +238,8 @@ describe('BinanceProvider.subscribeCandles', () => {
       expect(FakeWebSocket.instances).toHaveLength(n + 1)
     }
     expect(statuses).not.toContain('offline')
-    expect(statuses[statuses.length - 1]).toBe('reconnecting')
+    // Idle stale reconnects are silent: status never leaves 'live'.
+    expect(statuses).toEqual(['connecting', 'live'])
   })
 
   it('an idle stale reconnect does not add to the failure count', () => {
@@ -252,6 +254,48 @@ describe('BinanceProvider.subscribeCandles', () => {
     vi.advanceTimersByTime(1_000)
     last().serverClose() // 5th real failure
     expect(statuses[statuses.length - 1]).toBe('offline')
+  })
+
+  it('an idle stale reconnect whose new socket opens stays live without a duplicate status', () => {
+    const { statuses, candles } = setup(5_000)
+    last().serverOpen()
+    vi.advanceTimersByTime(5_000) // idle stale
+    vi.advanceTimersByTime(1_000) // silent reconnect at attempt 0
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    last().serverOpen()
+    last().serverMessage(kline(0, '7'))
+    expect(statuses).toEqual(['connecting', 'live'])
+    expect(candles.map(([c]) => c.close)).toEqual([7])
+  })
+
+  it('falls back to reconnecting when the silent reconnect socket closes before opening', () => {
+    const { statuses } = setup(5_000)
+    last().serverOpen()
+    vi.advanceTimersByTime(6_000) // idle stale + silent reconnect
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    last().serverClose()
+    expect(statuses).toEqual(['connecting', 'live', 'reconnecting'])
+    vi.advanceTimersByTime(1_000)
+    expect(FakeWebSocket.instances).toHaveLength(3)
+    last().serverOpen()
+    expect(statuses).toEqual(['connecting', 'live', 'reconnecting', 'live'])
+  })
+
+  it('falls back to reconnecting when the silent reconnect socket never opens', () => {
+    const { statuses } = setup(5_000)
+    last().serverOpen()
+    vi.advanceTimersByTime(6_000) // idle stale + silent reconnect
+    expect(statuses).toEqual(['connecting', 'live'])
+    vi.advanceTimersByTime(5_000) // the new connect hangs past the stale timeout
+    expect(statuses).toEqual(['connecting', 'live', 'reconnecting'])
+  })
+
+  it('reports offline when the browser is offline at an idle stale timeout', () => {
+    const { statuses } = setup(5_000)
+    last().serverOpen()
+    nav.onLine = false
+    vi.advanceTimersByTime(5_000)
+    expect(statuses).toEqual(['connecting', 'live', 'offline'])
   })
 
   it('times out a connect that never opens', () => {

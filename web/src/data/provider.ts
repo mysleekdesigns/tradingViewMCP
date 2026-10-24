@@ -1,4 +1,4 @@
-import type { Candle, ConnectionStatus, Interval, SymbolInfo } from '../types'
+import type { Candle, ConnectionStatus, Interval, SymbolInfo, Ticker } from '../types'
 
 export interface SubscribeOptions {
   /** Connection state changes. Never called after unsubscribe. */
@@ -35,7 +35,25 @@ export interface MarketDataProvider {
     onCandle: (c: Candle, closed: boolean) => void,
     opts?: SubscribeOptions,
   ): () => void
-  getSymbols(): Promise<SymbolInfo[]>
+  /**
+   * Every spot symbol the exchange lists, unfiltered (callers filter by `status` and
+   * quote asset). Fetched once per provider instance and cached; a failed fetch is not
+   * cached, so the next call retries.
+   */
+  getSymbols(opts?: { signal?: AbortSignal }): Promise<SymbolInfo[]>
+  /**
+   * Rolling 24h stats for the given symbols over REST, used to seed the watchlist before
+   * the ticker stream delivers. Unknown symbols are omitted from the result. An empty
+   * `symbols` resolves to [] without a request.
+   */
+  getTickers(symbols: readonly string[], opts?: { signal?: AbortSignal }): Promise<Ticker[]>
+  /**
+   * Live 24h stats for all symbols over ONE socket (Binance `!miniTicker@arr`). Each call
+   * of `onTickers` carries only the symbols that changed since the last push. Same
+   * reconnect/backoff/stale/status behaviour as `subscribeCandles`. Returns an idempotent
+   * unsubscribe that closes the socket.
+   */
+  subscribeTickers(onTickers: (tickers: Ticker[]) => void, opts?: SubscribeOptions): () => void
 }
 
 /**

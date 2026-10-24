@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Candle } from '../types'
-import { applyLiveCandle, mergeCandles } from './candleStore'
+import { applyLiveCandle, mergeCandles, prependOlder } from './candleStore'
 
 const c = (time: number, close = time): Candle => ({
   time,
@@ -87,5 +87,37 @@ describe('mergeCandles', () => {
     const out = mergeCandles([], fresh)
     expect(out).toHaveLength(1)
     expect(out[0]).toBe(fresh[1])
+  })
+})
+
+describe('prependOlder', () => {
+  it('prepends only rows strictly older than the first bar, keeping existing identity', () => {
+    const existing = frozen([c(300), c(360), c(420)])
+    const older = frozen([c(120), c(180), c(240), c(300, 9), c(360, 9)])
+    const out = prependOlder(existing, older)
+    expect(out.map((x) => x.time)).toEqual([120, 180, 240, 300, 360, 420])
+    expect(out[0]).toBe(older[0])
+    expect(out[3]).toBe(existing[0])
+    expect(out[4]).toBe(existing[1])
+    expect(out[5]).toBe(existing[2])
+    expect(existing).toHaveLength(3)
+  })
+
+  it('returns the same reference when no row is older', () => {
+    const existing = frozen([c(300), c(360)])
+    expect(prependOlder(existing, [])).toBe(existing)
+    expect(prependOlder(existing, frozen([c(300), c(360), c(420)]))).toBe(existing)
+  })
+
+  it('sorts and dedupes the older page (later duplicate wins)', () => {
+    const older = frozen([c(180), c(60, 1), c(120), c(60, 2)])
+    const out = prependOlder(frozen([c(300)]), older)
+    expect(out.map((x) => x.time)).toEqual([60, 120, 180, 300])
+    expect(out[0]).toBe(older[3])
+  })
+
+  it('with empty existing returns the sorted older rows', () => {
+    const out = prependOlder([], frozen([c(120), c(60)]))
+    expect(out.map((x) => x.time)).toEqual([60, 120])
   })
 })

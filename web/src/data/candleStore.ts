@@ -44,3 +44,18 @@ export function mergeCandles(existing: readonly Candle[], fresh: readonly Candle
   for (const c of fresh) byTime.set(c.time, c)
   return [...byTime.values()].sort((a, b) => a.time - b.time)
 }
+
+/**
+ * Prepend an older page to an ascending, unique-time array. Only rows strictly older than
+ * `existing[0]` are used (ascending, unique, later duplicate wins). Never mutates inputs;
+ * every element of `existing` keeps identity. Returns `existing` itself (same reference)
+ * when no row is older. With empty `existing`, returns the sorted, unique `older`.
+ */
+export function prependOlder(existing: readonly Candle[], older: readonly Candle[]): Candle[] {
+  const first = existing.length > 0 ? existing[0].time : Infinity
+  const byTime = new Map<number, Candle>()
+  for (const c of older) if (c.time < first) byTime.set(c.time, c)
+  if (byTime.size === 0) return existing as Candle[]
+  const head = [...byTime.values()].sort((a, b) => a.time - b.time)
+  return [...head, ...existing]
+}

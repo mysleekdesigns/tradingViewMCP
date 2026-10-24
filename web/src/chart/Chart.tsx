@@ -1,32 +1,74 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  AreaSeries,
   CandlestickSeries,
   createChart,
   createTextWatermark,
   HistogramSeries,
+  LineSeries,
+  type IChartApi,
+  type IPriceLine,
   type ISeriesApi,
   type ITextWatermarkPluginApi,
+  type LogicalRange,
   type MouseEventParams,
   type Time,
 } from 'lightweight-charts'
 import { formatUtc } from '../components/quote'
-import type { Candle, Interval } from '../types'
+import type { Candle, ChartType, Interval } from '../types'
+import { mainSeriesData, mainSeriesTail, realPriceLine, usesRealPriceLine } from './chartTypes.ts'
+import type { HeikinAshiBar } from './heikinAshi.ts'
 import { buildLegend, selectLegendIndex, type LegendValues } from './legend.ts'
 import {
+  areaOptions,
   candlestickOptions,
   chartOptions,
   colors,
   fallbackFontFamily,
   fontFamily,
+  heikinAshiOptions,
+  hollowCandlestickOptions,
+  lineOptions,
+  realPriceLineOptions,
   volumeOptions,
   volumeScaleMargins,
   watermarkOptions,
   webFonts,
 } from './theme'
-import { planSeriesSync, toCandlestickPoint, toVolumePoint } from './seriesSync'
-import { toCandlestickData, toVolumeData } from './volume'
+import { isNearLeftEdge, planSeriesSync, shiftLogicalRange, toVolumePoint } from './seriesSync'
+import { toVolumeData } from './volume'
 
 const volumePalette = { up: colors.volumeUp, down: colors.volumeDown }
+
+type MainSeries = ISeriesApi<'Candlestick' | 'Line' | 'Area'>
+
+function addMainSeries(chart: IChartApi, type: ChartType): MainSeries {
+  switch (type) {
+    case 'candles':
+      return chart.addSeries(CandlestickSeries, candlestickOptions)
+    case 'hollow':
+      return chart.addSeries(CandlestickSeries, hollowCandlestickOptions)
+    case 'heikin-ashi':
+      return chart.addSeries(CandlestickSeries, heikinAshiOptions)
+    case 'line':
+      return chart.addSeries(LineSeries, lineOptions)
+    case 'area':
+      return chart.addSeries(AreaSeries, areaOptions)
+  }
+}
+
+/** Move a real-close price line to the last candle (Heikin-Ashi mode only). */
+function syncRealPriceLine(line: IPriceLine | null, candles: readonly Candle[]): void {
+  if (!line) return
+  const { price, color, visible } = realPriceLine(candles)
+  line.applyOptions({
+    price,
+    color,
+    axisLabelColor: color,
+    lineVisible: visible,
+    axisLabelVisible: visible,
+  })
+}
 
 interface ChartProps {
   /** Ascending, unique times. The last bar may still be forming and changes on live ticks. */
@@ -35,24 +77,50 @@ interface ChartProps {
   interval: Interval
   /** Data source shown in the legend, e.g. "Binance.US". */
   source: string
+  /** How the main series draws. Switching replaces the main series; volume stays. */
+  chartType: ChartType
+  /**
+   * Fired when the visible range comes within LEFT_EDGE_THRESHOLD_BARS of the oldest loaded bar.
+   * May fire repeatedly while the user stays there; the caller dedupes.
+   */
+  onNearLeftEdge?: () => void
 }
 
-export function Chart({ candles, symbol, interval, source }: ChartProps) {
+export function Chart({
+  candles,
+  symbol,
+  interval,
+  source,
+  chartType,
+  onNearLeftEdge,
+}: ChartProps) {
   const containerRef = useRef<HTMLDivElement>(null)
-  const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  const chartRef = useRef<IChartApi | null>(null)
+  const mainSeriesRef = useRef<MainSeries | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const watermarkRef = useRef<ITextWatermarkPluginApi<Time> | null>(null)
+  /** Heikin-Ashi mode: price line at the real last close (the series' own label is hidden). */
+  const realLineRef = useRef<IPriceLine | null>(null)
   /** Candles currently in the series; lets live ticks use update() instead of setData(). */
   const appliedRef = useRef<readonly Candle[] | null>(null)
+  /** HA bars for `appliedRef` (Heikin-Ashi mode only), reused for tail updates. */
+  const haRef = useRef<HeikinAshiBar[] | null>(null)
+  const chartTypeRef = useRef<ChartType>(chartType)
+  const onNearLeftEdgeRef = useRef(onNearLeftEdge)
   const [hoveredTime, setHoveredTime] = useState<number | undefined>(undefined)
   const [fontsReady, setFontsReady] = useState(false)
+
+  // Latest callback without resubscribing to the time scale.
+  useEffect(() => {
+    onNearLeftEdgeRef.current = onNearLeftEdge
+  }, [onNearLeftEdge])
 
   // Create the chart once per mount. StrictMode mounts twice; cleanup removes the first chart.
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
     const chart = createChart(container, chartOptions)
-    const candleSeries = chart.addSeries(CandlestickSeries, candlestickOptions)
+    // Volume first so the main series (added by the chart-type effect) draws over it.
     const volumeSeries = chart.addSeries(HistogramSeries, volumeOptions)
     volumeSeries.priceScale().applyOptions({ scaleMargins: volumeScaleMargins })
     watermarkRef.current = createTextWatermark(
@@ -76,26 +144,63 @@ export function Chart({ candles, symbol, interval, source }: ChartProps) {
     }
 
     const onCrosshairMove = (param: MouseEventParams) => {
-      const bar = param.time !== undefined ? param.seriesData.get(candleSeries) : undefined
+      const series = mainSeriesRef.current
+      const bar = param.time !== undefined && series ? param.seriesData.get(series) : undefined
       // Candle times are UTCTimestamp numbers; anything else means "not over a bar".
       const time = bar && typeof bar.time === 'number' ? bar.time : undefined
       setHoveredTime(time)
     }
     chart.subscribeCrosshairMove(onCrosshairMove)
 
-    candleSeriesRef.current = candleSeries
+    const onRangeChange = (range: LogicalRange | null) => {
+      if (!appliedRef.current?.length) return
+      if (isNearLeftEdge(range)) onNearLeftEdgeRef.current?.()
+    }
+    chart.timeScale().subscribeVisibleLogicalRangeChange(onRangeChange)
+
+    chartRef.current = chart
     volumeSeriesRef.current = volumeSeries
     return () => {
       chart.unsubscribeCrosshairMove(onCrosshairMove)
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(onRangeChange)
       disposed = true
       watermarkRef.current?.detach()
+      chartRef.current = null
       chart.remove()
-      candleSeriesRef.current = null
+      mainSeriesRef.current = null
       volumeSeriesRef.current = null
       watermarkRef.current = null
+      realLineRef.current = null
       appliedRef.current = null
+      haRef.current = null
     }
   }, [])
+
+  // (Re)create the main series for the chart type. On mount the data effect below fills it;
+  // on a type switch the candles already shown are re-applied here. Volume is untouched.
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    chartTypeRef.current = chartType
+    const series = addMainSeries(chart, chartType)
+    mainSeriesRef.current = series
+    if (usesRealPriceLine(chartType))
+      realLineRef.current = series.createPriceLine(realPriceLineOptions)
+    const applied = appliedRef.current
+    if (applied) {
+      const { points, ha } = mainSeriesData(chartType, applied)
+      series.setData(points)
+      haRef.current = ha
+      syncRealPriceLine(realLineRef.current, applied)
+    }
+    return () => {
+      // On unmount the chart may already be removed (with all its series).
+      if (chartRef.current === chart) chart.removeSeries(series)
+      if (mainSeriesRef.current === series) mainSeriesRef.current = null
+      realLineRef.current = null
+      haRef.current = null
+    }
+  }, [chartType])
 
   // Faint "BTCUSDT, 1h" behind the candles, as on TradingView.
   useEffect(() => {
@@ -104,23 +209,36 @@ export function Chart({ candles, symbol, interval, source }: ChartProps) {
     )
   }, [symbol, interval, fontsReady])
 
-  // Push data whenever the candles change. Runs after the creation effect on mount.
+  // Push data whenever the candles change. Runs after the creation effects on mount.
   // Live ticks only touch the tail, so they go through update(), which keeps the user's
-  // scroll and zoom; anything else (first load, replaced history) uses setData().
+  // scroll and zoom. Older history prepended uses setData() and shifts the visible range by the
+  // number of new bars so the same bars stay on screen; anything else uses setData().
   useEffect(() => {
-    const candleSeries = candleSeriesRef.current
+    const chart = chartRef.current
+    const mainSeries = mainSeriesRef.current
     const volumeSeries = volumeSeriesRef.current
-    if (!candleSeries || !volumeSeries) return
+    if (!chart || !mainSeries || !volumeSeries) return
+    const type = chartTypeRef.current
     const plan = planSeriesSync(appliedRef.current, candles)
-    if (plan.kind === 'set') {
-      candleSeries.setData(toCandlestickData(candles))
+    if (plan.kind === 'set' || plan.kind === 'prepend') {
+      const timeScale = chart.timeScale()
+      const range = plan.kind === 'prepend' ? timeScale.getVisibleLogicalRange() : null
+      const { points, ha } = mainSeriesData(type, candles)
+      mainSeries.setData(points)
       volumeSeries.setData(toVolumeData(candles, volumePalette))
+      haRef.current = ha
+      if (plan.kind === 'prepend' && range) {
+        timeScale.setVisibleLogicalRange(shiftLogicalRange(range, plan.count))
+      }
     } else if (plan.kind === 'update') {
+      const { points, ha } = mainSeriesTail(type, candles, plan.from, haRef.current)
+      for (const point of points) mainSeries.update(point)
       for (let i = plan.from; i < candles.length; i++) {
-        candleSeries.update(toCandlestickPoint(candles[i]))
         volumeSeries.update(toVolumePoint(candles[i], volumePalette))
       }
+      haRef.current = ha
     }
+    if (plan.kind !== 'none') syncRealPriceLine(realLineRef.current, candles)
     appliedRef.current = candles
   }, [candles])
 

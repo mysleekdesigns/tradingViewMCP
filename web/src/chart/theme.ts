@@ -3,9 +3,12 @@ import {
   CrosshairMode,
   LineStyle,
   PriceLineSource,
+  type AreaSeriesPartialOptions,
   type CandlestickSeriesPartialOptions,
+  type CreatePriceLineOptions,
   type DeepPartial,
   type HistogramSeriesPartialOptions,
+  type LineSeriesPartialOptions,
   type TextWatermarkOptions,
   type TimeChartOptions,
 } from 'lightweight-charts'
@@ -22,6 +25,11 @@ export const colors = {
   /** Volume bars use the candle colours at ~45% alpha. */
   volumeUp: '#08998173',
   volumeDown: '#f2364573',
+  /** Line and area chart stroke (TradingView blue). */
+  line: '#2962ff',
+  areaTop: 'rgba(41, 98, 255, 0.28)',
+  areaBottom: 'rgba(41, 98, 255, 0)',
+  transparent: 'rgba(0, 0, 0, 0)',
   crosshair: '#9598a1',
   crosshairLabel: '#363a45',
   watermark: 'rgba(178, 181, 190, 0.06)',
@@ -83,6 +91,72 @@ export const candlestickOptions: CandlestickSeriesPartialOptions = {
   priceLineSource: PriceLineSource.LastBar,
   priceLineStyle: LineStyle.Dotted,
   priceLineWidth: 1,
+}
+
+/** Live price label + dotted line shared by every main-series type. */
+const livePriceLine = {
+  lastValueVisible: true,
+  priceLineVisible: true,
+  priceLineSource: PriceLineSource.LastBar,
+  priceLineStyle: LineStyle.Dotted,
+  priceLineWidth: 1,
+} as const
+
+/**
+ * Hollow candles, TradingView style: rising bars are outlined (transparent body, coloured
+ * border and wick), falling bars are filled.
+ */
+export const hollowCandlestickOptions: CandlestickSeriesPartialOptions = {
+  ...candlestickOptions,
+  upColor: colors.transparent,
+  downColor: colors.down,
+  borderVisible: true,
+  borderUpColor: colors.up,
+  borderDownColor: colors.down,
+  wickUpColor: colors.up,
+  wickDownColor: colors.down,
+}
+
+/**
+ * Heikin-Ashi draws synthetic bars, so the series' own last-value label would show the HA close.
+ * It is hidden; Chart draws a separate price line at the real last close instead
+ * (see `realPriceLine` in chartTypes.ts).
+ */
+export const heikinAshiOptions: CandlestickSeriesPartialOptions = {
+  ...candlestickOptions,
+  lastValueVisible: false,
+  priceLineVisible: false,
+}
+
+export const lineOptions: LineSeriesPartialOptions = {
+  ...livePriceLine,
+  color: colors.line,
+  lineWidth: 2,
+  crosshairMarkerRadius: 4,
+  crosshairMarkerBorderColor: colors.background,
+  crosshairMarkerBackgroundColor: colors.line,
+}
+
+export const areaOptions: AreaSeriesPartialOptions = {
+  ...livePriceLine,
+  lineColor: colors.line,
+  topColor: colors.areaTop,
+  bottomColor: colors.areaBottom,
+  lineWidth: 2,
+  crosshairMarkerRadius: 4,
+  crosshairMarkerBorderColor: colors.background,
+  crosshairMarkerBackgroundColor: colors.line,
+}
+
+/** Base options for the real-close price line used in Heikin-Ashi mode (price/colour set per tick). */
+export const realPriceLineOptions: CreatePriceLineOptions = {
+  price: 0,
+  color: colors.up,
+  lineWidth: 1,
+  lineStyle: LineStyle.Dotted,
+  lineVisible: false,
+  axisLabelVisible: false,
+  title: '',
 }
 
 /** Volume sits on its own overlay price scale (id ''), pinned to the bottom 20% of the pane. */

@@ -1,7 +1,16 @@
 import { LineStyle, PriceLineSource } from 'lightweight-charts'
 import { describe, expect, it } from 'vitest'
+import { prependOlder } from '../data/candleStore'
 import type { Candle } from '../types'
-import { MAX_APPENDED_BARS, planSeriesSync, toCandlestickPoint, toVolumePoint } from './seriesSync'
+import {
+  isNearLeftEdge,
+  LEFT_EDGE_THRESHOLD_BARS,
+  MAX_APPENDED_BARS,
+  planSeriesSync,
+  shiftLogicalRange,
+  toCandlestickPoint,
+  toVolumePoint,
+} from './seriesSync'
 import { candlestickOptions, volumeOptions } from './theme'
 import { toCandlestickData, toVolumeData } from './volume'
 
@@ -80,9 +89,57 @@ describe('planSeriesSync', () => {
     expect(planSeriesSync(a, a.slice(0, 2))).toEqual({ kind: 'set' })
   })
 
-  it('sets data when older history was prepended', () => {
+  it('reports older history prepended with its count', () => {
     const a = base()
-    expect(planSeriesSync(a, [bar(-H, 9), ...a])).toEqual({ kind: 'set' })
+    expect(planSeriesSync(a, [bar(-H, 9), ...a])).toEqual({ kind: 'prepend', count: 1 })
+    const older = Array.from({ length: 500 }, (_, i) => bar((i - 500) * H, 5))
+    expect(planSeriesSync(a, [...older, ...a])).toEqual({ kind: 'prepend', count: 500 })
+  })
+
+  it('plans a prepend for the output of prependOlder (identity contract with the controller)', () => {
+    const a = base()
+    // Overlapping and out-of-order rows, as a page from the exchange may return them.
+    const page = [bar(-H, 9), bar(-3 * H, 7), bar(-2 * H, 8), bar(0, 99)]
+    expect(planSeriesSync(a, prependOlder(a, page))).toEqual({ kind: 'prepend', count: 3 })
+  })
+
+  it('reports a prepend when the tail also ticked or rolled over', () => {
+    const a = base()
+    const ticked = [bar(-2 * H, 8), bar(-H, 9), a[0], a[1], bar(2 * H, 13)]
+    expect(planSeriesSync(a, ticked)).toEqual({ kind: 'prepend', count: 2 })
+    const rolled = [bar(-H, 9), ...a, bar(3 * H, 14)]
+    expect(planSeriesSync(a, rolled)).toEqual({ kind: 'prepend', count: 1 })
+  })
+
+  it('reports a prepend onto a single-bar series whose bar ticked', () => {
+    const a = [bar(0, 10)]
+    expect(planSeriesSync(a, [bar(-H, 9), bar(0, 11)])).toEqual({ kind: 'prepend', count: 1 })
+  })
+
+  it('sets data when prepended bars are not strictly ascending or overlap', () => {
+    const a = base()
+    expect(planSeriesSync(a, [bar(-H, 9), bar(-2 * H, 8), ...a])).toEqual({ kind: 'set' })
+    expect(planSeriesSync(a, [bar(-H, 9), bar(-H, 8), ...a])).toEqual({ kind: 'set' })
+  })
+
+  it('sets data when a prepend also changed an existing middle bar', () => {
+    const a = base()
+    expect(planSeriesSync(a, [bar(-H, 9), a[0], bar(H, 99), a[2]])).toEqual({ kind: 'set' })
+  })
+
+  it('sets data when a prepend also appended too many bars', () => {
+    const a = base()
+    const extra = Array.from({ length: MAX_APPENDED_BARS + 1 }, (_, i) => bar((3 + i) * H, 20 + i))
+    expect(planSeriesSync(a, [bar(-H, 9), ...a, ...extra])).toEqual({ kind: 'set' })
+  })
+
+  it('sets data when history was replaced by unrelated bars', () => {
+    const a = base()
+    expect(planSeriesSync(a, [bar(-H, 9), bar(10 * H, 1), bar(11 * H, 2), bar(12 * H, 3)])).toEqual(
+      {
+        kind: 'set',
+      },
+    )
   })
 
   it('sets data when the last bar was replaced by one with a different time', () => {
@@ -95,6 +152,28 @@ describe('planSeriesSync', () => {
     const a = base()
     expect(planSeriesSync(a, [...a, bar(4 * H, 1), bar(3 * H, 2)])).toEqual({ kind: 'set' })
     expect(planSeriesSync(a, [...a, bar(2 * H, 1)])).toEqual({ kind: 'set' })
+  })
+})
+
+describe('left edge', () => {
+  it('fires within the threshold of the oldest bar, including empty space on the left', () => {
+    expect(isNearLeftEdge({ from: LEFT_EDGE_THRESHOLD_BARS - 0.5, to: 200 })).toBe(true)
+    expect(isNearLeftEdge({ from: -20, to: 40 })).toBe(true)
+    expect(isNearLeftEdge({ from: LEFT_EDGE_THRESHOLD_BARS, to: 200 })).toBe(false)
+    expect(isNearLeftEdge({ from: 300, to: 400 })).toBe(false)
+  })
+
+  it('does not fire without a visible range', () => {
+    expect(isNearLeftEdge(null)).toBe(false)
+  })
+
+  it('honours a custom threshold', () => {
+    expect(isNearLeftEdge({ from: 8, to: 50 }, 10)).toBe(true)
+    expect(isNearLeftEdge({ from: 12, to: 50 }, 10)).toBe(false)
+  })
+
+  it('shifts the logical range right by the prepended count so the same bars stay visible', () => {
+    expect(shiftLogicalRange({ from: 3.5, to: 120.5 }, 500)).toEqual({ from: 503.5, to: 620.5 })
   })
 })
 
