@@ -11,9 +11,10 @@ Fixed in Phase 3 (drop if they stay fixed):
 - Gap-fill hole: `onFetched` now replaces the window when the fresh page does not overlap (`overlapsStart`), cancelling any older page. Cost: loaded history is dropped after a long outage.
 - retryBlocked bypass on gap fill / auto reload: `requestGapFill`, `scheduleGapRetry`, and the error-state reconnect branch all check it now.
 
+- loadOlder backoff (fixed after the Phase 3 review): escalating cooldown after any non-aborted failure, skipped while offline; 429/418 without Retry-After now block with defaults (60 s / 120 s) on every path.
+- Idle-stale churn (fixed after the Phase 3 review): an idle stale reconnect on an opened socket stays 'live'; the post-reconnect gap fill is skipped unless a bar boundary passed; a rollover without a closed tick on the previous bar triggers one gap fill.
+
 Still open:
-- `loadOlder` has no backoff after a non-429 failure (network, 5xx); the left-edge range listener retries on the next scroll event. A 429 with no `Retry-After` header also gives no block (retryAfterSeconds returns 0).
-- WS idle-stale timeout no longer counts as a failure, but it still reconnects every 60 s on a quiet stream, and each reconnect triggers a REST gap fill.
 - Per tick is O(n): `applyLiveCandle` copy, `planSeriesSync` identity walk, and in Heikin-Ashi mode `heikinAshiFrom` slices the whole prefix. No cap on loaded history.
 
 Confirmed conventions (do not re-flag):
