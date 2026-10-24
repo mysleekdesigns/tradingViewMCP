@@ -17,6 +17,8 @@ class FakeWS {
   readonly url: string
   readyState = 0
   closed = false
+  /** Frames the hub sent (liveness probes). */
+  sent: string[] = []
   onopen: ((ev: unknown) => void) | null = null
   onmessage: ((ev: { data: unknown }) => void) | null = null
   onerror: ((ev: unknown) => void) | null = null
@@ -24,6 +26,9 @@ class FakeWS {
   constructor(url: string) {
     this.url = url
     FakeWS.instances.push(this)
+  }
+  send(data: string): void {
+    this.sent.push(data)
   }
   close(): void {
     this.closed = true
@@ -279,9 +284,83 @@ describe('hub', () => {
     expect(stats.upstreamSockets).toBe(1)
     const ws2 = FakeWS.instances[1]!
     ws2.emitOpen()
-    expect(statuses.at(-1)).toBe('reconnecting') // live only after the first message
+    expect(statuses).toEqual(['reconnecting', 'live', 'reconnecting', 'live'])
     ws2.emitMessage(klineMsg('BTCUSDT', '1m'))
     expect(statuses).toEqual(['reconnecting', 'live', 'reconnecting', 'live'])
+  })
+
+  it('is live as soon as the socket opens, before any push (quiet Binance.US pair)', () => {
+    const statuses: string[] = []
+    hub.acquire(BTC, (e) => {
+      if (e.type === 'status') statuses.push(e.status)
+    })
+    FakeWS.instances[0]!.emitOpen()
+    expect(statuses).toEqual(['reconnecting', 'live'])
+    expect(hub.status(BTC)).toBe('live')
+  })
+
+  it('keeps a quiet socket open while it answers the LIST_SUBSCRIPTIONS probe', () => {
+    const statuses: string[] = []
+    hub.acquire(BTC, (e) => {
+      if (e.type === 'status') statuses.push(e.status)
+    })
+    const ws = FakeWS.instances[0]!
+    ws.emitOpen()
+    vi.advanceTimersByTime(24_999)
+    expect(ws.sent).toHaveLength(0)
+    vi.advanceTimersByTime(1)
+    expect(ws.sent).toHaveLength(1)
+    expect(JSON.parse(ws.sent[0]!)).toEqual({
+      method: 'LIST_SUBSCRIPTIONS',
+      id: expect.any(Number),
+    })
+    // Binance answers { result: [...], id }; no kline is emitted for it.
+    const events: HubEvent[] = []
+    hub.acquire(BTC, (e) => events.push(e))
+    ws.emitMessage({ result: ['btcusdt@kline_1m'], id: 1 })
+    expect(events.filter((e) => e.type === 'kline')).toEqual([])
+    // Keep answering every probe: no trade for 3 minutes, still the same socket and live.
+    for (let i = 0; i < 7; i++) {
+      vi.advanceTimersByTime(25_000)
+      ws.emitMessage({ result: ['btcusdt@kline_1m'], id: i + 2 })
+    }
+    expect(ws.closed).toBe(false)
+    expect(FakeWS.instances).toHaveLength(1)
+    expect(statuses).toEqual(['reconnecting', 'live'])
+  })
+
+  it('probes repeatedly while silent and reconnects at 60 s if nothing answers', () => {
+    hub.acquire(BTC, () => {})
+    const ws = FakeWS.instances[0]!
+    ws.emitOpen()
+    vi.advanceTimersByTime(50_000)
+    expect(ws.sent).toHaveLength(2)
+    expect(ws.closed).toBe(false)
+    vi.advanceTimersByTime(10_000)
+    expect(ws.closed).toBe(true)
+    expect(hub.status(BTC)).toBe('reconnecting')
+  })
+
+  it('a socket that opens and closes without a message still backs off', () => {
+    hub.acquire(BTC, () => {})
+    FakeWS.instances[0]!.emitOpen()
+    FakeWS.instances[0]!.emitClose() // failure 1 -> attempt 0 (750 ms)
+    vi.advanceTimersByTime(750)
+    FakeWS.instances[1]!.emitOpen()
+    FakeWS.instances[1]!.emitClose() // failure 2 -> attempt 1 (1500 ms), not reset by open
+    vi.advanceTimersByTime(1499)
+    expect(FakeWS.instances).toHaveLength(2)
+    vi.advanceTimersByTime(1)
+    expect(FakeWS.instances).toHaveLength(3)
+  })
+
+  it('stops probing once the socket is dropped', () => {
+    hub.acquire(BTC, () => {})
+    const ws = FakeWS.instances[0]!
+    ws.emitOpen()
+    ws.emitClose()
+    vi.advanceTimersByTime(30_000)
+    expect(ws.sent).toHaveLength(0)
   })
 
   it('backs off exponentially on consecutive failures, capped at 30 s', () => {

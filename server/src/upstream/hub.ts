@@ -25,6 +25,12 @@ export interface HubOptions {
   stats: { upstreamSockets: number }
   /** Reconnect when no upstream message arrives for this long. Default 60 s. */
   staleTimeoutMs?: number
+  /**
+   * After this much silence on an open socket, send a `LIST_SUBSCRIPTIONS` request (repeated
+   * while silent); its reply counts as a message. Binance.US kline streams only push on trades,
+   * which can be minutes apart, so without this a healthy quiet stream would go stale. Default 25 s.
+   */
+  probeAfterMs?: number
   /** Random source in [0, 1) for backoff jitter. Default `Math.random`. */
   random?: () => number
   /**
@@ -46,6 +52,7 @@ export interface Hub {
 }
 
 export const DEFAULT_STALE_TIMEOUT_MS = 60_000
+export const DEFAULT_PROBE_AFTER_MS = 25_000
 export const DEFAULT_RELEASE_GRACE_MS = 5_000
 const BACKOFF_BASE_MS = 1_000
 const BACKOFF_CAP_MS = 30_000
@@ -95,6 +102,8 @@ interface Entry {
   receivedOnSocket: boolean
   reconnectTimer: ReturnType<typeof setTimeout> | undefined
   staleTimer: ReturnType<typeof setTimeout> | undefined
+  /** Sends a liveness probe after `probeAfterMs` of silence on an open socket. */
+  probeTimer: ReturnType<typeof setTimeout> | undefined
   /** Pending teardown after the last listener released; cleared by a re-acquire. */
   graceTimer: ReturnType<typeof setTimeout> | undefined
 }
@@ -102,6 +111,8 @@ interface Entry {
 export function createHub(opts: HubOptions): Hub {
   const WS = opts.WebSocketImpl
   const staleMs = opts.staleTimeoutMs ?? DEFAULT_STALE_TIMEOUT_MS
+  const probeMs = opts.probeAfterMs ?? DEFAULT_PROBE_AFTER_MS
+  let probeId = 0
   const rand = opts.random ?? Math.random
   const graceMs = Math.max(0, opts.releaseGraceMs ?? DEFAULT_RELEASE_GRACE_MS)
   const entries = new Map<StreamKey, Entry>()
@@ -133,8 +144,10 @@ export function createHub(opts: HubOptions): Hub {
   const clearTimers = (entry: Entry): void => {
     if (entry.reconnectTimer !== undefined) clearTimeout(entry.reconnectTimer)
     if (entry.staleTimer !== undefined) clearTimeout(entry.staleTimer)
+    if (entry.probeTimer !== undefined) clearTimeout(entry.probeTimer)
     entry.reconnectTimer = undefined
     entry.staleTimer = undefined
+    entry.probeTimer = undefined
   }
 
   const discard = (sock: WebSocket): void => {
@@ -155,6 +168,22 @@ export function createHub(opts: HubOptions): Hub {
       entry.staleTimer = undefined
       drop(entry, sock)
     }, staleMs)
+  }
+
+  /** While the open socket stays silent, ask Binance for its subscriptions every `probeMs`. */
+  const armProbe = (entry: Entry, sock: WebSocket): void => {
+    if (entry.probeTimer !== undefined) clearTimeout(entry.probeTimer)
+    entry.probeTimer = setTimeout(() => {
+      entry.probeTimer = undefined
+      if (closed || entry.ws !== sock) return
+      try {
+        probeId += 1
+        sock.send(JSON.stringify({ method: 'LIST_SUBSCRIPTIONS', id: probeId }))
+      } catch {
+        // Socket is going away; the stale timer or close handler deals with it.
+      }
+      armProbe(entry, sock)
+    }, probeMs)
   }
 
   const scheduleReconnect = (entry: Entry): void => {
@@ -203,10 +232,19 @@ export function createHub(opts: HubOptions): Hub {
     entry.ws = sock
     entry.receivedOnSocket = false
     syncStats()
+    // The stream is subscribed by URL, so an open socket is live even before the first push
+    // (a quiet Binance.US pair can go minutes without a trade).
+    sock.onopen = () => {
+      if (closed || entry.ws !== sock) return
+      setStatus(entry, 'live')
+      armProbe(entry, sock)
+    }
     sock.onmessage = (ev: MessageEvent) => {
       if (closed || entry.ws !== sock) return
       armStale(entry, sock)
+      armProbe(entry, sock)
       if (!entry.receivedOnSocket) {
+        // Backoff resets only once data flows, so an accept-then-drop upstream still backs off.
         entry.receivedOnSocket = true
         entry.failures = 0
         setStatus(entry, 'live')
@@ -257,6 +295,7 @@ export function createHub(opts: HubOptions): Hub {
           receivedOnSocket: false,
           reconnectTimer: undefined,
           staleTimer: undefined,
+          probeTimer: undefined,
           graceTimer: undefined,
         }
         entries.set(key, entry)

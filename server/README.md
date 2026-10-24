@@ -90,6 +90,12 @@ are attached, and closes it when the last one leaves.
 - Every 20 s the server re-sends the current `{type:'status'}` as an app-level heartbeat
   (browsers cannot see protocol pings), plus a protocol ping. Clients treat no message for 60 s
   as stale.
+- Upstream `live` means the exchange socket is open (the stream is subscribed by URL), not
+  that a push has arrived: Binance.US kline streams push only on trades, which can be minutes
+  apart on liquid-looking pairs. After 25 s of upstream silence the server sends
+  `{"method":"LIST_SUBSCRIPTIONS","id":n}` (repeated while silent); its reply counts as
+  traffic, so a quiet but healthy socket is kept and only one that answers nothing for 60 s is
+  reconnected. Backoff resets only once a message arrives.
 - When the last client leaves, the upstream socket is kept for a ~5 s grace period so a quick
   reconnect reuses it (and its backoff state).
 - Upgrades are accepted only with no `Origin` header or an Origin on `localhost` / `127.0.0.1`
