@@ -408,7 +408,7 @@ tradingView/
 - [x] REST endpoints for watchlists / layouts / drawings
 - [x] `ServerProvider` on the frontend
 - [x] Upstream rate limiting + retry
-- [ ] One command to run both: `npm run dev` at root (e.g. with `concurrently`)
+- [x] One command to run both: `npm run dev` at root (e.g. with `concurrently`)
 
 **Done when:** reloads are instant from cache and multiple tabs share one exchange connection.
 
