@@ -430,16 +430,16 @@ tradingView/
 - Indicator alerts later (e.g. RSI crosses 30).
 
 ### Checklist
-- [ ] Horizontal line + horizontal ray
-- [ ] Trendline
-- [ ] Fibonacci retracement
-- [ ] Rectangle
-- [ ] Select / move / delete drawings; persisted per symbol
-- [ ] Alert creation from the chart (right-click price → "Add alert")
+- [x] Horizontal line + horizontal ray
+- [x] Trendline
+- [x] Fibonacci retracement
+- [x] Rectangle
+- [x] Select / move / delete drawings; persisted per symbol
+- [x] Alert creation from the chart (right-click price → "Add alert")
 - [x] Server-side alert evaluation
-- [ ] Browser + desktop notifications
+- [x] Browser + desktop notifications
 - [x] Webhook notifications (optional)
-- [ ] Alert list with history of triggered alerts
+- [x] Alert list with history of triggered alerts
 
 **Done when:** drawings persist across reloads and a price alert pops a notification.
 
