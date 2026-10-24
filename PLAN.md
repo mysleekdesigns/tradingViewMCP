@@ -319,11 +319,11 @@ tradingView/
 
 ### Checklist
 - [x] WebSocket subscription per symbol/interval
-- [ ] Live `series.update()` for candles and volume
-- [ ] Unsubscribe on symbol/interval change (no leaked sockets)
+- [x] Live `series.update()` for candles and volume
+- [x] Unsubscribe on symbol/interval change (no leaked sockets)
 - [x] Auto-reconnect with backoff + gap fill
-- [ ] Connection status indicator (live / reconnecting / offline)
-- [ ] Live price line + last price label on the price scale
+- [x] Connection status indicator (live / reconnecting / offline)
+- [x] Live price line + last price label on the price scale
 
 **Done when:** chart ticks in real time and survives a network drop.
 
