@@ -296,11 +296,11 @@ tradingView/
 - [x] `types.ts` with `Candle`, `Interval`, `SymbolInfo`
 - [x] `MarketDataProvider` interface
 - [x] `BinanceProvider.getCandles` with number parsing and time conversion
-- [ ] `<Chart>` component with candlesticks + volume
-- [ ] Crosshair + OHLCV legend showing values under the cursor (`chart.subscribeCrosshairMove`)
-- [ ] Dark theme
-- [ ] Chart resizes with the window
-- [ ] Loading and error states (network failure, bad symbol)
+- [x] `<Chart>` component with candlesticks + volume
+- [x] Crosshair + OHLCV legend showing values under the cursor (`chart.subscribeCrosshairMove`)
+- [x] Dark theme
+- [x] Chart resizes with the window
+- [x] Loading and error states (network failure, bad symbol)
 
 **Done when:** BTCUSDT 1h candles + volume render with a working crosshair legend.
 
