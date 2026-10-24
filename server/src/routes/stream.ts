@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import type { RouteOptions } from '../app.ts'
 import { isInterval } from '../types.ts'
-import { createHub, klineKey, TICKERS_KEY, type HubEvent, type StreamKey } from '../upstream/hub.ts'
+import { klineKey, TICKERS_KEY, type HubEvent, type StreamKey } from '../upstream/hub.ts'
 
 // WebSocket fan-out. Contract: server/README.md "WebSocket fan-out".
 
@@ -53,14 +53,8 @@ export default async function streamRoutes(
   app: FastifyInstance,
   opts: RouteOptions,
 ): Promise<void> {
-  const hub = createHub({
-    WebSocketImpl: opts.WebSocketImpl,
-    wsBase: opts.wsBase,
-    stats: opts.stats,
-  })
-  app.addHook('onClose', async () => {
-    hub.close()
-  })
+  // Shared with the alert engine; created and closed by buildApp.
+  const { hub } = opts
 
   const attach = (socket: ClientSocket, key: StreamKey): void => {
     if (hub.status(key) === undefined && hub.size >= MAX_UPSTREAM_KEYS) {

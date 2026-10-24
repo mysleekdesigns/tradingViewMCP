@@ -1,5 +1,6 @@
 - [web toolchain conventions](project_web_toolchain.md) — TS6 strict default, ESLint+Prettier, Vitest node env; what not to re-flag
 - [web conventions and recurring gaps](project_web_conventions.md) — provider/chart/App lifecycle, UTC helpers, LWC font-cache quirk; open gaps (pagination, aria-live, 1m quote)
 - [Review conventions](review-conventions.md) — LWC font-cache switch, 24h quote basis, refresh-keeps-chart; recurring a11y/direction checks
-- [Phase 5 server sync](project_web_phase5_sync.md) — ServerProvider status combo, createServerSync semantics; open gaps (1008 loop, indicators cross-tab)
+- [Phase 5 server sync](project_web_phase5_sync.md) — ServerProvider status combo, createServerSync semantics; 1008 loop fixed; open gap: indicators cross-tab
 - [Server conventions and gaps](project_server_conventions.md) — Phase 5 cache/limiter/hub design not to re-flag; open gaps (window semantics, stale heartbeat, serve-stale)
+- [Phase 6 drawings/alerts](project_web_phase6_drawings_alerts.md) — controller/LWC event policy, lifecycle order confirmed; main gaps fixed; open: Escape gated off after rail-button focus

@@ -13,8 +13,10 @@ import {
   type LogicalRange,
   type MouseEventParams,
   type Time,
+  type UTCTimestamp,
 } from 'lightweight-charts'
 import { formatUtc } from '../components/quote'
+import { chartAcceptsEscape, chartOwnsKeyTarget } from '../state/chartTools'
 import type { IndicatorConfig } from '../state/indicators'
 import type { Candle, ChartType, Interval } from '../types'
 import { mainSeriesData, mainSeriesTail, realPriceLine, usesRealPriceLine } from './chartTypes.ts'
@@ -32,6 +34,7 @@ import {
   heikinAshiOptions,
   hollowCandlestickOptions,
   lineOptions,
+  alertLineOptions,
   realPriceLineOptions,
   volumeOptions,
   volumeScaleMargins,
@@ -40,6 +43,20 @@ import {
 } from './theme'
 import { isNearLeftEdge, planSeriesSync, shiftLogicalRange, toVolumePoint } from './seriesSync'
 import { toVolumeData } from './volume'
+import { AlertLinesManager } from './drawings/alertLines'
+import { ChartCoordinateAdapter } from './drawings/chartAdapter'
+import { DrawingController, type PointerInput } from './drawings/controller'
+import { xToSnappedTime } from './drawings/geometry'
+import { DrawingsPrimitive } from './drawings/primitives'
+import { INTERVAL_SECONDS } from './drawings/timeIndex'
+import type {
+  AlertLine,
+  ChartContextMenuRequest,
+  Drawing,
+  DrawingPatch,
+  DrawingStyle,
+  ToolMode,
+} from './drawings/types'
 
 const volumePalette = { up: colors.volumeUp, down: colors.volumeDown }
 
@@ -95,9 +112,62 @@ interface ChartProps {
   onIndicatorToggleVisible?: (uid: string) => void
   onIndicatorRemove?: (uid: string) => void
   onIndicatorSettings?: (uid: string) => void
+  /** Drawings of the current symbol. */
+  drawings?: readonly Drawing[]
+  /** What a left press does. Default 'cursor'. */
+  tool?: ToolMode
+  selectedDrawingId?: string | null
+  onSelectDrawing?: (id: string | null) => void
+  /**
+   * New drawing finished. The chart builds it: id = crypto.randomUUID(), symbol = props.symbol,
+   * style = props.drawingStyle ?? DEFAULT_DRAWING_STYLE. Return `false` when the store rejects
+   * it: the chart drops it at once and does not select it (onToolDone still fires).
+   */
+  onDrawingCreate?: (drawing: Drawing) => boolean | void
+  drawingStyle?: DrawingStyle
+  /** After a create completes, or when Escape cancels a tool: the app resets the tool to 'cursor'. */
+  onToolDone?: () => void
+  /**
+   * A move or anchor drag ended (fired once on pointer-up, not per move). Return `false` when
+   * the store rejects the patch: the drawing snaps back to its committed position.
+   */
+  onDrawingChange?: (id: string, patch: DrawingPatch) => boolean | void
+  /**
+   * Delete/Backspace with a drawing selected. Only when nothing is focused or focus is inside
+   * the chart, and never from an editable or a [role=dialog|alertdialog|menu|listbox].
+   */
+  onDrawingDelete?: (id: string) => void
+  /**
+   * Right-click on the main pane (the native menu is suppressed). If a drawing is under the
+   * cursor it is selected and its id passed.
+   */
+  onContextMenu?: (req: ChartContextMenuRequest) => void
+  /** Active alerts for this symbol: dashed price lines with an axis label. */
+  alertLines?: readonly AlertLine[]
 }
 
 const NO_INDICATORS: readonly IndicatorConfig[] = []
+const NO_DRAWINGS: readonly Drawing[] = []
+const NO_ALERT_LINES: readonly AlertLine[] = []
+
+interface PanePoint extends PointerInput {
+  /** Inside the main pane (not on an axis or an indicator pane). */
+  inside: boolean
+}
+
+/** Viewport coordinates → main-pane CSS px (the space LWC primitives draw in). */
+function toPanePoint(chart: IChartApi, clientX: number, clientY: number): PanePoint | null {
+  const pane = chart.panes()[0]
+  const el = pane?.getHTMLElement()
+  if (!pane || !el) return null
+  const rect = el.getBoundingClientRect()
+  const leftScale = chart.priceScale('left')
+  const leftWidth = leftScale.options().visible ? leftScale.width() : 0
+  const x = clientX - rect.left - leftWidth
+  const y = clientY - rect.top
+  const inside = x >= 0 && y >= 0 && x < chart.timeScale().width() && y < pane.getHeight()
+  return { x, y, inside }
+}
 
 /** Same tops (within half a pixel) → keep the old array so React skips the re-render. */
 function sameTops(a: readonly (number | null)[], b: readonly (number | null)[]): boolean {
@@ -119,6 +189,17 @@ export function Chart({
   onIndicatorToggleVisible,
   onIndicatorRemove,
   onIndicatorSettings,
+  drawings = NO_DRAWINGS,
+  tool = 'cursor',
+  selectedDrawingId,
+  onSelectDrawing,
+  onDrawingCreate,
+  drawingStyle,
+  onToolDone,
+  onDrawingChange,
+  onDrawingDelete,
+  onContextMenu,
+  alertLines = NO_ALERT_LINES,
 }: ChartProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -143,6 +224,36 @@ export function Chart({
   )
   /** Top of each pane (px from the chart's top edge), for the pane legends. */
   const [paneTops, setPaneTops] = useState<readonly (number | null)[]>([])
+  /** Drawings: pixel <-> anchor mapping, interaction state machine, and renderer. */
+  const [coords] = useState(() => new ChartCoordinateAdapter())
+  const [drawingController] = useState(() => new DrawingController(coords))
+  const [alertLinesManager] = useState(() => new AlertLinesManager(alertLineOptions))
+  const drawingsPrimitiveRef = useRef<DrawingsPrimitive | null>(null)
+  const onContextMenuRef = useRef(onContextMenu)
+
+  // Latest drawing callbacks, without re-binding DOM listeners.
+  useEffect(() => {
+    onContextMenuRef.current = onContextMenu
+    drawingController.setCallbacks({
+      onCreate: onDrawingCreate,
+      onSelect: onSelectDrawing,
+      onToolDone,
+      onChange: onDrawingChange,
+      onDelete: onDrawingDelete,
+      // No panning or zooming while a drawing is being created or dragged.
+      onBusyChange: (busy) =>
+        chartRef.current?.applyOptions({ handleScroll: !busy, handleScale: !busy }),
+      onRender: () => drawingsPrimitiveRef.current?.update(),
+    })
+  }, [
+    drawingController,
+    onContextMenu,
+    onDrawingCreate,
+    onSelectDrawing,
+    onToolDone,
+    onDrawingChange,
+    onDrawingDelete,
+  ])
 
   // Latest callback without resubscribing to the time scale.
   useEffect(() => {
@@ -194,6 +305,7 @@ export function Chart({
 
     chartRef.current = chart
     volumeSeriesRef.current = volumeSeries
+    coords.setChart(chart)
     indicatorManager.attach(chart)
     return () => {
       chart.unsubscribeCrosshairMove(onCrosshairMove)
@@ -202,6 +314,7 @@ export function Chart({
       watermarkRef.current?.detach()
       indicatorManager.detach()
       chartRef.current = null
+      coords.setChart(null, chart)
       chart.remove()
       mainSeriesRef.current = null
       volumeSeriesRef.current = null
@@ -210,7 +323,7 @@ export function Chart({
       appliedRef.current = null
       haRef.current = null
     }
-  }, [indicatorManager])
+  }, [indicatorManager, coords])
 
   // (Re)create the main series for the chart type. On mount the data effect below fills it;
   // on a type switch the candles already shown are re-applied here. Volume is untouched.
@@ -231,14 +344,25 @@ export function Chart({
       haRef.current = ha
       syncRealPriceLine(realLineRef.current, applied)
     }
+    // Drawings and alert lines live on the main series, so they move to the new one.
+    coords.setSeries(series)
+    const primitive = new DrawingsPrimitive(drawingController, coords)
+    series.attachPrimitive(primitive)
+    drawingsPrimitiveRef.current = primitive
+    alertLinesManager.attach(series)
     return () => {
       // On unmount the chart may already be removed (with all its series).
-      if (chartRef.current === chart) chart.removeSeries(series)
+      const alive = chartRef.current === chart
+      alertLinesManager.detach(alive)
+      if (alive) series.detachPrimitive(primitive)
+      if (drawingsPrimitiveRef.current === primitive) drawingsPrimitiveRef.current = null
+      coords.setSeries(null, series)
+      if (alive) chart.removeSeries(series)
       if (mainSeriesRef.current === series) mainSeriesRef.current = null
       realLineRef.current = null
       haRef.current = null
     }
-  }, [chartType])
+  }, [chartType, coords, drawingController, alertLinesManager])
 
   // Faint "BTCUSDT, 1h" behind the candles, as on TradingView.
   useEffect(() => {
@@ -246,6 +370,11 @@ export function Chart({
       watermarkOptions(`${symbol}, ${interval}`, fontsReady ? fontFamily : fallbackFontFamily),
     )
   }, [symbol, interval, fontsReady])
+
+  // Bar length for extrapolating drawing anchors past either end of the data.
+  useEffect(() => {
+    coords.index.setStep(INTERVAL_SECONDS[interval])
+  }, [coords, interval])
 
   // Push data whenever the candles change. Runs after the creation effects on mount.
   // Live ticks only touch the tail, so they go through update(), which keeps the user's
@@ -280,7 +409,152 @@ export function Chart({
     }
     if (plan.kind !== 'none') syncRealPriceLine(realLineRef.current, candles)
     appliedRef.current = candles
-  }, [candles, indicatorManager])
+    // O(1): the index keeps a reference; drawings re-project on LWC's next redraw.
+    coords.index.setBars(candles)
+  }, [candles, indicatorManager, coords])
+
+  // Drawing props → controller (each triggers a primitive redraw, never a setData).
+  useEffect(() => {
+    drawingController.setDrawings(drawings)
+  }, [drawingController, drawings])
+  useEffect(() => {
+    if (selectedDrawingId !== undefined) drawingController.setSelected(selectedDrawingId)
+  }, [drawingController, selectedDrawingId])
+  useEffect(() => {
+    drawingController.setTool(tool)
+    // A drawing tool owns touch gestures on the chart; cursor mode leaves them to LWC.
+    const container = containerRef.current
+    if (container) container.style.touchAction = tool === 'cursor' ? '' : 'none'
+  }, [drawingController, tool])
+  useEffect(() => {
+    drawingController.setSymbol(symbol)
+  }, [drawingController, symbol])
+  useEffect(() => {
+    drawingController.setStyle(drawingStyle)
+  }, [drawingController, drawingStyle])
+  useEffect(() => {
+    alertLinesManager.sync(alertLines)
+  }, [alertLinesManager, alertLines])
+
+  // Pointer, context-menu and key events for drawings. Capture-phase listeners on the container
+  // see presses before LWC; a press the controller consumes is stopped (and its default
+  // prevented, which also suppresses the compatibility mouse events LWC pans with). Presses on
+  // empty chart in cursor mode pass through untouched.
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    let captured: number | null = null
+
+    const local = (e: MouseEvent): PanePoint | null => {
+      const chart = chartRef.current
+      return chart ? toPanePoint(chart, e.clientX, e.clientY) : null
+    }
+    const setCursor = (cursor: string | null) => {
+      const el = chartRef.current?.chartElement()
+      if (!el) return
+      if (cursor) el.style.setProperty('cursor', cursor)
+      else el.style.removeProperty('cursor')
+    }
+    // Mouse events are suppressed while we hold the press, so drive the crosshair ourselves.
+    const followCrosshair = (p: PanePoint) => {
+      const chart = chartRef.current
+      const series = mainSeriesRef.current
+      if (!chart || !series) return
+      const price = series.coordinateToPrice(p.y)
+      const time = xToSnappedTime(coords, p.x)
+      if (price === null || time === null) return
+      chart.setCrosshairPosition(price, time as UTCTimestamp, series)
+    }
+
+    const onPointerDown = (e: PointerEvent) => {
+      // Ctrl-click is a right-click on macOS; leave it to the contextmenu handler.
+      if (!e.isPrimary || e.ctrlKey) return
+      const p = local(e)
+      if (!p || !p.inside) return
+      if (!drawingController.pointerDown({ x: p.x, y: p.y, button: e.button })) return
+      e.stopPropagation()
+      e.preventDefault()
+      // preventDefault also stops the press from moving focus. Blur whatever had it (e.g. a
+      // toolbar button) as a normal click on the chart would, so Delete reaches the chart.
+      const active = document.activeElement
+      if (active instanceof HTMLElement && active !== document.body && !container.contains(active))
+        active.blur()
+      try {
+        container.setPointerCapture(e.pointerId)
+        captured = e.pointerId
+      } catch {
+        captured = null
+      }
+      setCursor(drawingController.cursorAt(p))
+    }
+    const onPointerMove = (e: PointerEvent) => {
+      if (!e.isPrimary || !drawingController.busy) return
+      const p = local(e)
+      if (!p) return
+      const pressed = drawingController.pressed
+      if (drawingController.pointerMove(p) && pressed) {
+        followCrosshair(p)
+        setCursor(drawingController.cursorAt(p))
+      }
+    }
+    const onPointerUp = (e: PointerEvent) => {
+      if (!e.isPrimary || !drawingController.busy) return
+      const p = local(e)
+      const handled = p ? drawingController.pointerUp(p) : false
+      if (!p) drawingController.pointerCancel()
+      if (captured !== null) {
+        if (container.hasPointerCapture(captured)) container.releasePointerCapture(captured)
+        captured = null
+      }
+      if (handled && p) setCursor(drawingController.cursorAt(p))
+    }
+    const onPointerCancel = (e: PointerEvent) => {
+      if (!e.isPrimary) return
+      drawingController.pointerCancel()
+      captured = null
+      setCursor(null)
+    }
+    const onContextMenuEvent = (e: MouseEvent) => {
+      const p = local(e)
+      if (!p || !p.inside) return
+      const hit = drawingController.contextMenu(p)
+      const handler = onContextMenuRef.current
+      if (hit === null) {
+        // Right-click cancelled a drawing in progress.
+        e.preventDefault()
+        return
+      }
+      if (!handler) return
+      e.preventDefault()
+      handler({ clientX: e.clientX, clientY: e.clientY, ...hit })
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return
+      if (e.key !== 'Escape' && e.key !== 'Delete' && e.key !== 'Backspace') return
+      const accepted =
+        e.key === 'Escape'
+          ? chartAcceptsEscape(e.target)
+          : chartOwnsKeyTarget(e.target, document.body, container)
+      if (!accepted) return
+      if (drawingController.keyDown(e.key)) e.preventDefault()
+    }
+
+    container.addEventListener('pointerdown', onPointerDown, true)
+    container.addEventListener('pointermove', onPointerMove, true)
+    window.addEventListener('pointerup', onPointerUp, true)
+    window.addEventListener('pointercancel', onPointerCancel, true)
+    container.addEventListener('contextmenu', onContextMenuEvent)
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      container.removeEventListener('pointerdown', onPointerDown, true)
+      container.removeEventListener('pointermove', onPointerMove, true)
+      window.removeEventListener('pointerup', onPointerUp, true)
+      window.removeEventListener('pointercancel', onPointerCancel, true)
+      container.removeEventListener('contextmenu', onContextMenuEvent)
+      window.removeEventListener('keydown', onKeyDown)
+      drawingController.pointerCancel()
+    }
+  }, [drawingController, coords])
 
   // Indicator configs changed: create / remove / recompute / recolour / hide series.
   // Runs after the candles effect on mount, so new indicators start from the applied candles.

@@ -66,6 +66,38 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX drawings_symbol ON drawings (symbol);
     `,
   },
+  {
+    version: 2,
+    name: 'alerts',
+    sql: `
+      -- Price alerts (notification only). Times are UNIX seconds; active is 0/1.
+      CREATE TABLE alerts (
+        id                TEXT    PRIMARY KEY,
+        symbol            TEXT    NOT NULL,
+        condition         TEXT    NOT NULL,
+        price             REAL    NOT NULL,
+        frequency         TEXT    NOT NULL,
+        active            INTEGER NOT NULL,
+        note              TEXT    NOT NULL DEFAULT '',
+        created_at        INTEGER,
+        updated_at        INTEGER,
+        last_triggered_at INTEGER NULL
+      );
+      CREATE INDEX alerts_active ON alerts (active);
+
+      -- Trigger history. No foreign key to alerts, so history survives deleting an alert.
+      CREATE TABLE alert_events (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        alert_id     TEXT    NOT NULL,
+        symbol       TEXT,
+        condition    TEXT,
+        level        REAL,
+        price        REAL,
+        triggered_at INTEGER,
+        message      TEXT
+      );
+    `,
+  },
 ]
 
 /**

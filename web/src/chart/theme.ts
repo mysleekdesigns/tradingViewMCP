@@ -228,3 +228,27 @@ export function guideLineOptions(price: number): CreatePriceLineOptions {
     title: '',
   }
 }
+
+/* ---------- Drawings and alerts ---------- */
+
+export const drawingColors = {
+  /** Inside of the round anchor handles on a selected drawing. */
+  handleFill: colors.background,
+  /** Active alert price lines (TradingView's alert orange). */
+  alertLine: '#f7a600',
+} as const
+
+/** Dashed alert price line with an axis label, e.g. "Alert". */
+export function alertLineOptions(price: number, title: string): CreatePriceLineOptions {
+  return {
+    price,
+    color: drawingColors.alertLine,
+    lineWidth: 1,
+    lineStyle: LineStyle.Dashed,
+    lineVisible: true,
+    axisLabelVisible: true,
+    axisLabelColor: drawingColors.alertLine,
+    axisLabelTextColor: '#131722',
+    title,
+  }
+}

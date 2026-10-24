@@ -78,7 +78,7 @@ describe('migrations', () => {
     const Database = db.constructor as new (p: string) => Db
     db = new Database(':memory:')
     expect(tableNames(db)).toEqual([])
-    expect(migrate(db)).toBe(1)
+    expect(migrate(db)).toBe(Math.max(...MIGRATIONS.map((m) => m.version)))
     for (const t of TABLES) expect(tableNames(db)).toContain(t)
   })
 

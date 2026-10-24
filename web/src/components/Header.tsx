@@ -17,6 +17,10 @@ interface HeaderProps {
   onOpenIndicators: () => void
   /** Opens the symbol search dialog. */
   onOpenSearch: () => void
+  /** Opens the "Create alert" dialog at the last price. */
+  onOpenAlert: () => void
+  /** Why alerts cannot be created right now (shown as the tooltip), or null when they can. */
+  alertDisabledReason: string | null
   watchlistOpen: boolean
   onToggleWatchlist: () => void
   source: string
@@ -37,6 +41,8 @@ export function Header({
   onChartTypeChange,
   onOpenIndicators,
   onOpenSearch,
+  onOpenAlert,
+  alertDisabledReason,
   watchlistOpen,
   onToggleWatchlist,
   source,
@@ -102,6 +108,20 @@ export function Header({
       >
         <IndicatorsIcon />
         <span className="ind-btn__label">Indicators</span>
+      </button>
+
+      <button
+        type="button"
+        className="ind-btn"
+        // aria-disabled keeps the tooltip (and focus) working while alerts are unavailable.
+        onClick={alertDisabledReason === null ? onOpenAlert : undefined}
+        aria-disabled={alertDisabledReason !== null}
+        aria-haspopup="dialog"
+        aria-label="Create alert"
+        title={alertDisabledReason ?? 'Create alert (Alt+A)'}
+      >
+        <BellIcon />
+        <span className="ind-btn__label">Alert</span>
       </button>
 
       <div className="topbar__divider" aria-hidden="true" />
@@ -200,6 +220,27 @@ function IndicatorsIcon() {
         fill="none"
         stroke="currentColor"
         strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
+function BellIcon() {
+  return (
+    <svg className="ind-btn__icon" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+      <path
+        d="M10 3.2c-2.6 0-4.4 2-4.4 4.6v2.9L4.2 13.4h11.6l-1.4-2.7V7.8c0-2.6-1.8-4.6-4.4-4.6Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8.1 15.6a2 2 0 0 0 3.8 0"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
         strokeLinecap="round"
       />
     </svg>

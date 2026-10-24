@@ -11,7 +11,7 @@ Confirmed (Phase 5 review, 2026-10-24):
 - liveCandles subscribes WS and fetches REST in parallel, so a bad symbol reaches the WS.
 
 Open gaps flagged (recheck next review):
-- Server closes /ws/klines with 1008 for bad symbol/interval after upgrade; openReconnectingSocket treats it as transient -> onopen 'live', close, reconnect forever, gap-fill each cycle.
+- FIXED (seen 2026-10-24 Phase 6 review): 1008 reconnect loop; ServerProvider and the alerts stream pass fatalCloseCodes [1008].
 - useIndicators has no `storage` listener, so a stale second tab PUTs its whole old layout to the server.
 - Edits made before the initial GET resolves are silently replaced by the server copy.
 - Browser JS never sees WS protocol pings, so the README "ping every 20 s" does not reset the client stale timer.

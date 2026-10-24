@@ -101,7 +101,8 @@ describe('stream routes', () => {
     const waiters: (() => void)[] = []
     const ws = (await app.injectWS(
       path,
-      { headers },
+      // injectWS sends no Host; the app's DNS-rebinding guard requires a loopback one.
+      { headers: { host: 'localhost:80', ...headers } },
       {
         onInit: (raw) => {
           const c = raw as unknown as TestClient

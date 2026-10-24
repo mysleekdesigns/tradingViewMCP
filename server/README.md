@@ -5,9 +5,17 @@ binds to `127.0.0.1` only. Market data is public (Binance.US); no API keys anywh
 
 - Port: `TV_PORT` env, default `8787`. Host is always `127.0.0.1`.
 - Database: `TV_DB_PATH` env, default `server/data/app.db` (gitignored). Tests use `:memory:`.
+- Alerts: `TV_DESKTOP_NOTIFY` (`auto` | `always` | `off`, default `auto`) and optional
+  `TV_ALERT_WEBHOOK_URL` (secret; environment only). See "Alerts" below.
 - Run: `npm run dev` (tsx watch). From the repo root, `npm run dev` starts server + web together.
 - The Vite dev server proxies `/api` and `/ws` to `http://127.0.0.1:8787`, so the browser uses
   same-origin relative URLs.
+- **Host check (DNS-rebinding guard).** Every request, REST and WebSocket upgrade alike, must
+  carry a `Host` header whose hostname is `localhost`, `127.0.0.1` or `[::1]` (any port; the
+  Vite proxy forwards `Host: localhost:5173` unchanged because `changeOrigin` is off). Anything
+  else, including a missing `Host`, gets `403 {"error":"http","message":"host not allowed"}`
+  before routing, so a page whose domain re-resolves to 127.0.0.1 cannot read or change data.
+  Use `http://localhost:…` or `http://127.0.0.1:…`, never a custom hostname.
 
 ## Contract (shared by server and `web/src/data/server.ts`)
 
@@ -89,17 +97,91 @@ are attached, and closes it when the last one leaves.
 - A client whose send buffer exceeds 1 MB is terminated (the browser sees close `1006`).
 - Clients never send anything; any client message is ignored.
 
+### Alerts (Phase 6)
+
+Notification only: alerts never place, cancel, or modify orders, and use no exchange keys.
+Shapes are exactly `web/src/data/alertTypes.ts` (`Alert`, `NewAlert`, `AlertPatch`, `AlertEvent`,
+`AlertStreamMessage`); the server copy is `server/src/alerts/types.ts`. Times are UNIX seconds.
+Errors use the table above (`error: "http"`): 400 validation, 404 unknown alert, 409 limit.
+
+- `GET /api/alerts[?symbol=SYM]` → `Alert[]`, newest first (`createdAt` desc). Bad symbol → 400.
+- `POST /api/alerts` body `NewAlert` → `201 Alert`. `id` is a server UUID; `active: true`;
+  `lastTriggeredAt: null`. Validation: `symbol` trimmed + uppercased, `^[A-Z0-9]{2,30}$`;
+  `condition` ∈ `crosses_above | crosses_below | greater | less`; `price` a finite number > 0;
+  `frequency` ∈ `once | every`; `note` optional string, trimmed, ≤ 200 chars (default `''`).
+  Unknown body fields → 400. More than 500 alerts in total → 409.
+- `PATCH /api/alerts/:id` body `AlertPatch` (any non-empty subset of `condition`, `price`,
+  `frequency`, `active`, `note`; unknown keys or `{}` → 400) → `Alert`; 404 if absent.
+  `active: true` re-arms the alert; changing `price` or `condition` also resets its state
+  (an explicit reset starts armed, so a true `greater`/`less` fires at once, cooldown allowing).
+- `DELETE /api/alerts/:id` → `204`, or 404.
+- `GET /api/alerts/events?limit=100` (1..1000, default 100) → `AlertEvent[]`, newest first.
+  `DELETE /api/alerts/events` → `204` (clears history). History has no foreign key to alerts,
+  so it survives deleting an alert, and is pruned to the newest 1000 events on insert.
+- `GET /ws/alerts` (upgrade; same Origin rule as the other sockets, else close `1008`).
+  Server → client `AlertStreamMessage`:
+  - `{ "type": "heartbeat" }` on attach and every 20 s (plus a protocol ping).
+  - `{ "type": "triggered", "event": AlertEvent, "alert": Alert }` per trigger (`alert` is the
+    state after the trigger, e.g. `active: false` for a fired `once` alert), followed by one
+    `{ "type": "changed" }` for that batch of triggers.
+  - `{ "type": "changed" }` after every successful REST mutation (any tab): refetch.
+  - Clients never send; messages are ignored. A client whose send buffer exceeds 1 MB is
+    terminated.
+
+**Evaluation.** Alerts fire on the live last-traded price (`Ticker.last` from the shared
+`!miniTicker@arr` upstream socket), not on bar close. The engine holds that stream only while at
+least one active alert exists. Per alert it keeps `{ prev, armed }` from its own first tick
+(an alert never compares against a price seen before it was created or re-armed):
+
+| condition       | fires when                                                          |
+| --------------- | ------------------------------------------------------------------- |
+| `crosses_above` | `prev < level && cur >= level` (never on the first tick)            |
+| `crosses_below` | `prev > level && cur <= level` (never on the first tick)            |
+| `greater`       | `cur > level` while armed (first tick can fire); re-arms when false |
+| `less`          | `cur < level` while armed (first tick can fire); re-arms when false |
+
+State lives in memory. After a server restart (including every `tsx watch` reload) an alert
+that has fired before (`lastTriggeredAt !== null`) and was not explicitly reset starts
+**disarmed**: a `greater`/`less` whose condition is still true does not fire again until it has
+been seen false once. Alerts that never fired, and explicit resets (above), start armed.
+
+`once` deactivates after firing. `every` stays active with a 60 s cooldown per alert (seeded
+from `lastTriggeredAt`, so restarts and edits respect it): a cross inside the cooldown is
+dropped; a `greater`/`less` that is true inside it fires when the cooldown ends. Non-finite or
+≤ 0 prices are ignored. A trigger is one SQLite transaction (event row, `last_triggered_at`,
+`active = 0` for `once`). Message: `BTCUSDT crossing up 65,000 (last 65,012.5)`.
+
+**Notifications** (after the DB commit, fire-and-forget; one failing never blocks another or
+the WebSocket push). One upstream ticker batch can fire several alerts: the WebSocket still
+gets one `triggered` per alert, but desktop and webhook get **one notification per batch**:
+
+- Browser: the web app shows a Notification on `triggered` while it is open.
+- Desktop (macOS): `osascript -e 'display notification …'` (no shell, 5 s timeout).
+  `TV_DESKTOP_NOTIFY=auto|always|off` (default `auto` = only while no `/ws/alerts` client is
+  attached, so an open browser does not double-notify). One trigger: title `Alert: SYM`, body
+  the message (plus `Note: …`). Several: title `Alerts: N triggered`, body the first 5
+  messages then `+M more`.
+- Webhook (optional): `TV_ALERT_WEBHOOK_URL` (https, or http to localhost). At most one POST
+  per batch, JSON `{ text, content, event, alert, allowed_mentions: { parse: [] } }` (`text`
+  for Slack, `content` for Discord; `allowed_mentions` stops a note such as `@everyone` pinging
+  a Discord channel and is always forced by the notifier). With several triggers, `event` /
+  `alert` are the first one, `events: AlertEvent[]` lists all of them, and `text`/`content`
+  join each trigger's text with newlines (kept under 1900 chars with a final `+M more`). 5 s
+  timeout, at most one retry on a network error or 5xx. The URL is a secret: read from the environment only,
+  never logged, stored, or returned.
+
 ## Layout
 
 ```
 server/
 ├── src/
 │   ├── index.ts            # entry: open DB, build app, listen on 127.0.0.1
-│   ├── app.ts              # buildApp({ db, upstream? }) → FastifyInstance (registers plugins)
-│   ├── config.ts           # env parsing (port, db path)
+│   ├── app.ts              # buildApp(deps) → FastifyInstance; owns the shared upstream hub
+│   ├── config.ts           # env parsing (port, db path, desktop notify mode, webhook URL)
 │   ├── types.ts            # Candle, SymbolInfo, Ticker, Interval, INTERVAL_SECONDS
-│   ├── db/                 # openDb(path) + numbered migrations
+│   ├── db/                 # openDb(path) + numbered migrations (2 = alerts)
 │   ├── upstream/           # Binance.US REST client (rate limit + retry), upstream sockets
-│   └── routes/             # candles.ts, symbols.ts, stream.ts, persistence.ts
+│   ├── alerts/             # types, evaluate (pure), store (SQLite), engine, notify
+│   └── routes/             # candles, symbols, stream, persistence, alerts
 └── test/
 ```

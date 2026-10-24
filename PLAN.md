@@ -436,9 +436,9 @@ tradingView/
 - [ ] Rectangle
 - [ ] Select / move / delete drawings; persisted per symbol
 - [ ] Alert creation from the chart (right-click price → "Add alert")
-- [ ] Server-side alert evaluation
+- [x] Server-side alert evaluation
 - [ ] Browser + desktop notifications
-- [ ] Webhook notifications (optional)
+- [x] Webhook notifications (optional)
 - [ ] Alert list with history of triggered alerts
 
 **Done when:** drawings persist across reloads and a price alert pops a notification.

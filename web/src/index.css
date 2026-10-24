@@ -20,6 +20,7 @@
   --topbar-h: 48px;
   --statusbar-h: 26px;
   --sidebar-w: 300px;
+  --rail-w: 44px;
 
   font-family: var(--font-ui);
   font-size: 13px;
@@ -40,58 +41,76 @@ body,
 .app {
   display: grid;
   grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--statusbar-h);
-  grid-template-columns: minmax(0, 1fr);
+  /* Drawing rail | chart | panel-picker rail; the sidebar slots in before the right rail. */
+  grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--rail-w);
   grid-template-areas:
-    'top'
-    'main'
-    'status';
+    'top top top'
+    'tools main rail'
+    'status status status';
   height: 100%;
   overflow: hidden;
   background: var(--chrome);
 }
 
 .app--with-sidebar {
-  grid-template-columns: minmax(0, 1fr) var(--sidebar-w);
+  grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--sidebar-w) var(--rail-w);
   grid-template-areas:
-    'top top'
-    'main side'
-    'status status';
+    'top top top top'
+    'tools main side rail'
+    'status status status status';
 }
 
 .app > .topbar {
   grid-area: top;
 }
 
+.app > .draw-rail {
+  grid-area: tools;
+}
+
 .app > .workspace {
   grid-area: main;
+}
+
+.app > .side-rail {
+  grid-area: rail;
 }
 
 .app > .statusbar {
   grid-area: status;
 }
 
+/*
+ * Gutters: each rail's 36px buttons sit in 44px, which already leaves 4px of chrome beside the
+ * panels, so the chart touches both rails and only the chart/sidebar seam gets a 4px gap.
+ */
 .sidebar {
   grid-area: side;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  margin-right: 4px;
   border: 1px solid var(--border-soft);
   border-radius: 4px;
   background: var(--bg);
   overflow: hidden;
 }
 
-.sidebar > .watchlist {
+.sidebar > .watchlist,
+.sidebar > .alerts {
   flex: 1;
   min-height: 0;
 }
 
+.app--with-sidebar > .workspace {
+  margin-right: 4px;
+}
+
 .workspace {
   position: relative;
+  min-width: 0;
   min-height: 0;
-  margin: 0 4px;
+  margin: 0;
   border: 1px solid var(--border-soft);
   border-radius: 4px;
   background: var(--bg);
@@ -991,6 +1010,80 @@ kbd {
   }
 }
 
+/* ---------- Header "Alert" button (shares .ind-btn) ---------- */
+
+.ind-btn[aria-disabled='true'] {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+.ind-btn[aria-disabled='true'] .ind-btn__icon {
+  color: var(--text-faint);
+}
+
+.ind-btn[aria-disabled='true']:hover {
+  background: transparent;
+}
+
+/* ---------- Small app notice (failed background actions) ---------- */
+
+.app-notice {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--statusbar-h) + 12px);
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 8px 8px 8px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 6px 24px rgb(0 0 0 / 45%);
+  transform: translateX(-50%);
+  animation: app-notice-in 160ms ease-out;
+}
+
+.app-notice__text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.app-notice__close {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.app-notice__close:hover {
+  background: var(--panel-hover);
+  color: var(--text);
+}
+
+.app-notice__close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@keyframes app-notice-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -1027,6 +1120,10 @@ kbd {
 }
 
 @media (max-width: 720px) {
+  :root {
+    --sidebar-w: 200px;
+  }
+
   .topbar__desc,
   .quote__basis,
   .source-badge,
