@@ -1,0 +1,1 @@
+- [Indicator conventions](indicator-conventions.md) — Phase 4 stepper/runner design, agreed TV formulas, runner `from` contract pitfalls

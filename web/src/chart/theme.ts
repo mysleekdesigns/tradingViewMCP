@@ -179,3 +179,52 @@ export function watermarkOptions(
     lines: [{ text, color: colors.watermark, fontSize: 72, fontStyle: '600', fontFamily: family }],
   }
 }
+
+/* ---------- Indicators ---------- */
+
+/** MACD-style histogram colours (TradingView defaults). */
+export const histogramColors = {
+  /** value >= 0 and rising (>= previous bar). Replaced by the user's histogram colour. */
+  positiveRising: '#26a69a',
+  positiveFalling: '#b2dfdb',
+  negativeFalling: '#ff5252',
+  negativeRising: '#ffcdd2',
+} as const
+
+/** Shared by every indicator line: small coloured label on the scale, no price line. */
+export const indicatorLineBase: LineSeriesPartialOptions = {
+  lastValueVisible: true,
+  priceLineVisible: false,
+  crosshairMarkerRadius: 3,
+  crosshairMarkerBorderColor: colors.background,
+  title: '',
+}
+
+export const indicatorHistogramBase: HistogramSeriesPartialOptions = {
+  lastValueVisible: true,
+  priceLineVisible: false,
+  title: '',
+}
+
+/** Indicator panes keep a little air above and below the plotted values. */
+export const indicatorPaneScaleMargins = { top: 0.1, bottom: 0.08 } as const
+
+/**
+ * Relative pane heights: the price pane keeps stretch 1 and each indicator pane gets this,
+ * so one oscillator takes ~23% of the height, two take ~19% each, three ~16% each.
+ */
+export const mainPaneStretch = 1
+export const indicatorPaneStretch = 0.3
+
+/** Dashed, muted guide lines (RSI 70/30, Stoch 80/20, MACD zero line); no axis label. */
+export function guideLineOptions(price: number): CreatePriceLineOptions {
+  return {
+    price,
+    color: colors.mutedText,
+    lineWidth: 1,
+    lineStyle: LineStyle.Dashed,
+    lineVisible: true,
+    axisLabelVisible: false,
+    title: '',
+  }
+}

@@ -380,8 +380,8 @@ tradingView/
 - [ ] Volume moving average
 - [ ] Settings dialog (inputs + colors)
 - [ ] Remove/hide indicator from the legend
-- [ ] Incremental recompute on live ticks
-- [ ] Unit tests for each indicator against known values (Vitest)
+- [x] Incremental recompute on live ticks
+- [x] Unit tests for each indicator against known values (Vitest)
 
 **Done when:** you can stack EMA 20/50 + Bollinger on price and RSI + MACD below, all updating live.
 

@@ -1,0 +1,110 @@
+/* Indicator legend rows (main legend + one per indicator pane). Uses index.css variables. */
+
+.ind-pane-legend {
+  position: absolute;
+  left: 10px;
+  z-index: 2;
+  max-width: calc(100% - 90px);
+  font-size: 12px;
+  /* Only the row itself takes the pointer; empty space keeps dragging/crosshair on the chart. */
+  pointer-events: none;
+}
+
+.ind-legend__row {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  align-self: flex-start;
+  min-height: 20px;
+  margin-left: -4px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  pointer-events: auto;
+  transition:
+    border-color 0.12s ease,
+    background-color 0.12s ease;
+}
+
+.ind-legend__row:hover,
+.ind-legend__row:focus-within {
+  border-color: var(--border);
+  background: rgba(19, 23, 34, 0.82);
+}
+
+.ind-legend__title {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.ind-legend__values {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+.ind-legend__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.ind-legend__row:hover .ind-legend__actions,
+.ind-legend__row:focus-within .ind-legend__actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ind-legend__btn {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.ind-legend__btn:hover {
+  background: var(--panel-hover);
+  color: var(--text);
+}
+
+.ind-legend__btn--remove:hover {
+  color: var(--down);
+}
+
+.ind-legend__btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* Hidden: dimmed title, and the eye-off button stays visible so it can be turned back on. */
+.ind-legend__row--hidden .ind-legend__title {
+  color: var(--text-faint);
+}
+
+.ind-legend__row--hidden .ind-legend__actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ind-legend__row--hidden .ind-legend__btn:not(.ind-legend__btn--eye) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.ind-legend__row--hidden:hover .ind-legend__btn,
+.ind-legend__row--hidden:focus-within .ind-legend__btn {
+  opacity: 1;
+  pointer-events: auto;
+}

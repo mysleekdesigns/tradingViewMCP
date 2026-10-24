@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import {
   AreaSeries,
   CandlestickSeries,
@@ -15,9 +15,12 @@ import {
   type Time,
 } from 'lightweight-charts'
 import { formatUtc } from '../components/quote'
+import type { IndicatorConfig } from '../state/indicators'
 import type { Candle, ChartType, Interval } from '../types'
 import { mainSeriesData, mainSeriesTail, realPriceLine, usesRealPriceLine } from './chartTypes.ts'
 import type { HeikinAshiBar } from './heikinAshi.ts'
+import { IndicatorLegendRows, PaneLegends } from './IndicatorLegend'
+import { IndicatorSeriesManager } from './indicatorSeries'
 import { buildLegend, selectLegendIndex, type LegendValues } from './legend.ts'
 import {
   areaOptions,
@@ -84,6 +87,25 @@ interface ChartProps {
    * May fire repeatedly while the user stays there; the caller dedupes.
    */
   onNearLeftEdge?: () => void
+  /**
+   * Active indicators in display order. Pane indicators get panes 1..n in this order.
+   * They always compute on the real candles, in every chart type (Heikin-Ashi included).
+   */
+  indicators?: readonly IndicatorConfig[]
+  onIndicatorToggleVisible?: (uid: string) => void
+  onIndicatorRemove?: (uid: string) => void
+  onIndicatorSettings?: (uid: string) => void
+}
+
+const NO_INDICATORS: readonly IndicatorConfig[] = []
+
+/** Same tops (within half a pixel) → keep the old array so React skips the re-render. */
+function sameTops(a: readonly (number | null)[], b: readonly (number | null)[]): boolean {
+  if (a.length !== b.length) return false
+  return a.every((t, i) => {
+    const u = b[i]
+    return t === null || u === null ? t === u : Math.abs(t - u) < 0.5
+  })
 }
 
 export function Chart({
@@ -93,6 +115,10 @@ export function Chart({
   source,
   chartType,
   onNearLeftEdge,
+  indicators = NO_INDICATORS,
+  onIndicatorToggleVisible,
+  onIndicatorRemove,
+  onIndicatorSettings,
 }: ChartProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -109,6 +135,14 @@ export function Chart({
   const onNearLeftEdgeRef = useRef(onNearLeftEdge)
   const [hoveredTime, setHoveredTime] = useState<number | undefined>(undefined)
   const [fontsReady, setFontsReady] = useState(false)
+  /** Series of every indicator; also the store the indicator legend reads from. */
+  const [indicatorManager] = useState(() => new IndicatorSeriesManager())
+  const indicatorSnapshot = useSyncExternalStore(
+    indicatorManager.subscribe,
+    indicatorManager.getSnapshot,
+  )
+  /** Top of each pane (px from the chart's top edge), for the pane legends. */
+  const [paneTops, setPaneTops] = useState<readonly (number | null)[]>([])
 
   // Latest callback without resubscribing to the time scale.
   useEffect(() => {
@@ -160,11 +194,13 @@ export function Chart({
 
     chartRef.current = chart
     volumeSeriesRef.current = volumeSeries
+    indicatorManager.attach(chart)
     return () => {
       chart.unsubscribeCrosshairMove(onCrosshairMove)
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(onRangeChange)
       disposed = true
       watermarkRef.current?.detach()
+      indicatorManager.detach()
       chartRef.current = null
       chart.remove()
       mainSeriesRef.current = null
@@ -174,7 +210,7 @@ export function Chart({
       appliedRef.current = null
       haRef.current = null
     }
-  }, [])
+  }, [indicatorManager])
 
   // (Re)create the main series for the chart type. On mount the data effect below fills it;
   // on a type switch the candles already shown are re-applied here. Volume is untouched.
@@ -183,6 +219,8 @@ export function Chart({
     if (!chart) return
     chartTypeRef.current = chartType
     const series = addMainSeries(chart, chartType)
+    // Right above volume (order 0), below indicator overlays, as on TradingView.
+    series.setSeriesOrder(1)
     mainSeriesRef.current = series
     if (usesRealPriceLine(chartType))
       realLineRef.current = series.createPriceLine(realPriceLineOptions)
@@ -227,6 +265,7 @@ export function Chart({
       mainSeries.setData(points)
       volumeSeries.setData(toVolumeData(candles, volumePalette))
       haRef.current = ha
+      indicatorManager.applyPlan(plan, candles)
       if (plan.kind === 'prepend' && range) {
         timeScale.setVisibleLogicalRange(shiftLogicalRange(range, plan.count))
       }
@@ -237,20 +276,86 @@ export function Chart({
         volumeSeries.update(toVolumePoint(candles[i], volumePalette))
       }
       haRef.current = ha
+      indicatorManager.applyPlan(plan, candles)
     }
     if (plan.kind !== 'none') syncRealPriceLine(realLineRef.current, candles)
     appliedRef.current = candles
-  }, [candles])
+  }, [candles, indicatorManager])
+
+  // Indicator configs changed: create / remove / recompute / recolour / hide series.
+  // Runs after the candles effect on mount, so new indicators start from the applied candles.
+  useEffect(() => {
+    indicatorManager.sync(indicators, appliedRef.current)
+  }, [indicators, indicatorManager])
+
+  // Measure where each pane starts so pane legends sit at their pane's top-left corner.
+  // Re-measured when panes change, the chart resizes, or the user drags a pane separator.
+  useEffect(() => {
+    const chart = chartRef.current
+    const container = containerRef.current
+    if (!chart || !container) return
+    let frame = 0
+    let retries = 0
+    const observer = new ResizeObserver(() => measure())
+    const observed = new Set<Element>()
+    let disposed = false
+    function measure() {
+      // A ResizeObserver callback can run while a retry frame is pending; drop that frame.
+      if (frame) cancelAnimationFrame(frame)
+      frame = 0
+      if (disposed || !chart || !container) return
+      const base = container.getBoundingClientRect().top
+      let missing = false
+      const tops = chart.panes().map((pane) => {
+        const el = pane.getHTMLElement()
+        if (!el) {
+          missing = true
+          return null
+        }
+        if (!observed.has(el)) {
+          observed.add(el)
+          observer.observe(el)
+        }
+        return el.getBoundingClientRect().top - base
+      })
+      setPaneTops((prev) => (sameTops(prev, tops) ? prev : tops))
+      // Pane widgets are created on LWC's next frame; try again until they exist.
+      if (missing && retries++ < 10) frame = requestAnimationFrame(measure)
+    }
+    observer.observe(container)
+    frame = requestAnimationFrame(measure)
+    return () => {
+      disposed = true
+      if (frame) cancelAnimationFrame(frame)
+      observer.disconnect()
+    }
+  }, [indicatorSnapshot.paneVersion])
 
   const legend = useMemo(
     () => buildLegend(candles, selectLegendIndex(candles, hoveredTime)),
     [candles, hoveredTime],
   )
 
+  // Cheap (binary search per line). useSyncExternalStore above re-renders on every store change
+  // (live tick, config change), so this always reads the current values.
+  const indicatorRows = indicatorManager.legendRows(hoveredTime)
+  const legendActions = {
+    onToggleVisible: onIndicatorToggleVisible,
+    onRemove: onIndicatorRemove,
+    onSettings: onIndicatorSettings,
+  }
+
   return (
     <div className="chart">
       <div ref={containerRef} className="chart__canvas" />
-      <Legend symbol={symbol} interval={interval} source={source} values={legend} />
+      <Legend symbol={symbol} interval={interval} source={source} values={legend}>
+        <IndicatorLegendRows rows={indicatorRows.filter((r) => r.pane === 0)} {...legendActions} />
+      </Legend>
+      <PaneLegends
+        rows={indicatorRows.filter((r) => r.pane > 0)}
+        paneTops={paneTops}
+        {...legendActions}
+      />
     </div>
   )
 }
@@ -260,9 +365,11 @@ interface LegendProps {
   interval: Interval
   source: string
   values: LegendValues | null
+  /** Overlay indicator rows, under the OHLC and volume rows. */
+  children?: ReactNode
 }
 
-function Legend({ symbol, interval, source, values }: LegendProps) {
+function Legend({ symbol, interval, source, values, children }: LegendProps) {
   return (
     <div className="chart-legend" aria-live="off">
       <div className="chart-legend__row">
@@ -285,6 +392,7 @@ function Legend({ symbol, interval, source, values }: LegendProps) {
           <span className="chart-legend__time">{formatUtc(values.time)} UTC</span>
         </div>
       )}
+      {children}
     </div>
   )
 }

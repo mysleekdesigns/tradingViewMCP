@@ -1,6 +1,7 @@
 import type { ChartType, ConnectionStatus, Interval } from '../types'
 import { ChartTypeMenu } from './ChartTypeMenu'
 import { ConnectionIndicator } from './ConnectionStatus'
+import './Indicators.css'
 import type { Quote } from './quote'
 import { TimeframeToolbar } from './TimeframeToolbar'
 
@@ -12,6 +13,8 @@ interface HeaderProps {
   onIntervalChange: (interval: Interval) => void
   chartType: ChartType
   onChartTypeChange: (type: ChartType) => void
+  /** Opens the "Indicators" picker. */
+  onOpenIndicators: () => void
   /** Opens the symbol search dialog. */
   onOpenSearch: () => void
   watchlistOpen: boolean
@@ -32,6 +35,7 @@ export function Header({
   onIntervalChange,
   chartType,
   onChartTypeChange,
+  onOpenIndicators,
   onOpenSearch,
   watchlistOpen,
   onToggleWatchlist,
@@ -87,6 +91,18 @@ export function Header({
       <div className="topbar__divider" aria-hidden="true" />
 
       <ChartTypeMenu value={chartType} onChange={onChartTypeChange} />
+
+      <button
+        type="button"
+        className="ind-btn"
+        onClick={onOpenIndicators}
+        aria-haspopup="dialog"
+        aria-label="Indicators"
+        title="Indicators (/)"
+      >
+        <IndicatorsIcon />
+        <span className="ind-btn__label">Indicators</span>
+      </button>
 
       <div className="topbar__divider" aria-hidden="true" />
 
@@ -164,6 +180,28 @@ function LogoMark() {
       <rect x="10.5" y="2" width="1" height="14" fill="var(--up)" />
       <rect x="15" y="9" width="4" height="9" rx="1" fill="var(--accent)" />
       <rect x="16.5" y="6" width="1" height="14" fill="var(--accent)" />
+    </svg>
+  )
+}
+
+function IndicatorsIcon() {
+  // "fx": TradingView's indicators glyph.
+  return (
+    <svg className="ind-btn__icon" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+      <path
+        d="M9.6 3.6c-.9-.6-2.4-.3-2.8 1.2L4.9 14.9c-.3 1.5-1.6 1.9-2.6 1.3M3.9 8h4.6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+      <path
+        d="M11 8.5l5.5 6.5M16.5 8.5 11 15"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
     </svg>
   )
 }
