@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useReducer } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
+import {
+  createPersistenceClient,
+  createServerSync,
+  DEFAULT_PERSISTENCE_ID,
+  type PersistenceClient,
+  type ServerSync,
+} from '../data/persistence'
 
 /** Symbols shown on first run (and whenever the stored list is missing or invalid). */
 export const DEFAULT_WATCHLIST: readonly string[] = [
@@ -100,6 +107,11 @@ export function parseWatchlist(raw: string | null): string[] | null {
   } catch {
     return null
   }
+  return validateWatchlist(value)
+}
+
+/** Same rules as parseWatchlist, for an already-decoded value (e.g. a server response). */
+export function validateWatchlist(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length > MAX_WATCHLIST_ITEMS) return null
   const seen = new Set<string>()
   for (const v of value) {
@@ -153,14 +165,51 @@ export function saveWatchlist(
 }
 
 /**
- * The user's watchlist, persisted to localStorage under 'tv.watchlist.v1'. Edits in another
- * tab are picked up through the `storage` event.
+ * Sync for the single watchlist with the local server (`/api/watchlists/default`). The server
+ * copy wins once its GET returns; a 404 migrates the local list up; no server = local-only.
+ */
+export function createWatchlistSync(
+  initial: readonly string[],
+  onRemote: (items: string[]) => void,
+  client: PersistenceClient = createPersistenceClient(),
+  debounceMs?: number,
+): ServerSync<readonly string[]> {
+  return createServerSync<readonly string[]>({
+    initial,
+    load: async () => (await client.getWatchlist(DEFAULT_PERSISTENCE_ID))?.items ?? null,
+    save: (items) => client.putWatchlist(DEFAULT_PERSISTENCE_ID, items),
+    parse: validateWatchlist,
+    onRemote: (items) => onRemote([...items]),
+    debounceMs,
+  })
+}
+
+/**
+ * The user's watchlist. localStorage ('tv.watchlist.v1') is the synchronous initial value and
+ * offline cache; the local server's SQLite copy is the source of truth when it is reachable.
+ * Edits in another tab are picked up through the `storage` event.
  */
 export function useWatchlist(): WatchlistApi {
   const [items, dispatch] = useReducer(watchlistReducer, undefined, () => loadWatchlist())
+  const itemsRef = useRef(items)
+  const syncRef = useRef<ServerSync<readonly string[]> | null>(null)
 
   useEffect(() => {
+    const sync = createWatchlistSync(itemsRef.current, (next) =>
+      dispatch({ type: 'replace', items: next }),
+    )
+    syncRef.current = sync
+    sync.start()
+    return () => {
+      sync.dispose()
+      if (syncRef.current === sync) syncRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    itemsRef.current = items
     saveWatchlist(items)
+    syncRef.current?.update(items)
   }, [items])
 
   useEffect(() => {
@@ -168,7 +217,11 @@ export function useWatchlist(): WatchlistApi {
     const onStorage = (e: StorageEvent) => {
       if (e.key !== WATCHLIST_STORAGE_KEY) return
       const next = parseWatchlist(e.newValue)
-      if (next !== null) dispatch({ type: 'replace', items: next })
+      if (next === null) return
+      // Another tab already saved this value; adopt it so this tab neither echoes it nor
+      // later PUTs its own stale copy over it.
+      syncRef.current?.adopt(next)
+      dispatch({ type: 'replace', items: next })
     }
     window.addEventListener('storage', onStorage)
     return () => window.removeEventListener('storage', onStorage)

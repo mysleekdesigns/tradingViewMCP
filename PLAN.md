@@ -400,14 +400,14 @@ tradingView/
 6. Rate-limit upstream REST calls (Binance weight limits; respect `429` / `Retry-After`).
 
 ### Checklist
-- [ ] Fastify server with health check
-- [ ] SQLite schema + migrations
-- [ ] `/api/candles` with cache-fill logic
-- [ ] `/api/symbols` (cached `exchangeInfo`)
-- [ ] WebSocket fan-out endpoint
-- [ ] REST endpoints for watchlists / layouts / drawings
-- [ ] `ServerProvider` on the frontend
-- [ ] Upstream rate limiting + retry
+- [x] Fastify server with health check
+- [x] SQLite schema + migrations
+- [x] `/api/candles` with cache-fill logic
+- [x] `/api/symbols` (cached `exchangeInfo`)
+- [x] WebSocket fan-out endpoint
+- [x] REST endpoints for watchlists / layouts / drawings
+- [x] `ServerProvider` on the frontend
+- [x] Upstream rate limiting + retry
 - [ ] One command to run both: `npm run dev` at root (e.g. with `concurrently`)
 
 **Done when:** reloads are instant from cache and multiple tabs share one exchange connection.

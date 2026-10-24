@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
-import { backoffDelay, parseKlineMessage } from './binanceStream'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { ConnectionStatus } from '../types'
+import { backoffDelay, openReconnectingSocket, parseKlineMessage } from './binanceStream'
 
 function klineMsg(overrides: Record<string, unknown> = {}, top: Record<string, unknown> = {}) {
   return {
@@ -112,5 +113,93 @@ describe('backoffDelay', () => {
     expect(backoffDelay(Number.NaN, () => 1)).toBe(1000)
     expect(backoffDelay(0, () => 5)).toBe(1000)
     expect(backoffDelay(0, () => -5)).toBe(500)
+  })
+})
+
+class MiniWs {
+  static instances: MiniWs[] = []
+  readyState = 0
+  onopen: ((ev: Event) => void) | null = null
+  onmessage: ((ev: MessageEvent) => void) | null = null
+  onerror: ((ev: Event) => void) | null = null
+  onclose: ((ev: CloseEvent) => void) | null = null
+  readonly url: string
+  constructor(url: string) {
+    this.url = url
+    MiniWs.instances.push(this)
+  }
+  close(): void {
+    this.readyState = 3
+  }
+  open(): void {
+    this.readyState = 1
+    this.onopen?.(new Event('open'))
+  }
+  message(data: string): void {
+    this.onmessage?.({ data } as MessageEvent)
+  }
+  serverClose(code: number): void {
+    this.readyState = 3
+    this.onclose?.({ code } as CloseEvent)
+  }
+}
+
+describe('openReconnectingSocket options', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    MiniWs.instances = []
+  })
+
+  function open(extra: { fatalCloseCodes?: readonly number[]; liveOnFirstMessage?: boolean }) {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(1)
+    const statuses: ConnectionStatus[] = []
+    const order: string[] = []
+    const teardown = openReconnectingSocket({
+      WebSocketImpl: MiniWs as unknown as typeof WebSocket,
+      url: 'ws://x',
+      staleTimeoutMs: 60_000,
+      onMessage: (d) => order.push(`msg:${String(d)}`),
+      onStatus: (s) => {
+        statuses.push(s)
+        order.push(`status:${s}`)
+      },
+      ...extra,
+    })
+    return { statuses, order, teardown, last: () => MiniWs.instances[MiniWs.instances.length - 1] }
+  }
+
+  it('default (BinanceProvider): live on open, and a 1008 close reconnects as before', () => {
+    const h = open({})
+    h.last().open()
+    expect(h.statuses).toEqual(['connecting', 'live'])
+    h.last().serverClose(1008)
+    expect(h.statuses).toEqual(['connecting', 'live', 'reconnecting'])
+    vi.advanceTimersByTime(1_000)
+    expect(MiniWs.instances).toHaveLength(2)
+    h.teardown()
+  })
+
+  it('fatal close code: offline, no retries, no timers', () => {
+    const h = open({ fatalCloseCodes: [1008] })
+    h.last().open()
+    h.last().serverClose(1008)
+    expect(h.statuses).toEqual(['connecting', 'live', 'offline'])
+    expect(vi.getTimerCount()).toBe(0)
+    vi.advanceTimersByTime(600_000)
+    expect(MiniWs.instances).toHaveLength(1)
+    h.teardown()
+    expect(h.statuses).toEqual(['connecting', 'live', 'offline'])
+  })
+
+  it('liveOnFirstMessage: delivers the first message, then reports live', () => {
+    const h = open({ liveOnFirstMessage: true })
+    h.last().open()
+    expect(h.statuses).toEqual(['connecting'])
+    h.last().message('a')
+    h.last().message('b')
+    expect(h.order).toEqual(['status:connecting', 'msg:a', 'status:live', 'msg:b'])
+    h.teardown()
   })
 })

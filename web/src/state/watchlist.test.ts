@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { PersistenceClient } from '../data/persistence'
 import {
   addSymbol,
+  createWatchlistSync,
   DEFAULT_WATCHLIST,
   loadWatchlist,
   MAX_WATCHLIST_ITEMS,
@@ -12,6 +14,7 @@ import {
   serializeWatchlist,
   WATCHLIST_STORAGE_KEY,
   watchlistReducer,
+  validateWatchlist,
   type KeyValueStorage,
 } from './watchlist'
 
@@ -179,5 +182,89 @@ describe('loadWatchlist / saveWatchlist', () => {
   it('uses the default storage argument safely in Node (no localStorage)', () => {
     expect(loadWatchlist()).toEqual([...DEFAULT_WATCHLIST])
     expect(() => saveWatchlist(['BTCUSDT'])).not.toThrow()
+  })
+})
+
+describe('validateWatchlist', () => {
+  it('accepts decoded lists with the same rules as parseWatchlist', () => {
+    expect(validateWatchlist(['BTCUSDT', 'ETHUSDT'])).toEqual(['BTCUSDT', 'ETHUSDT'])
+    expect(validateWatchlist([])).toEqual([])
+    expect(validateWatchlist(['btcusdt'])).toBeNull()
+    expect(validateWatchlist(['BTCUSDT', 'BTCUSDT'])).toBeNull()
+    expect(validateWatchlist({ items: [] })).toBeNull()
+  })
+})
+
+function fakeClient(over: Partial<PersistenceClient>): PersistenceClient {
+  const fail = () => Promise.reject(new Error('unexpected call'))
+  return { getWatchlist: fail, putWatchlist: fail, getLayout: fail, putLayout: fail, ...over }
+}
+
+describe('createWatchlistSync', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('adopts a valid server list from /api/watchlists/default', async () => {
+    const getWatchlist = vi.fn(async (id: string) => ({ id, items: ['SOLUSDT'], updatedAt: 1 }))
+    const remote: string[][] = []
+    const sync = createWatchlistSync(
+      ['BTCUSDT'],
+      (i) => remote.push(i),
+      fakeClient({ getWatchlist }),
+    )
+    sync.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getWatchlist).toHaveBeenCalledWith('default')
+    expect(remote).toEqual([['SOLUSDT']])
+  })
+
+  it('ignores an invalid server list', async () => {
+    const remote: string[][] = []
+    const sync = createWatchlistSync(
+      ['BTCUSDT'],
+      (i) => remote.push(i),
+      fakeClient({ getWatchlist: async (id) => ({ id, items: ['bad sym'], updatedAt: 1 }) }),
+    )
+    sync.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(remote).toEqual([])
+    expect(sync.state).toBe('synced')
+  })
+
+  it('migrates the local list on 404 and debounces later edits', async () => {
+    const putWatchlist = vi.fn(async (id: string, items: readonly string[]) => ({
+      id,
+      items: [...items],
+      updatedAt: 1,
+    }))
+    const sync = createWatchlistSync(
+      ['BTCUSDT'],
+      () => {},
+      fakeClient({ getWatchlist: async () => null, putWatchlist }),
+      300,
+    )
+    sync.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(putWatchlist).toHaveBeenCalledWith('default', ['BTCUSDT'])
+    sync.update(['BTCUSDT', 'ETHUSDT'])
+    sync.update(['ETHUSDT'])
+    await vi.advanceTimersByTimeAsync(300)
+    expect(putWatchlist).toHaveBeenCalledTimes(2)
+    expect(putWatchlist).toHaveBeenLastCalledWith('default', ['ETHUSDT'])
+  })
+
+  it('stays local-only when the server is unreachable', async () => {
+    const putWatchlist = vi.fn()
+    const sync = createWatchlistSync(
+      ['BTCUSDT'],
+      () => {},
+      fakeClient({ getWatchlist: () => Promise.reject(new Error('ECONNREFUSED')), putWatchlist }),
+    )
+    sync.start()
+    await vi.advanceTimersByTimeAsync(0)
+    sync.update(['ETHUSDT'])
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(sync.state).toBe('local-only')
+    expect(putWatchlist).not.toHaveBeenCalled()
   })
 })

@@ -1,4 +1,11 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
+import {
+  createPersistenceClient,
+  createServerSync,
+  DEFAULT_PERSISTENCE_ID,
+  type PersistenceClient,
+  type ServerSync,
+} from '../data/persistence'
 import { INDICATOR_BY_ID } from '../indicators/registry'
 import { PRICE_SOURCES } from '../indicators/sources'
 import type { IndicatorDef, IndicatorId, PriceSource } from '../indicators/types'
@@ -276,8 +283,78 @@ export function saveIndicators(
 }
 
 /**
- * The active indicators of the (single, for now) layout, persisted to localStorage under
- * 'tv.indicators.v1'.
+ * The indicators another tab wrote, from a `storage` event's key and newValue; null when the
+ * event is for another key, the key was removed, or the value is not valid JSON. Parsed with
+ * the same rules as loadIndicators.
+ */
+export function indicatorsFromStorageEvent(
+  key: string | null,
+  newValue: string | null,
+  defs: ReadonlyMap<IndicatorId, IndicatorDef>,
+): IndicatorConfig[] | null {
+  if (key !== INDICATORS_STORAGE_KEY || newValue === null) return null
+  try {
+    return parseIndicators(JSON.parse(newValue), defs)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Listen for another tab's indicator writes (`storage` events on `target`, normally `window`)
+ * and pass each valid list to `onAdopt`. Returns the unsubscribe function.
+ */
+export function listenIndicatorsStorage(
+  target: Pick<EventTarget, 'addEventListener' | 'removeEventListener'>,
+  getDefs: () => ReadonlyMap<IndicatorId, IndicatorDef>,
+  onAdopt: (items: IndicatorConfig[]) => void,
+): () => void {
+  const onStorage = (e: Event): void => {
+    const ev = e as Partial<StorageEvent>
+    const next = indicatorsFromStorageEvent(ev.key ?? null, ev.newValue ?? null, getDefs())
+    if (next !== null) onAdopt(next)
+  }
+  target.addEventListener('storage', onStorage)
+  return () => target.removeEventListener('storage', onStorage)
+}
+
+/**
+ * Parse the server layout document `{ indicators: IndicatorConfig[] }`. null when the document
+ * has no `indicators` array; entries are sanitized like localStorage values.
+ */
+export function parseIndicatorLayout(
+  data: unknown,
+  defs: ReadonlyMap<IndicatorId, IndicatorDef>,
+): IndicatorConfig[] | null {
+  if (!isRecord(data) || !Array.isArray(data.indicators)) return null
+  return parseIndicators(data.indicators, defs)
+}
+
+/**
+ * Sync for the single indicator layout with the local server (`/api/layouts/default`, data
+ * `{ indicators }`). Server copy wins once its GET returns; 404 migrates the local list up.
+ */
+export function createIndicatorsSync(
+  initial: readonly IndicatorConfig[],
+  defs: ReadonlyMap<IndicatorId, IndicatorDef>,
+  onRemote: (items: IndicatorConfig[]) => void,
+  client: PersistenceClient = createPersistenceClient(),
+  debounceMs?: number,
+): ServerSync<readonly IndicatorConfig[]> {
+  return createServerSync<readonly IndicatorConfig[]>({
+    initial,
+    load: async () => (await client.getLayout(DEFAULT_PERSISTENCE_ID))?.data ?? null,
+    save: (items) => client.putLayout(DEFAULT_PERSISTENCE_ID, { indicators: items }),
+    parse: (raw) => parseIndicatorLayout(raw, defs),
+    onRemote: (items) => onRemote([...items]),
+    debounceMs,
+  })
+}
+
+/**
+ * The active indicators of the (single, for now) layout. localStorage ('tv.indicators.v1') is
+ * the synchronous initial value and offline cache; the local server's SQLite layout is the
+ * source of truth when reachable. Edits in another tab are picked up through the `storage` event.
  */
 export function useIndicators(
   defs: ReadonlyMap<IndicatorId, IndicatorDef> = INDICATOR_BY_ID,
@@ -285,15 +362,45 @@ export function useIndicators(
   const [items, dispatch] = useReducer(indicatorsReducer, undefined, () => loadIndicators(defs))
   const itemsRef = useRef<readonly IndicatorConfig[]>(items)
   const defsRef = useRef(defs)
+  const syncRef = useRef<ServerSync<readonly IndicatorConfig[]> | null>(null)
+
+  useEffect(() => {
+    const sync = createIndicatorsSync(itemsRef.current, defsRef.current, (next) => {
+      itemsRef.current = next
+      dispatch({ type: 'replace', items: next })
+    })
+    syncRef.current = sync
+    sync.start()
+    return () => {
+      sync.dispose()
+      if (syncRef.current === sync) syncRef.current = null
+    }
+  }, [])
 
   useEffect(() => {
     itemsRef.current = items
     saveIndicators(items)
+    syncRef.current?.update(items)
   }, [items])
 
   useEffect(() => {
     defsRef.current = defs
   }, [defs])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    return listenIndicatorsStorage(
+      window,
+      () => defsRef.current,
+      (next) => {
+        // The other tab saves this value to the server itself: record it as the server copy so
+        // this tab neither echoes it nor later PUTs its own stale layout over it.
+        itemsRef.current = next
+        syncRef.current?.adopt(next)
+        dispatch({ type: 'replace', items: next })
+      },
+    )
+  }, [])
 
   const add = useCallback((type: IndicatorId): string | null => {
     const def = defsRef.current.get(type)

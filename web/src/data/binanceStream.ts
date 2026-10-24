@@ -96,6 +96,19 @@ export interface ReconnectingSocketOptions {
   /** Raw `MessageEvent.data` of every message on the current socket. */
   onMessage: (data: unknown) => void
   onStatus?: (status: ConnectionStatus) => void
+  /**
+   * Close codes that mean "never going to work" (e.g. the local server's 1008 for a bad
+   * symbol/interval). On such a close: stop retrying, report 'offline', and tear down (no
+   * timers or listeners left; later teardown calls are no-ops). While this is non-empty an
+   * `error` event waits for the `close` event that always follows it, so the code is seen.
+   */
+  fatalCloseCodes?: readonly number[]
+  /**
+   * Report 'live' on the first message of a socket instead of on open (the message is
+   * delivered first). For servers that send a status message on attach, so a socket that is
+   * accepted and then closed before any message never reads 'live'.
+   */
+  liveOnFirstMessage?: boolean
 }
 
 /**
@@ -105,10 +118,13 @@ export interface ReconnectingSocketOptions {
  * (`connecting` -> `live` -> `reconnecting` / `offline`). After 5 consecutive failures the
  * status reads 'offline' while retries continue at the capped backoff. A stale timeout on
  * a socket that had opened (an idle stream) reconnects silently at attempt 0: status
- * stays 'live' and it is not counted as a failure. Returns an idempotent teardown; no callback runs after it.
+ * stays 'live' and it is not counted as a failure. A close with one of `fatalCloseCodes` stops
+ * for good: 'offline', then torn down. Returns an idempotent teardown; no callback runs after it.
  */
 export function openReconnectingSocket(opts: ReconnectingSocketOptions): () => void {
   const { WebSocketImpl: WS, url, staleTimeoutMs, onMessage, onStatus } = opts
+  const fatalCodes: readonly number[] = opts.fatalCloseCodes ?? []
+  const liveOnFirstMessage = opts.liveOnFirstMessage === true
 
   let disposed = false
   let ws: WebSocket | null = null
@@ -223,20 +239,38 @@ export function openReconnectingSocket(opts: ReconnectingSocketOptions): () => v
     sock.onopen = () => {
       if (disposed || sock !== ws) return
       openedSocket = true
-      emit('live')
+      if (!liveOnFirstMessage) emit('live')
       armStale(sock)
     }
     sock.onmessage = (ev: MessageEvent) => {
       if (disposed || sock !== ws) return
       armStale(sock)
-      if (!receivedOnSocket) {
+      const first = !receivedOnSocket
+      if (first) {
         receivedOnSocket = true
         failures = 0
       }
-      onMessage(ev.data)
+      try {
+        onMessage(ev.data)
+      } finally {
+        if (first && liveOnFirstMessage && sock === ws) emit('live')
+      }
     }
-    sock.onerror = () => drop(sock)
-    sock.onclose = () => drop(sock)
+    // With fatal codes, an error waits for the close that follows it (and the stale timer
+    // still covers a close that never comes), so the close code decides.
+    sock.onerror = () => {
+      if (fatalCodes.length === 0) drop(sock)
+    }
+    sock.onclose = (ev: CloseEvent) => {
+      if (disposed || sock !== ws) return
+      const code = typeof ev?.code === 'number' ? ev.code : undefined
+      if (code !== undefined && fatalCodes.includes(code)) {
+        emit('offline')
+        teardown()
+        return
+      }
+      drop(sock)
+    }
     // Also covers a connect that hangs without opening.
     armStale(sock)
   }
@@ -265,10 +299,7 @@ export function openReconnectingSocket(opts: ReconnectingSocketOptions): () => v
     win.addEventListener('online', onOnline)
   }
 
-  if (!browserOffline()) emit('connecting')
-  connect()
-
-  return () => {
+  function teardown(): void {
     if (disposed) return
     disposed = true
     clearTimers()
@@ -278,4 +309,9 @@ export function openReconnectingSocket(opts: ReconnectingSocketOptions): () => v
       win.removeEventListener('online', onOnline)
     }
   }
+
+  if (!browserOffline()) emit('connecting')
+  connect()
+
+  return teardown
 }

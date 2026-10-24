@@ -1,13 +1,18 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { PersistenceClient } from '../data/persistence'
 import { Sma } from '../indicators/primitives'
 import type { IndicatorDef, IndicatorId, IndicatorStepper } from '../indicators/types'
 import {
   createIndicatorConfig,
+  createIndicatorsSync,
   INDICATORS_STORAGE_KEY,
+  indicatorsFromStorageEvent,
   indicatorsReducer,
   INSTANCE_PALETTE,
+  listenIndicatorsStorage,
   loadIndicators,
   MAX_INDICATORS,
+  parseIndicatorLayout,
   parseIndicators,
   sanitizeColors,
   sanitizeInputs,
@@ -315,5 +320,188 @@ describe('indicatorsReducer', () => {
   it('replace swaps the list', () => {
     const items = add([], fakeEma, 'a')
     expect(indicatorsReducer([], { type: 'replace', items })).toBe(items)
+  })
+})
+
+const one = (uid: string): IndicatorConfig[] => [createIndicatorConfig(fakeEma, [], uid)]
+
+describe('parseIndicatorLayout', () => {
+  it('reads { indicators } and sanitizes entries', () => {
+    const out = parseIndicatorLayout(
+      {
+        indicators: [
+          { uid: 'a', type: 'ema', inputs: { period: 9999 } },
+          { uid: 'b', type: 'nope' },
+        ],
+      },
+      DEFS,
+    )
+    expect(out).toHaveLength(1)
+    expect(out?.[0].inputs.period).toBe(500)
+  })
+  it('returns null for a document without an indicators array', () => {
+    expect(parseIndicatorLayout({}, DEFS)).toBeNull()
+    expect(parseIndicatorLayout({ indicators: 'x' }, DEFS)).toBeNull()
+    expect(parseIndicatorLayout(null, DEFS)).toBeNull()
+  })
+})
+
+function fakeClient(over: Partial<PersistenceClient>): PersistenceClient {
+  const fail = () => Promise.reject(new Error('unexpected call'))
+  return { getWatchlist: fail, putWatchlist: fail, getLayout: fail, putLayout: fail, ...over }
+}
+
+describe('createIndicatorsSync', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('adopts the server layout from /api/layouts/default', async () => {
+    const getLayout = vi.fn(async (id: string) => ({
+      id,
+      data: { indicators: [{ uid: 'srv', type: 'ema' }] },
+      updatedAt: 1,
+    }))
+    const remote: IndicatorConfig[][] = []
+    const sync = createIndicatorsSync([], DEFS, (i) => remote.push(i), fakeClient({ getLayout }))
+    sync.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getLayout).toHaveBeenCalledWith('default')
+    expect(remote).toHaveLength(1)
+    expect(remote[0].map((c) => c.uid)).toEqual(['srv'])
+    expect(remote[0][0].colors.value).toBe('#2962ff')
+  })
+
+  it('ignores a layout without indicators and keeps local', async () => {
+    const remote: IndicatorConfig[][] = []
+    const sync = createIndicatorsSync(
+      [],
+      DEFS,
+      (i) => remote.push(i),
+      fakeClient({ getLayout: async (id) => ({ id, data: { other: 1 }, updatedAt: 1 }) }),
+    )
+    sync.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(remote).toEqual([])
+  })
+
+  it('migrates local indicators on 404 as { indicators }', async () => {
+    const local = one('loc')
+    const putLayout = vi.fn(async (id: string, data: Record<string, unknown>) => ({
+      id,
+      data,
+      updatedAt: 1,
+    }))
+    const sync = createIndicatorsSync(
+      local,
+      DEFS,
+      () => {},
+      fakeClient({ getLayout: async () => null, putLayout }),
+    )
+    sync.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(putLayout).toHaveBeenCalledWith('default', { indicators: local })
+  })
+
+  it('stays local-only when the server is unreachable', async () => {
+    const putLayout = vi.fn()
+    const sync = createIndicatorsSync(
+      [],
+      DEFS,
+      () => {},
+      fakeClient({ getLayout: () => Promise.reject(new Error('down')), putLayout }),
+    )
+    sync.start()
+    await vi.advanceTimersByTimeAsync(0)
+    sync.update(one('x'))
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(sync.state).toBe('local-only')
+    expect(putLayout).not.toHaveBeenCalled()
+  })
+})
+
+function storageEvent(key: string | null, newValue: string | null): Event {
+  return Object.assign(new Event('storage'), { key, newValue })
+}
+
+describe('indicatorsFromStorageEvent', () => {
+  it('parses the indicators key with the stored-value rules', () => {
+    const items = indicatorsFromStorageEvent(
+      INDICATORS_STORAGE_KEY,
+      JSON.stringify([
+        { uid: 'a', type: 'ema' },
+        { uid: 'b', type: 'nope' },
+      ]),
+      DEFS,
+    )
+    expect(items?.map((c) => c.uid)).toEqual(['a'])
+    expect(items?.[0].colors.value).toBe('#2962ff')
+  })
+
+  it('ignores other keys, removals, and invalid JSON', () => {
+    expect(indicatorsFromStorageEvent('tv.watchlist.v1', '[]', DEFS)).toBeNull()
+    expect(indicatorsFromStorageEvent(null, '[]', DEFS)).toBeNull()
+    expect(indicatorsFromStorageEvent(INDICATORS_STORAGE_KEY, null, DEFS)).toBeNull()
+    expect(indicatorsFromStorageEvent(INDICATORS_STORAGE_KEY, '{bad', DEFS)).toBeNull()
+  })
+})
+
+describe('listenIndicatorsStorage (W2: cross-tab sync)', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it("delivers another tab's list and stops after unsubscribe", () => {
+    const target = new EventTarget()
+    const got: string[][] = []
+    const off = listenIndicatorsStorage(
+      target,
+      () => DEFS,
+      (items) => got.push(items.map((c) => c.uid)),
+    )
+    target.dispatchEvent(storageEvent(INDICATORS_STORAGE_KEY, JSON.stringify(one('x'))))
+    target.dispatchEvent(storageEvent('other', JSON.stringify(one('y'))))
+    target.dispatchEvent(storageEvent(INDICATORS_STORAGE_KEY, 'not json'))
+    expect(got).toEqual([['x']])
+    off()
+    target.dispatchEvent(storageEvent(INDICATORS_STORAGE_KEY, JSON.stringify(one('z'))))
+    expect(got).toEqual([['x']])
+  })
+
+  it("a stale tab adopts the other tab's layout without echoing or later PUTting its own", async () => {
+    const putLayout = vi.fn(async (id: string, data: Record<string, unknown>) => ({
+      id,
+      data,
+      updatedAt: 1,
+    }))
+    const server = { id: 'default', data: { indicators: one('srv') }, updatedAt: 1 }
+    const sync = createIndicatorsSync(
+      one('srv'),
+      DEFS,
+      () => {},
+      fakeClient({ getLayout: async () => server, putLayout }),
+    )
+    sync.start()
+    await vi.advanceTimersByTimeAsync(0)
+    // This (stale) tab edits; a PUT is queued.
+    sync.update(one('stale'))
+    await vi.advanceTimersByTimeAsync(100)
+    // The other tab writes its layout; wire the listener the way useIndicators does.
+    const target = new EventTarget()
+    const off = listenIndicatorsStorage(
+      target,
+      () => DEFS,
+      (next) => {
+        sync.adopt(next)
+        sync.update(next) // the hook's [items] effect after dispatch(replace)
+      },
+    )
+    target.dispatchEvent(storageEvent(INDICATORS_STORAGE_KEY, JSON.stringify(one('other'))))
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(putLayout).not.toHaveBeenCalled()
+    // A real edit afterwards is still saved.
+    sync.update(one('new'))
+    await vi.advanceTimersByTimeAsync(300)
+    expect(putLayout).toHaveBeenCalledTimes(1)
+    expect(putLayout).toHaveBeenCalledWith('default', { indicators: one('new') })
+    off()
   })
 })

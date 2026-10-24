@@ -1,0 +1,15 @@
+{
+  "name": "tradingview",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently --kill-others-on-fail --names server,web --prefix-colors cyan,magenta \"npm --prefix server run dev\" \"npm --prefix web run dev\"",
+    "test": "npm --prefix server run test && npm --prefix web run test",
+    "typecheck": "npm --prefix server run typecheck && npm --prefix web run typecheck",
+    "lint": "npm --prefix server run lint && npm --prefix web run lint"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.6"
+  }
+}

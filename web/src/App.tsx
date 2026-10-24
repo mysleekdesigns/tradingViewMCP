@@ -9,6 +9,8 @@ import { ErrorView, LoadingView } from './components/StatusViews'
 import { SymbolSearch } from './components/SymbolSearch'
 import { Watchlist } from './components/Watchlist'
 import { BinanceProvider } from './data/binance'
+import type { MarketDataProvider } from './data/provider'
+import { ServerProvider } from './data/server'
 import { getIndicatorDef } from './indicators/registry'
 import { useIndicators } from './state/indicators'
 import { loadPrefs, savePrefs } from './state/prefs'
@@ -17,9 +19,11 @@ import { useSymbols } from './state/useSymbols'
 import { useWatchlist } from './state/watchlist'
 import type { ChartType, Interval } from './types'
 
-const provider = new BinanceProvider()
+// Default: the local server (cache + fan-out). `VITE_DATA_SOURCE=direct` talks to Binance.US.
+const DIRECT = import.meta.env.VITE_DATA_SOURCE === 'direct'
+const provider: MarketDataProvider = DIRECT ? new BinanceProvider() : new ServerProvider()
 
-const SOURCE = 'Binance.US'
+const SOURCE = DIRECT ? 'Binance.US' : 'Binance.US · local server'
 const LIMIT = 500
 
 /** True when a keystroke should go to the focused control rather than open the search. */
