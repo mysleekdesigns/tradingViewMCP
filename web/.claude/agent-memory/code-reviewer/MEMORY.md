@@ -1,0 +1,1 @@
+- [Review watchlist](review-watchlist.md) — open risks after Phase 3: loadOlder no backoff, idle-stale churn, O(n) ticks; fixed items + confirmed conventions
