@@ -318,6 +318,14 @@ function App() {
     firstBarTime > historyTarget.target &&
     !live.historyExhausted
   const historyFailed = backtestDrawn && historyLoadFailed(historyLoad, symbol, interval)
+  // The last load on this market got the first bar to its target (it may have stopped short of
+  // the bar cap because of exchange gaps).
+  const historyReached =
+    historyTarget !== null &&
+    historyTarget.symbol === symbol &&
+    historyTarget.interval === interval &&
+    firstBarTime !== null &&
+    firstBarTime <= historyTarget.target
   const { loadOlder, loadingOlder, retryBlocked } = live
 
   // Count pages of the auto-load: a page that ends without moving the first bar back failed.
@@ -501,6 +509,7 @@ function App() {
       loading: historyActive,
       failed: historyFailed,
       exhausted: historyExhausted,
+      reachedTarget: historyReached,
     })
     autoHistoryRef.current = state
     if (command === 'start' && history !== null) {
@@ -515,6 +524,7 @@ function App() {
     historyActive,
     historyFailed,
     historyExhausted,
+    historyReached,
     report,
     symbol,
     interval,
@@ -795,12 +805,18 @@ function App() {
           />
         )}
         {historyActive && report !== null ? (
-          <div className="history-chip" role="status">
+          // Visual only: the Strategy Tester's live region announces start/end/failure.
+          <div className="history-chip">
             <span className="history-hint__spinner" aria-hidden="true" />
-            <span className="history-chip__text">
+            <span className="history-chip__text" aria-hidden="true">
               {historyLoadingText(report.window, onChartCount, report.trades.length)}
             </span>
-            <button type="button" className="history-chip__stop" onClick={stopBacktestHistory}>
+            <button
+              type="button"
+              className="history-chip__stop"
+              aria-label="Stop loading backtest history"
+              onClick={stopBacktestHistory}
+            >
               Stop
             </button>
           </div>

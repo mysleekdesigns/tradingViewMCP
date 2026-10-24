@@ -944,13 +944,24 @@ export interface AutoHistoryInput {
   failed: boolean
   /** The exchange has no older bars. */
   exhausted: boolean
+  /**
+   * The chart's first bar is at or before the target of the last history load on this market.
+   * A capped load can end there with fewer than MAX_HISTORY_BARS raw bars (exchange gaps), while
+   * the plan, recomputed from the bar count, still asks for more.
+   */
+  reachedTarget: boolean
 }
 
 export type AutoHistoryCommand = 'none' | 'start' | 'zoom'
 
-/** As much of the window as the chart can hold is loaded. */
-function historyComplete(plan: HistoryPlan, exhausted: boolean): boolean {
-  return !plan.needed || exhausted || (plan.partial && plan.bars === 0)
+/**
+ * As much of the window as the chart can hold is loaded: the window start is reached, the
+ * exchange has nothing older, or (window longer than the chart can hold) the bar cap or the
+ * last capped load's target is reached.
+ */
+function historyComplete(plan: HistoryPlan, input: AutoHistoryInput): boolean {
+  if (!plan.needed || input.exhausted) return true
+  return plan.partial && (plan.bars === 0 || input.reachedTarget)
 }
 
 /**
@@ -971,10 +982,9 @@ export function autoHistoryStep(
   if (key === null || plan === null) return { state, command: 'none' }
   if (state.key !== key) {
     if (plan.unreachable) return { state: { key, phase: 'done' }, command: 'none' }
-    if (plan.needed && !input.exhausted) {
-      return { state: { key, phase: 'starting' }, command: 'start' }
-    }
-    return { state: { key, phase: 'done' }, command: 'zoom' }
+    // Already complete (e.g. the chart is at its bar cap): a load would never run, so zoom now.
+    if (historyComplete(plan, input)) return { state: { key, phase: 'done' }, command: 'zoom' }
+    return { state: { key, phase: 'starting' }, command: 'start' }
   }
   if (state.phase === 'starting') {
     // Wait until the load is seen running, so a stale read right after 'start' cannot end it.
@@ -984,8 +994,7 @@ export function autoHistoryStep(
   }
   if (state.phase !== 'loading' || input.loading) return { state, command: 'none' }
   const done: AutoHistoryState = { key, phase: 'done' }
-  if (!input.failed && historyComplete(plan, input.exhausted))
-    return { state: done, command: 'zoom' }
+  if (!input.failed && historyComplete(plan, input)) return { state: done, command: 'zoom' }
   return { state: done, command: 'none' }
 }
 
@@ -996,6 +1005,29 @@ export function historyLoadingText(
   total: number,
 ): string {
   return `Trades are in ${fmtDate(window.start)} → ${fmtDate(window.end)} · loading history… ${fmtInt(onChart)} of ${fmtInt(total)} trades on chart`
+}
+
+export interface HistoryLoadFlags {
+  loading: boolean
+  failed: boolean
+}
+
+/**
+ * Screen-reader announcement for a change of the history-load state: only start, end, and
+ * failure, never the per-page progress. null = nothing to announce (keep the previous text).
+ */
+export function historyAnnouncement(
+  prev: HistoryLoadFlags,
+  next: HistoryLoadFlags,
+  onChart: number,
+  total: number,
+): string | null {
+  if (!prev.loading && next.loading) return 'Loading chart history for the backtest…'
+  if (next.failed && (prev.loading || !prev.failed)) return 'Loading chart history failed.'
+  if (prev.loading && !next.loading) {
+    return `History loading ended: ${fmtInt(onChart)} of ${fmtInt(total)} trades on chart.`
+  }
+  return null
 }
 
 /** Why nothing is loaded for an unreachable window, with what to do instead. */

@@ -11,12 +11,13 @@ Confirmed design (Phase 7 review, 2026-10-24; verified in code):
 - Runs are deliberately not aborted when the dock closes (report waits in App state).
 - Lab plan template validates for every chart interval except 1w (lab has no 1w).
 
+Auto history + zoom (added 2026-10-24, second review): autoHistoryStep state machine in backtestView.ts, keyed run_id#trial_id@symbol:interval, kept in a ref in App (StrictMode double effect dispatches 'start' once). Completion is detected via historyActive (firstBarTime > target) going false; stop/fail -> no zoom. Effect deps change on candleCount/firstBarTime, not per tick. History target survives a market switch, so returning mid-load resumes it (pre-existing manual semantics).
+
 Open gaps (recheck next review):
-- App history auto-load effect stalls after 2 consecutive failed pages or a Retry-After > 3 s (single 3 s retry vs 4-8 s cooldown; retryBlocked not in deps); spinner forever.
-- historyPlan ignores window.end: at 1m/5m/15m the 20k-bar cap never reaches the design window (window ends 2025-10-01), so "Load full history" loads 19.5k holdout-period bars and shows 0 trades.
-- focusRange is never cleared: re-applied when Chart remounts; and Zoom/trade focus outside loaded bars clamps to a 1-bar range.
-- BacktestPanel (incl. full TradesTab) re-renders on every live tick (not memoised).
-- Root `npm run dev` uses --kill-others-on-fail, so a lab exit (uv missing, port 8788 busy) kills server+web.
+- autoHistoryStep new-key branch uses `plan.needed && !exhausted`, not `!historyComplete(...)`: when the chart already holds >= 20k raw bars (after an earlier full load), plan is partial/bars 0/target == firstBar, 'start' never makes historyActive true, state stuck 'starting', no zoom for every later report on that market. Same family: a capped load ending with < 20k bars (exchange gaps) is not "complete" -> no zoom. Reproduced with a script.
+- History chip and panel note are both role="status" with the same per-page-changing text (double, chatty announcements).
+- Probably fixed (seen in code 2026-10-24, not re-verified in depth): retry loop is now setInterval + retryBlocked in deps; unreachable windows are skipped; focusDone clears focusRange; testerLink memoised.
+- Root `npm run dev` uses --kill-others-on-fail, so a lab exit kills server+web.
 - Trades rows not keyboard-operable; resize separator lacks aria-valuemin/max.
 
 **Why:** saves re-deriving the overlay/pane lifecycle and contract mapping next review.

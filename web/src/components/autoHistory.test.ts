@@ -5,6 +5,7 @@ import { TRADES_ZOOM_MAX_BARS, tradesZoomRange } from '../chart/backtestOverlay'
 import {
   autoHistoryKey,
   autoHistoryStep,
+  historyAnnouncement,
   historyLoadingText,
   historyPlan,
   initialAutoHistory,
@@ -33,7 +34,15 @@ const needed: HistoryPlan = historyPlan(FIRST_RECENT, WIN, '4h', MAX_HISTORY_BAR
 const reached: HistoryPlan = historyPlan(WIN.start - H4, WIN, '4h', MAX_HISTORY_BARS - 15_000)
 
 function input(over: Partial<AutoHistoryInput> = {}): AutoHistoryInput {
-  return { key: KEY, plan: needed, loading: false, failed: false, exhausted: false, ...over }
+  return {
+    key: KEY,
+    plan: needed,
+    loading: false,
+    failed: false,
+    exhausted: false,
+    reachedTarget: false,
+    ...over,
+  }
 }
 
 /** Feed inputs in order; return each command. */
@@ -107,6 +116,38 @@ describe('autoHistoryStep', () => {
   it('does not zoom after a failed load', () => {
     const { commands } = run([input(), input({ loading: true }), input({ failed: true })])
     expect(commands).toEqual(['start', 'none', 'none'])
+  })
+
+  it('zooms at once for a new report when the chart is already at the bar cap', () => {
+    // BTCUSDT 1h: an earlier run filled the chart to 20,000 bars; a second run on the market.
+    const firstBar = NOW - MAX_HISTORY_BARS * 3600
+    const atCap = historyPlan(firstBar, WIN, '1h', 0)
+    expect(atCap).toMatchObject({ needed: true, partial: true, bars: 0, unreachable: false })
+    expect(atCap.target).toBe(firstBar) // a load to this target could never run
+    expect(
+      run([input({ key: autoHistoryKey({ ...report, run_id: 'r2' }), plan: atCap })]).commands,
+    ).toEqual(['zoom'])
+  })
+
+  it('zooms when a capped load reached its target short of the cap (exchange gaps)', () => {
+    // 19,600 raw bars after the load: the recomputed plan still asks for 400 more.
+    const gappy = historyPlan(NOW - 19_800 * 3600, WIN, '1h', MAX_HISTORY_BARS - 19_600)
+    expect(gappy).toMatchObject({ needed: true, partial: true, bars: 400 })
+    const ended = run([
+      input({ plan: gappy }),
+      input({ plan: gappy, loading: true }),
+      input({ plan: gappy, loading: false, reachedTarget: true }),
+    ])
+    expect(ended.commands).toEqual(['start', 'none', 'zoom'])
+    // A new report on that market zooms straight away instead of starting a load.
+    const next = autoHistoryKey({ ...report, run_id: 'r3' })
+    expect(
+      autoHistoryStep(ended.state, input({ key: next, plan: gappy, reachedTarget: true })).command,
+    ).toBe('zoom')
+  })
+
+  it('ignores a reached target when the whole window fits (the plan is exact)', () => {
+    expect(run([input({ reachedTarget: true })]).commands).toEqual(['start'])
   })
 
   it('zooms at once when the chart already holds the window', () => {
@@ -202,5 +243,32 @@ describe('tradesZoomRange', () => {
     const a = trade(WIN.end - 40 * H4, WIN.end - 30 * H4)
     const b = trade(WIN.end - 20 * H4, WIN.end - 10 * H4)
     expect(tradesZoomRange([b, a], WIN, H4)).toEqual(tradesZoomRange([a, b], WIN, H4))
+  })
+})
+
+describe('historyAnnouncement (one polite live region)', () => {
+  const idle = { loading: false, failed: false }
+  const loading = { loading: true, failed: false }
+  const failed = { loading: false, failed: true }
+
+  it('announces the start once', () => {
+    expect(historyAnnouncement(idle, loading, 0, 137)).toBe(
+      'Loading chart history for the backtest…',
+    )
+  })
+
+  it('announces nothing while pages arrive (same flags)', () => {
+    expect(historyAnnouncement(loading, loading, 40, 137)).toBeNull()
+  })
+
+  it('announces the end with the trades on chart', () => {
+    expect(historyAnnouncement(loading, idle, 137, 137)).toBe(
+      'History loading ended: 137 of 137 trades on chart.',
+    )
+  })
+
+  it('announces a failure', () => {
+    expect(historyAnnouncement(loading, failed, 12, 137)).toBe('Loading chart history failed.')
+    expect(historyAnnouncement(failed, idle, 12, 137)).toBeNull()
   })
 })

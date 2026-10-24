@@ -51,15 +51,42 @@ function readPid(path: string): number | null {
   return Number.isInteger(pid) && pid > 0 ? pid : null
 }
 
+export interface AcquireOptions {
+  pid?: number
+  isPidAlive?: (pid: number) => boolean
+  now?: () => number
+  /** Waits before the ownership re-check. Default: the next event-loop turn (setImmediate). */
+  tick?: () => Promise<void>
+}
+
+const nextTick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
+
 /**
  * Creates `<dbPath>.lock` exclusively (`wx`) with this process's pid. If it exists and names a
- * live process, throws DbLockedError with a message saying what to do. A lock naming a dead
- * process (a crash or `kill -9`) is stale: it is removed and taken over. `:memory:` needs no lock.
+ * live process, rejects with DbLockedError saying what to do. A lock naming a dead process (a
+ * crash or `kill -9`) is stale: it is removed and taken over. After creating it, the lock is
+ * re-read once on the next tick: if another process replaced it meanwhile (two servers taking
+ * over the same stale lock), this one rejects and leaves the other's lock alone. `:memory:`
+ * needs no lock.
  */
-export function acquireDbLock(
-  dbPath: string,
-  opts: { pid?: number; isPidAlive?: (pid: number) => boolean; now?: () => number } = {},
-): DbLock {
+export async function acquireDbLock(dbPath: string, opts: AcquireOptions = {}): Promise<DbLock> {
+  const lock = createLock(dbPath, opts)
+  if (lock.path === '') return lock
+  await (opts.tick ?? nextTick)()
+  const owner = readPid(lock.path)
+  const ownPid = opts.pid ?? process.pid
+  if (owner !== ownPid) {
+    lock.release() // a no-op unless the file is ours
+    throw new DbLockedError(
+      `Another server${owner === null ? '' : ` (pid ${owner})`} took the lock ${lock.path} for ` +
+        `${dbPath} at the same moment. Stop it first, or set TV_DB_PATH to a different database.`,
+      owner,
+    )
+  }
+  return lock
+}
+
+function createLock(dbPath: string, opts: AcquireOptions): DbLock {
   const ownPid = opts.pid ?? process.pid
   const alive = opts.isPidAlive ?? isPidAlive
   const now = opts.now ?? Date.now
@@ -93,7 +120,9 @@ export function acquireDbLock(
           pid,
         )
       }
-      // Stale (dead pid, or unreadable and old): remove and retry once.
+      // Stale (dead pid, or unreadable and old): remove and retry once, unless another process
+      // replaced it since we read it.
+      if (readPid(path) !== pid) continue
       try {
         unlinkSync(path)
       } catch (e) {

@@ -42,6 +42,7 @@ import {
   fmtRatio,
   fmtSignedPct,
   formatMetric,
+  historyAnnouncement,
   historyLoadingText,
   metricsTable,
   pageInfo,
@@ -61,6 +62,7 @@ import {
   venueNote,
   walkForwardHeading,
   walkForwardRows,
+  type HistoryLoadFlags,
   type HistoryPlan,
   type TesterAction,
   type TesterState,
@@ -761,8 +763,20 @@ function ReportBar({
   const { name } = planLabel(report.plan)
   const market = `${report.symbol} ${report.interval}`
   const h = link.history
+  // One polite live region for the history load: start, end, failure (not per-page counts).
+  const flags: HistoryLoadFlags = { loading: link.historyLoading, failed: link.historyFailed }
+  const [prevFlags, setPrevFlags] = useState(flags)
+  const [announcement, setAnnouncement] = useState('')
+  if (prevFlags.loading !== flags.loading || prevFlags.failed !== flags.failed) {
+    setPrevFlags(flags)
+    const msg = historyAnnouncement(prevFlags, flags, link.tradesOnChart, report.trades.length)
+    if (msg !== null) setAnnouncement(msg)
+  }
   return (
     <div className="tester__report-bar">
+      <span className="visually-hidden" role="status">
+        {announcement}
+      </span>
       <div className="tester__report-id">
         <span className="tester__report-name" title={name || undefined}>
           {name || 'Unnamed plan'}
@@ -791,7 +805,6 @@ function ReportBar({
                 <>
                   <span
                     className="tester__chart-note tester__chart-note--wrap"
-                    role="status"
                     title={`About ${fmtInt(h.bars)} older bars left to load`}
                   >
                     <span className="tester__spinner tester__spinner--small" aria-hidden="true" />
@@ -808,7 +821,7 @@ function ReportBar({
                 </>
               ) : link.historyFailed ? (
                 <>
-                  <span className="tester__chart-note tester__chart-note--warn" role="status">
+                  <span className="tester__chart-note tester__chart-note--warn">
                     History load failed
                   </span>
                   <button

@@ -75,7 +75,10 @@ export async function startServer(opts: StartOptions): Promise<Started> {
   const nowSec = opts.nowSec ?? (() => Math.floor(Date.now() / 1000))
   if (config.dbPath !== ':memory:') mkdirSync(dirname(config.dbPath), { recursive: true })
 
-  const lock = acquireDbLock(config.dbPath, opts.isPidAlive ? { isPidAlive: opts.isPidAlive } : {})
+  const lock = await acquireDbLock(
+    config.dbPath,
+    opts.isPidAlive ? { isPidAlive: opts.isPidAlive } : {},
+  )
   let db: Db | undefined
   let app: FastifyInstance | undefined
   try {
