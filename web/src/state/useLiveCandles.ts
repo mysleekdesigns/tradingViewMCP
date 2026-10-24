@@ -9,6 +9,7 @@ interface Params {
   interval: Interval
   limit: number
   source: string
+  maxBars: number | undefined
 }
 
 interface Entry {
@@ -20,8 +21,11 @@ interface Entry {
 export interface UseLiveCandles extends LiveCandlesSnapshot {
   /** Re-fetch recent candles over REST (ignored during a Retry-After window). */
   reload: () => void
-  /** Fetch one page of older candles and prepend it (no-op while one is running). */
-  loadOlder: () => void
+  /**
+   * Fetch one page of older candles and prepend it (no-op while one is running, or once
+   * `maxBars` raw bars are loaded unless `beyondLimit` is true).
+   */
+  loadOlder: (beyondLimit?: boolean) => void
 }
 
 function sameParams(a: Params, b: Params): boolean {
@@ -30,7 +34,8 @@ function sameParams(a: Params, b: Params): boolean {
     a.symbol === b.symbol &&
     a.interval === b.interval &&
     a.limit === b.limit &&
-    a.source === b.source
+    a.source === b.source &&
+    a.maxBars === b.maxBars
   )
 }
 
@@ -46,25 +51,31 @@ export function useLiveCandles(
   interval: Interval,
   limit: number,
   source: string,
+  /** Raw-bar limit for loadOlder (see LiveCandlesOptions.maxBars). */
+  maxBars?: number,
 ): UseLiveCandles {
   const [entry, setEntry] = useState<Entry | null>(null)
 
   useEffect(() => {
-    const params = { provider, symbol, interval, limit, source }
+    const params = { provider, symbol, interval, limit, source, maxBars }
     const controller = new LiveCandlesController(params, (snapshot) =>
       setEntry({ params, controller, snapshot }),
     )
     controller.start()
     return () => controller.stop()
-  }, [provider, symbol, interval, limit, source])
+  }, [provider, symbol, interval, limit, source, maxBars])
 
   // Until the new controller's first snapshot lands, never show the previous pair's data.
   const current =
-    entry !== null && sameParams(entry.params, { provider, symbol, interval, limit, source })
+    entry !== null &&
+    sameParams(entry.params, { provider, symbol, interval, limit, source, maxBars })
       ? entry
       : null
   const controller = current?.controller ?? null
   const reload = useCallback(() => controller?.reload(), [controller])
-  const loadOlder = useCallback(() => controller?.loadOlder(), [controller])
+  const loadOlder = useCallback(
+    (beyondLimit?: boolean) => controller?.loadOlder(beyondLimit === true),
+    [controller],
+  )
   return { ...(current?.snapshot ?? initialSnapshot), reload, loadOlder }
 }

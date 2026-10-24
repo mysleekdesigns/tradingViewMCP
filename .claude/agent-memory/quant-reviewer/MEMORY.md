@@ -1,1 +1,3 @@
 - [Indicator conventions](indicator-conventions.md) — Phase 4 stepper/runner design, agreed TV formulas, runner `from` contract pitfalls
+- [Recurring issues](recurring-issues.md): permutation drift, short equity<0, fake WF OOS, run_id DSR N, PBO, cross-window V, stop-slip crosscheck, costs unledgered
+- [Lab conventions](lab-conventions.md): engine/stats behaviour verified correct in Phase 7, plus sandbox probe recipe

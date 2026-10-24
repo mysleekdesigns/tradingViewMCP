@@ -504,21 +504,21 @@ tradingView/
 10. Optional: a regime feature (bull/bear/sideways) using the `markov-hedge-fund-method:regime` skill.
 
 ### Checklist
-- [ ] Binance archive downloader → Parquet (symbol, interval, date range)
-- [ ] Feature/rule registry with look-ahead-safe implementations + unit tests
-- [ ] Plan JSON schema + validator with clear error messages (agents fix their own mistakes from these)
-- [ ] vectorbt engine: next-bar fills, fees, slippage, stop-loss/take-profit
-- [ ] Design / walk-forward / locked-holdout splits
-- [ ] Trial ledger (SQLite) recording every run
-- [ ] Metrics: CAGR, Sharpe, Sortino, max drawdown, win rate, profit factor, trades, exposure, turnover
-- [ ] DSR, PBO, bootstrap CI, buy-and-hold + vol-targeted buy-and-hold + random-entry baselines
-- [ ] Adversarial checks: signal delay, sign flip, cost stress ×2/×4, Monte Carlo, permutation null
-- [ ] 365-day annualization; point-in-time universe; gaps marked untradeable (never forward-filled)
-- [ ] Wire in `hedgeFund` (editable dependency): reuse stats modules + regime features; port its no-lookahead perturbation tests
-- [ ] Optuna parameter search wired to the ledger
-- [ ] Event-driven cross-check (freqtrade or nautilus_trader)
+- [x] Binance archive downloader → Parquet (symbol, interval, date range)
+- [x] Feature/rule registry with look-ahead-safe implementations + unit tests
+- [x] Plan JSON schema + validator with clear error messages (agents fix their own mistakes from these)
+- [x] vectorbt engine: next-bar fills, fees, slippage, stop-loss/take-profit
+- [x] Design / walk-forward / locked-holdout splits
+- [x] Trial ledger (SQLite) recording every run
+- [x] Metrics: CAGR, Sharpe, Sortino, max drawdown, win rate, profit factor, trades, exposure, turnover
+- [x] DSR, PBO, bootstrap CI, buy-and-hold + vol-targeted buy-and-hold + random-entry baselines
+- [x] Adversarial checks: signal delay, sign flip, cost stress ×2/×4, Monte Carlo, permutation null
+- [x] 365-day annualization; point-in-time universe; gaps marked untradeable (never forward-filled)
+- [x] Wire in `hedgeFund` (editable dependency): reuse stats modules + regime features; port its no-lookahead perturbation tests
+- [x] Optuna parameter search wired to the ledger
+- [x] Event-driven cross-check (freqtrade or nautilus_trader)
 - [ ] FastAPI endpoints + UI backtest panel (markers, equity pane, metrics table)
-- [ ] Tests for engine accounting against hand-calculated examples
+- [x] Tests for engine accounting against hand-calculated examples
 
 **Done when:** an EMA-crossover plan on BTCUSDT 4h shows trades on the chart, metrics, its DSR/PBO, and how it compares with buy-and-hold, and every run appears in the ledger.
 
@@ -694,7 +694,7 @@ can't have memorized.
 - [ ] Lab code and success criteria protected from agent edits (permissions/hooks)
 - [ ] Idea library + dedupe
 - [ ] Seed importer: Freqtrade strategies → plans, run through the honest pipeline as a calibration baseline
-- [ ] Research journal + end-of-run report (including "no edge found")
+- [ ] Research journal + end-of-run report (including "no edge found"), written Obsidian-friendly: YAML frontmatter (run ID, idea IDs, date, outcome) and `[[links]]` to idea and ledger run IDs; never records holdout results, and scout-sourced text is marked untrusted
 - [ ] Research page in the UI
 - [ ] Paper-trading runner + forward-vs-backtest comparison
 - [ ] Prompt-injection screening for scraped content

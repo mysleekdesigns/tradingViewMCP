@@ -1,0 +1,52 @@
+# Lab constants that change results. Each has a one-line justification (python-lab rule).
+# Loaded by lab.config.load_config(); tests pass explicit values instead of reading this file.
+
+[data]
+dir = "data"                     # parquet + ledger live in lab/data/ (gitignored)
+archive_base_url = "https://data.binance.vision/data/spot"  # Binance public archive, no key
+
+[costs]
+fee_rate = 0.001                 # Binance spot taker fee without BNB discount (0.1%)
+slippage_rate = 0.0005           # 0.05% per side, PLAN.md starting assumption for BTC/ETH
+slippage_vol_mult = 0.1          # widen slippage by 10% of a bar's excess range over its trailing median
+slippage_cap = 0.01              # never more than 1% per side: deep BTC/ETH books absorb retail size even in crashes
+stress_factors = [2.0, 4.0]      # PLAN.md cost stress x2 and x4
+
+[engine]
+init_cash = 10000.0              # notional only; returns are scale-free
+
+[splits]
+design_start = "2019-01-01"      # earliest design data; Binance BTCUSDT liquid well before this
+holdout_start = "2025-10-01"     # PLAN.md 12-month holdout, fixed so it never silently moves as data refreshes
+holdout_budget = 3               # PLAN.md: at most 3 holdout checks per research run
+wf_train_months = 24             # walk-forward: optimise on 2 years
+wf_test_months = 6               # then test on the next 6 months
+wf_step_months = 6               # roll forward by the test length (non-overlapping tests)
+wf_anchored = false              # rolling train window so old regimes age out
+
+[benchmarks]
+vol_target_annual = 0.40         # target ~40% annual vol, below BTC's long-run ~60-70%
+vol_lookback_days = 30           # trailing realised-vol window, a common vol-targeting choice
+vol_max_leverage = 1.0           # spot, no leverage: weight capped at 100%
+random_entry_paths = 200         # random-entry null paths in the default (non-slow) run
+vol_min_rebalance = 0.10         # skip vol-target rebalances under 10% of equity so the benchmark is not churned by noise
+
+[stats]
+bootstrap_samples = 1000         # stationary bootstrap resamples
+bootstrap_mean_block = 20        # mean block length in bars (Politis-Romano)
+confidence = 0.95                # two-sided CI level
+pbo_splits = 16                  # CSCV partitions S (Bailey et al. 2017 use 16)
+neighbourhood_steps = [0.8, 0.9, 1.0, 1.1, 1.2]  # +/-20% parameter neighbours for PBO/robustness
+neighbourhood_max_trials = 16    # cap so one UI backtest stays fast
+adversarial_delays = [1, 3, 5]   # PLAN.md signal delay checks
+monte_carlo_paths = 1000         # trade-order reshuffles
+permutation_paths = 100          # full-pipeline permutation null in the default run (slow: 1000)
+
+[optuna]
+n_trials = 50                    # default budget per search; every trial goes to the ledger
+seed = 7                         # explicit sampler seed for reproducibility
+min_trades = 30                  # below ~30 trades a Sharpe is a few outcomes; search treats it as failed
+
+[api]
+host = "127.0.0.1"               # local only
+port = 8788                      # server/ uses 8787

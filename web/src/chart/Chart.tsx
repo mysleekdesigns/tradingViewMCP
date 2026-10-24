@@ -3,6 +3,7 @@ import {
   AreaSeries,
   CandlestickSeries,
   createChart,
+  createSeriesMarkers,
   createTextWatermark,
   HistogramSeries,
   LineSeries,
@@ -16,12 +17,21 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts'
 import { formatUtc } from '../components/quote'
+import '../components/Backtest.css'
+import { getIndicatorDef } from '../indicators/registry'
 import { chartAcceptsEscape, chartOwnsKeyTarget } from '../state/chartTools'
 import type { IndicatorConfig } from '../state/indicators'
 import type { Candle, ChartType, Interval } from '../types'
 import { mainSeriesData, mainSeriesTail, realPriceLine, usesRealPriceLine } from './chartTypes.ts'
 import type { HeikinAshiBar } from './heikinAshi.ts'
 import { IndicatorLegendRows, PaneLegends } from './IndicatorLegend'
+import {
+  BacktestOverlay,
+  planFocus,
+  type BacktestChartData,
+  type FocusPlan,
+  type OverlayChart,
+} from './backtestOverlay'
 import { IndicatorSeriesManager } from './indicatorSeries'
 import { buildLegend, selectLegendIndex, type LegendValues } from './legend.ts'
 import {
@@ -41,7 +51,15 @@ import {
   watermarkOptions,
   webFonts,
 } from './theme'
-import { isNearLeftEdge, planSeriesSync, shiftLogicalRange, toVolumePoint } from './seriesSync'
+import {
+  isNearLeftEdge,
+  isExpectedRange,
+  nextAutoOlder,
+  planSeriesSync,
+  shiftLogicalRange,
+  toVolumePoint,
+  type AutoOlder,
+} from './seriesSync'
 import { toVolumeData } from './volume'
 import { AlertLinesManager } from './drawings/alertLines'
 import { ChartCoordinateAdapter } from './drawings/chartAdapter'
@@ -61,6 +79,23 @@ import type {
 const volumePalette = { up: colors.volumeUp, down: colors.volumeDown }
 
 type MainSeries = ISeriesApi<'Candlestick' | 'Line' | 'Area'>
+
+/** The overlay's view of the chart: equity lines in their own pane. */
+function backtestChartAdapter(chart: IChartApi): OverlayChart<ISeriesApi<'Line'>> {
+  return {
+    addLine: (options, paneIndex) => chart.addSeries(LineSeries, options, paneIndex),
+    removeSeries: (series) => chart.removeSeries(series),
+    paneCount: () => chart.panes().length,
+  }
+}
+
+/** Identity of the pane indicators (uid + type, in order); a change can rebuild their panes. */
+function paneIndicatorKey(indicators: readonly IndicatorConfig[]): string {
+  return indicators
+    .filter((c) => getIndicatorDef(c.type)?.placement === 'pane')
+    .map((c) => `${c.uid}:${c.type}`)
+    .join('|')
+}
 
 function addMainSeries(chart: IChartApi, type: ChartType): MainSeries {
   switch (type) {
@@ -91,8 +126,19 @@ function syncRealPriceLine(line: IPriceLine | null, candles: readonly Candle[]):
 }
 
 interface ChartProps {
-  /** Ascending, unique times. The last bar may still be forming and changes on live ticks. */
+  /**
+   * The bars to plot: ascending, unique times, traded bars only (`plottableCandles`; bars
+   * without trades are left out, as on TradingView). The last bar may still be forming and
+   * changes on live ticks. Series, volume, indicators, legend, drawings, and the backtest
+   * overlay all use these.
+   */
   candles: readonly Candle[]
+  /**
+   * Open time of the oldest loaded bar including bars without trades (the pagination cursor).
+   * After each page lands, the chart asks for the next one itself while the view is still at the
+   * left edge, a few pages in a row (see `nextAutoOlder`); a user scroll starts a new run.
+   */
+  historyStart?: number | null
   symbol: string
   interval: Interval
   /** Data source shown in the legend, e.g. "Binance.US". */
@@ -144,6 +190,19 @@ interface ChartProps {
   onContextMenu?: (req: ChartContextMenuRequest) => void
   /** Active alerts for this symbol: dashed price lines with an axis label. */
   alertLines?: readonly AlertLine[]
+  /**
+   * A lab backtest for this symbol and interval: trade markers on the main series and an equity
+   * pane below the indicator panes. null/undefined removes both.
+   */
+  backtest?: BacktestChartData | null
+  /** Scroll/zoom the time scale to [from, to] (UNIX seconds) once per new `key`. */
+  focusRange?: { key: number; from: number; to: number } | null
+  /**
+   * A focus request was handled: 'apply' scrolled the chart; 'before-data' / 'after-data' /
+   * 'no-data' skipped it because the range lies outside the loaded bars. The caller should
+   * clear the request so a remounted chart does not apply it again.
+   */
+  onFocusDone?: (key: number, result: FocusPlan['kind']) => void
 }
 
 const NO_INDICATORS: readonly IndicatorConfig[] = []
@@ -185,6 +244,7 @@ export function Chart({
   source,
   chartType,
   onNearLeftEdge,
+  historyStart = null,
   indicators = NO_INDICATORS,
   onIndicatorToggleVisible,
   onIndicatorRemove,
@@ -200,6 +260,9 @@ export function Chart({
   onDrawingDelete,
   onContextMenu,
   alertLines = NO_ALERT_LINES,
+  backtest = null,
+  focusRange = null,
+  onFocusDone,
 }: ChartProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -214,6 +277,10 @@ export function Chart({
   const haRef = useRef<HeikinAshiBar[] | null>(null)
   const chartTypeRef = useRef<ChartType>(chartType)
   const onNearLeftEdgeRef = useRef(onNearLeftEdge)
+  /** Pages the chart requested by itself since the user last moved the view (nextAutoOlder). */
+  const autoOlderRef = useRef<AutoOlder | null>(null)
+  /** Range the chart set after a prepend; its (late) range event is not a user move. */
+  const expectedRangeRef = useRef<{ from: number; to: number } | null>(null)
   const [hoveredTime, setHoveredTime] = useState<number | undefined>(undefined)
   const [fontsReady, setFontsReady] = useState(false)
   /** Series of every indicator; also the store the indicator legend reads from. */
@@ -229,7 +296,18 @@ export function Chart({
   const [drawingController] = useState(() => new DrawingController(coords))
   const [alertLinesManager] = useState(() => new AlertLinesManager(alertLineOptions))
   const drawingsPrimitiveRef = useRef<DrawingsPrimitive | null>(null)
+  /** Backtest trade markers + equity pane; re-attached to each new main series. */
+  const [backtestOverlay] = useState(
+    () => new BacktestOverlay<MainSeries>((series) => createSeriesMarkers(series, [])),
+  )
+  const backtestVersion = useSyncExternalStore(
+    backtestOverlay.subscribe,
+    backtestOverlay.getSnapshot,
+  )
+  /** Pane-indicator identity the equity pane was last placed after. */
+  const paneKeyRef = useRef<string | null>(null)
   const onContextMenuRef = useRef(onContextMenu)
+  const onFocusDoneRef = useRef(onFocusDone)
 
   // Latest drawing callbacks, without re-binding DOM listeners.
   useEffect(() => {
@@ -255,10 +333,13 @@ export function Chart({
     onDrawingDelete,
   ])
 
-  // Latest callback without resubscribing to the time scale.
+  // Latest callbacks without resubscribing to the time scale / re-running the focus effect.
   useEffect(() => {
     onNearLeftEdgeRef.current = onNearLeftEdge
   }, [onNearLeftEdge])
+  useEffect(() => {
+    onFocusDoneRef.current = onFocusDone
+  }, [onFocusDone])
 
   // Create the chart once per mount. StrictMode mounts twice; cleanup removes the first chart.
   useEffect(() => {
@@ -299,6 +380,12 @@ export function Chart({
 
     const onRangeChange = (range: LogicalRange | null) => {
       if (!appliedRef.current?.length) return
+      // The chart's own shift after a prepend: neither a user move nor a reason to load. The
+      // auto-paging effect below decides whether another page follows.
+      if (isExpectedRange(range, expectedRangeRef.current)) return
+      expectedRangeRef.current = null
+      // The view moved (scroll, zoom, a new live bar, new data): a new auto-paging run.
+      if (autoOlderRef.current) autoOlderRef.current = { ...autoOlderRef.current, pages: 0 }
       if (isNearLeftEdge(range)) onNearLeftEdgeRef.current?.()
     }
     chart.timeScale().subscribeVisibleLogicalRangeChange(onRangeChange)
@@ -307,12 +394,16 @@ export function Chart({
     volumeSeriesRef.current = volumeSeries
     coords.setChart(chart)
     indicatorManager.attach(chart)
+    backtestOverlay.attachChart(backtestChartAdapter(chart))
     return () => {
       chart.unsubscribeCrosshairMove(onCrosshairMove)
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(onRangeChange)
       disposed = true
       watermarkRef.current?.detach()
       indicatorManager.detach()
+      // chart.remove() below takes the equity series and markers with it.
+      backtestOverlay.detachChart(false)
+      paneKeyRef.current = null
       chartRef.current = null
       coords.setChart(null, chart)
       chart.remove()
@@ -322,8 +413,10 @@ export function Chart({
       realLineRef.current = null
       appliedRef.current = null
       haRef.current = null
+      autoOlderRef.current = null
+      expectedRangeRef.current = null
     }
-  }, [indicatorManager, coords])
+  }, [indicatorManager, coords, backtestOverlay])
 
   // (Re)create the main series for the chart type. On mount the data effect below fills it;
   // on a type switch the candles already shown are re-applied here. Volume is untouched.
@@ -350,10 +443,12 @@ export function Chart({
     series.attachPrimitive(primitive)
     drawingsPrimitiveRef.current = primitive
     alertLinesManager.attach(series)
+    backtestOverlay.attachSeries(series)
     return () => {
       // On unmount the chart may already be removed (with all its series).
       const alive = chartRef.current === chart
       alertLinesManager.detach(alive)
+      backtestOverlay.detachSeries(alive)
       if (alive) series.detachPrimitive(primitive)
       if (drawingsPrimitiveRef.current === primitive) drawingsPrimitiveRef.current = null
       coords.setSeries(null, series)
@@ -362,7 +457,7 @@ export function Chart({
       realLineRef.current = null
       haRef.current = null
     }
-  }, [chartType, coords, drawingController, alertLinesManager])
+  }, [chartType, coords, drawingController, alertLinesManager, backtestOverlay])
 
   // Faint "BTCUSDT, 1h" behind the candles, as on TradingView.
   useEffect(() => {
@@ -396,7 +491,9 @@ export function Chart({
       haRef.current = ha
       indicatorManager.applyPlan(plan, candles)
       if (plan.kind === 'prepend' && range) {
-        timeScale.setVisibleLogicalRange(shiftLogicalRange(range, plan.count))
+        const shifted = shiftLogicalRange(range, plan.count)
+        expectedRangeRef.current = shifted
+        timeScale.setVisibleLogicalRange(shifted)
       }
     } else if (plan.kind === 'update') {
       const { points, ha } = mainSeriesTail(type, candles, plan.from, haRef.current)
@@ -411,7 +508,22 @@ export function Chart({
     appliedRef.current = candles
     // O(1): the index keeps a reference; drawings re-project on LWC's next redraw.
     coords.index.setBars(candles)
-  }, [candles, indicatorManager, coords])
+    // Cheap per tick; re-filters markers/equity only when the bar set changed.
+    backtestOverlay.setBars(candles)
+  }, [candles, indicatorManager, coords, backtestOverlay])
+
+  // A page landed (the raw start moved back). On a pair that rarely trades it adds few or no
+  // plotted bars, so the view can still sit at the left edge: ask for the next page, at most
+  // MAX_AUTO_OLDER_PAGES in a row until the user moves the view. Runs after the candles effect,
+  // so the visible range already reflects this render's bars.
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    const near = isNearLeftEdge(chart.timeScale().getVisibleLogicalRange())
+    const { state, request } = nextAutoOlder(autoOlderRef.current, historyStart, near)
+    autoOlderRef.current = state
+    if (request) onNearLeftEdgeRef.current?.()
+  }, [historyStart])
 
   // Drawing props → controller (each triggers a primitive redraw, never a setData).
   useEffect(() => {
@@ -558,9 +670,50 @@ export function Chart({
 
   // Indicator configs changed: create / remove / recompute / recolour / hide series.
   // Runs after the candles effect on mount, so new indicators start from the applied candles.
+  // The equity pane is taken out while pane indicators change, then re-added as the last pane,
+  // so it never shares a pane with an indicator.
   useEffect(() => {
+    const key = paneIndicatorKey(indicators)
+    const panesChange = key !== paneKeyRef.current
+    if (panesChange) backtestOverlay.suspendPane()
     indicatorManager.sync(indicators, appliedRef.current)
-  }, [indicators, indicatorManager])
+    if (panesChange) backtestOverlay.resumePane()
+    paneKeyRef.current = key
+  }, [indicators, indicatorManager, backtestOverlay])
+
+  // Backtest overlay. Declared after the indicator effect so on mount the equity pane lands
+  // below the indicator panes. Cleanup clears it (StrictMode re-runs re-add it).
+  useEffect(() => {
+    backtestOverlay.setData(backtest)
+    return () => backtestOverlay.setData(null)
+  }, [backtest, backtestOverlay])
+
+  // One-shot scroll/zoom to a time range (e.g. the backtest window or one trade).
+  const focusKey = focusRange?.key ?? null
+  const focusFrom = focusRange?.from ?? null
+  const focusTo = focusRange?.to ?? null
+  // The request is reported back once handled so the caller can drop it (a remounted chart
+  // must not replay an old request).
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart || focusKey === null || focusFrom === null || focusTo === null) return
+    const bars = appliedRef.current
+    const first = bars && bars.length > 0 ? bars[0].time : null
+    const last = bars && bars.length > 0 ? bars[bars.length - 1].time : null
+    // Clamped to the loaded bars: LWC needs both ends inside the data to map times to bars.
+    const plan = planFocus(focusFrom, focusTo, first, last)
+    if (plan.kind === 'apply') {
+      try {
+        chart.timeScale().setVisibleRange({
+          from: plan.from as UTCTimestamp,
+          to: plan.to as UTCTimestamp,
+        })
+      } catch {
+        // A range LWC cannot map (e.g. while data is being replaced) is simply ignored.
+      }
+    }
+    onFocusDoneRef.current?.(focusKey, plan.kind)
+  }, [focusKey, focusFrom, focusTo])
 
   // Measure where each pane starts so pane legends sit at their pane's top-left corner.
   // Re-measured when panes change, the chart resizes, or the user drags a pane separator.
@@ -603,7 +756,7 @@ export function Chart({
       if (frame) cancelAnimationFrame(frame)
       observer.disconnect()
     }
-  }, [indicatorSnapshot.paneVersion])
+  }, [indicatorSnapshot.paneVersion, backtestVersion])
 
   const legend = useMemo(
     () => buildLegend(candles, selectLegendIndex(candles, hoveredTime)),
@@ -613,6 +766,10 @@ export function Chart({
   // Cheap (binary search per line). useSyncExternalStore above re-renders on every store change
   // (live tick, config change), so this always reads the current values.
   const indicatorRows = indicatorManager.legendRows(hoveredTime)
+  const equityPane = backtestOverlay.equityPaneIndex()
+  const equityTop = equityPane !== null ? paneTops[equityPane] : null
+  const equityLegend =
+    equityTop !== null && equityTop !== undefined ? backtestOverlay.legend(hoveredTime) : []
   const legendActions = {
     onToggleVisible: onIndicatorToggleVisible,
     onRemove: onIndicatorRemove,
@@ -630,6 +787,24 @@ export function Chart({
         paneTops={paneTops}
         {...legendActions}
       />
+      {equityLegend.length > 0 && typeof equityTop === 'number' && (
+        <div className="bt-pane-legend" style={{ top: equityTop + 6 }} aria-live="off">
+          <span className="bt-pane-legend__title">Equity</span>
+          {equityLegend.map((item) => (
+            <span key={item.id} className="bt-pane-legend__item">
+              <span
+                className="bt-pane-legend__swatch"
+                style={{ background: item.color }}
+                aria-hidden="true"
+              />
+              {item.title}
+              <span className="bt-pane-legend__value" style={{ color: item.color }}>
+                {item.text}
+              </span>
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

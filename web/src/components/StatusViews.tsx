@@ -14,6 +14,60 @@ export function LoadingView({ label }: { label: string }) {
   )
 }
 
+interface EmptyViewProps {
+  title: string
+  message: string
+  action: string
+  actionDisabled: boolean
+  /** Why the action is unavailable, shown under the button. */
+  note?: string | null
+  onAction: () => void
+}
+
+/** Data loaded, but nothing to plot (e.g. no trades in the loaded period). Not an error. */
+export function EmptyView({
+  title,
+  message,
+  action,
+  actionDisabled,
+  note = null,
+  onAction,
+}: EmptyViewProps) {
+  return (
+    <div className="state" role="status">
+      <div className="error-card empty-card">
+        <svg
+          className="empty-card__icon"
+          width="28"
+          height="28"
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+        >
+          <path
+            d="M3 20h18M6 16V9M10 16v-4M14 16V6M18 16v-6"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeDasharray="2 2.5"
+          />
+        </svg>
+        <h2 className="error-card__title">{title}</h2>
+        <p className="error-card__message">{message}</p>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          onClick={() => onAction()}
+          disabled={actionDisabled}
+        >
+          {action}
+        </button>
+        {note !== null && <p className="empty-card__note">{note}</p>}
+      </div>
+    </div>
+  )
+}
+
 interface ErrorViewProps {
   title: string
   message: string

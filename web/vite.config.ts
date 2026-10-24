@@ -1,11 +1,14 @@
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vitest/config'
 
-// The local backend (server/) on 127.0.0.1:8787; the browser uses same-origin URLs.
+// The local backend (server/) on 127.0.0.1:8787 and the lab on 127.0.0.1:8788; the browser
+// uses same-origin URLs.
 // Shared by `vite` (dev) and `vite preview` (built app).
 const backendProxy = {
   '/api': { target: 'http://127.0.0.1:8787', changeOrigin: false },
   '/ws': { target: 'http://127.0.0.1:8787', ws: true, changeOrigin: false },
+  // The Python lab service (lab/, FastAPI): backtests, feature registry, trial ledger.
+  '/lab': { target: 'http://127.0.0.1:8788', changeOrigin: false },
 }
 
 // https://vite.dev/config/

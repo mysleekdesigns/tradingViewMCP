@@ -87,6 +87,61 @@ export function isNearLeftEdge(
   return range !== null && range.from < threshold
 }
 
+/**
+ * Older pages the chart may request by itself in a row, without the user moving the view. On a
+ * pair that rarely trades a page can add few or no plotted bars, so the view stays at the left
+ * edge; this bounds the follow-up pages. A user scroll or zoom starts a new run.
+ */
+export const MAX_AUTO_OLDER_PAGES = 5
+
+/** What the chart remembers between changes of the raw history start (see `nextAutoOlder`). */
+export interface AutoOlder {
+  /** Open time of the oldest loaded bar, traded or not (the pagination cursor). */
+  start: number | null
+  /** Pages requested by the chart itself since the user last moved the view. */
+  pages: number
+}
+
+/**
+ * The raw history start may have changed: should the chart ask for the next older page itself?
+ *
+ * Range events caused by the chart's own prepend shift never load (see `isExpectedRange`), so
+ * after every page that landed (with or without traded bars) this decides whether to go on: yes
+ * while the view is still near the left edge, at most MAX_AUTO_OLDER_PAGES times in a row. A
+ * window replaced by a newer one (start moved forward) starts a new run.
+ */
+export function nextAutoOlder(
+  prev: AutoOlder | null,
+  start: number | null,
+  nearLeftEdge: boolean,
+): { state: AutoOlder; request: boolean } {
+  if (prev === null) return { state: { start, pages: 0 }, request: false }
+  if (start === prev.start) return { state: prev, request: false }
+  const movedBack = prev.start !== null && start !== null && start < prev.start
+  if (!movedBack) return { state: { start, pages: 0 }, request: false }
+  if (nearLeftEdge && prev.pages < MAX_AUTO_OLDER_PAGES) {
+    return { state: { start, pages: prev.pages + 1 }, request: true }
+  }
+  return { state: { start, pages: prev.pages }, request: false }
+}
+
+/**
+ * True when a visible-range event carries the range the chart itself set after a prepend (LWC
+ * delivers it later, on its next frame), so it is not treated as the user moving the view.
+ */
+export function isExpectedRange(
+  range: { from: number; to: number } | null,
+  expected: { from: number; to: number } | null,
+  tolerance = 0.01,
+): boolean {
+  return (
+    range !== null &&
+    expected !== null &&
+    Math.abs(range.from - expected.from) <= tolerance &&
+    Math.abs(range.to - expected.to) <= tolerance
+  )
+}
+
 /** Visible logical range after `count` bars were inserted on the left: same bars stay in view. */
 export function shiftLogicalRange(
   range: { from: number; to: number },

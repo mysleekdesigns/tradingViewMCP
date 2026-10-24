@@ -1,4 +1,5 @@
 import { applyLiveCandle, mergeCandles, prependOlder } from '../data/candleStore'
+import { plottableCandles } from '../data/plottable'
 import { MarketDataError, type MarketDataProvider } from '../data/provider'
 import type { Candle, ConnectionStatus, Interval } from '../types'
 
@@ -6,7 +7,21 @@ import type { Candle, ConnectionStatus, Interval } from '../types'
 export type LoadState =
   | { kind: 'loading' }
   | { kind: 'error'; title: string; message: string; retryAfter?: number }
-  | { kind: 'ready'; candles: readonly Candle[] }
+  | {
+      kind: 'ready'
+      /**
+       * Every bar the exchange returned, traded or not (Binance.US also returns flat
+       * zero-volume bars for intervals without trades). The pagination cursor, gap fills, and
+       * the quote use these.
+       */
+      candles: readonly Candle[]
+      /**
+       * The bars the chart plots: `candles` without the bars that had no trade
+       * (`plottableCandles`). Elements are the same objects as in `candles`; the array keeps
+       * its identity while a tick does not change it. May be empty while `candles` is not.
+       */
+      bars: readonly Candle[]
+    }
 
 export interface LiveCandlesSnapshot {
   load: LoadState
@@ -24,6 +39,8 @@ export interface LiveCandlesSnapshot {
   loadingOlder: boolean
   /** The exchange returned nothing older than the first bar on screen; loadOlder is a no-op. */
   historyExhausted: boolean
+  /** An older page failed recently; loadOlder is a no-op until the short cooldown ends. */
+  olderCooldown: boolean
 }
 
 export interface LiveCandlesOptions {
@@ -33,6 +50,11 @@ export interface LiveCandlesOptions {
   limit: number
   /** Data source name used in error messages, e.g. "Binance.US". */
   source: string
+  /**
+   * Most bars (raw, traded or not) loadOlder grows the history to, unless called with
+   * `beyondLimit` (e.g. a Strategy Tester history load). Unlimited when omitted.
+   */
+  maxBars?: number
   /** Injectable clock for tests. */
   now?: () => number
 }
@@ -48,6 +70,7 @@ export const initialSnapshot: LiveCandlesSnapshot = {
   lastUpdate: null,
   loadingOlder: false,
   historyExhausted: false,
+  olderCooldown: false,
 }
 
 /** User-facing title and message for a failed REST load. */
@@ -126,6 +149,11 @@ function keepUnchangedIdentity(prev: readonly Candle[], next: Candle[]): Candle[
 function overlapsStart(existing: readonly Candle[], start: number): boolean {
   if (start <= existing[0].time) return true
   return existing.some((c) => c.time === start)
+}
+
+/** True when `rawCount` loaded bars reach `maxBars` (never when there is no limit). */
+export function atHistoryLimit(rawCount: number, maxBars: number | undefined): boolean {
+  return maxBars !== undefined && rawCount >= maxBars
 }
 
 /** Block used for a 429 without a usable Retry-After header (seconds). */
@@ -273,16 +301,18 @@ export class LiveCandlesController {
   }
 
   /**
-   * Fetch one page of candles older than the first bar on screen and prepend it. No-op
-   * unless candles are on screen and no older page is running, history is not exhausted,
-   * no Retry-After window is active, the cooldown after a failed page has passed, and the
-   * browser is not offline, so repeated calls yield one request at a time.
+   * Fetch one page of candles older than the oldest loaded bar (traded or not) and prepend
+   * it. No-op unless candles are loaded and no older page is running, history is not
+   * exhausted, no Retry-After window is active, the cooldown after a failed page has passed,
+   * and the browser is not offline, so repeated calls yield one request at a time. Also a
+   * no-op once `maxBars` raw bars are loaded, unless `beyondLimit` is true.
    */
-  loadOlder(): void {
+  loadOlder(beyondLimit = false): void {
     if (!this.started || this.stopped) return
     if (browserOffline() || this.olderCooldownTimer !== null) return
     const { load, loadingOlder, historyExhausted, retryBlocked } = this.snapshot
     if (load.kind !== 'ready' || load.candles.length === 0) return
+    if (!beyondLimit && atHistoryLimit(load.candles.length, this.opts.maxBars)) return
     if (loadingOlder || historyExhausted || retryBlocked || this.olderInflight !== null) return
 
     const controller = new AbortController()
@@ -292,6 +322,8 @@ export class LiveCandlesController {
 
     const { provider, symbol, interval, limit } = this.opts
     const page = Math.min(limit, MAX_PAGE)
+    // Page from the oldest RAW bar, never the oldest plotted one: a page of bars without
+    // trades adds no plotted bar, and paging from the plotted one would refetch it forever.
     const endTime = load.candles[0].time - 1
     let request: Promise<Candle[]>
     try {
@@ -341,7 +373,7 @@ export class LiveCandlesController {
       return
     }
     this.update({
-      load: { kind: 'ready', candles },
+      load: this.ready(candles),
       loadingOlder: false,
       lastUpdate: this.now(),
       ...(clearError ? { refreshError: null } : {}),
@@ -361,12 +393,14 @@ export class LiveCandlesController {
     if (this.olderCooldownTimer !== null) clearTimeout(this.olderCooldownTimer)
     this.olderCooldownTimer = setTimeout(() => {
       this.olderCooldownTimer = null
+      this.update({ olderCooldown: false })
     }, GAP_FILL_RETRY_DELAYS_MS[step])
     const blockFor = retryAfterSeconds(err)
     const error = describeError(err, this.opts.symbol, this.opts.source)
     this.refreshErrorFromOlder = true
     this.update({
       loadingOlder: false,
+      olderCooldown: true,
       refreshError: error.title,
       ...(blockFor > 0 ? { retryBlocked: true } : {}),
     })
@@ -395,6 +429,7 @@ export class LiveCandlesController {
     this.olderFailures = 0
     if (this.olderCooldownTimer !== null) clearTimeout(this.olderCooldownTimer)
     this.olderCooldownTimer = null
+    if (this.snapshot.olderCooldown) this.update({ olderCooldown: false })
   }
 
   private clearGapRetry(): void {
@@ -417,6 +452,13 @@ export class LiveCandlesController {
     this.listener(next)
   }
 
+  /** Ready state for `candles`; reuses the plotted array on screen when it is unchanged. */
+  private ready(candles: readonly Candle[]): LoadState {
+    const { load } = this.snapshot
+    const prev = load.kind === 'ready' ? load.bars : null
+    return { kind: 'ready', candles, bars: plottableCandles(candles, prev) }
+  }
+
   private update(patch: Partial<LiveCandlesSnapshot>): void {
     this.emit({ ...this.snapshot, ...patch })
   }
@@ -433,7 +475,7 @@ export class LiveCandlesController {
     if (this.inflight !== null) this.pending.set(c.time, c)
     const candles = applyLiveCandle(load.candles, c)
     if (candles === load.candles) return
-    this.update({ load: { kind: 'ready', candles }, lastUpdate: this.now() })
+    this.update({ load: this.ready(candles), lastUpdate: this.now() })
   }
 
   private onStatus(status: ConnectionStatus): void {
@@ -561,7 +603,7 @@ export class LiveCandlesController {
     for (const c of ticks) candles = applyLiveCandle(candles, c)
     this.liveBar = null
     this.update({
-      load: { kind: 'ready', candles },
+      load: this.ready(candles),
       refreshing: false,
       refreshError: null,
       lastUpdate: this.now(),

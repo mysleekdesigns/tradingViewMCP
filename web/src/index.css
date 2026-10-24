@@ -617,6 +617,20 @@ body,
   line-height: 1.5;
 }
 
+.empty-card {
+  max-width: 420px;
+}
+
+.empty-card__icon {
+  color: var(--text-faint);
+}
+
+.empty-card__note {
+  margin: 4px 0 0;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
 /* ---------- History hint ---------- */
 
 .history-hint {

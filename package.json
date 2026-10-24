@@ -4,8 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently --kill-others-on-fail --names server,web --prefix-colors cyan,magenta \"npm --prefix server run dev\" \"npm --prefix web run dev\"",
-    "test": "npm --prefix server run test && npm --prefix web run test",
+    "dev": "concurrently --kill-others-on-fail --names server,web,lab --prefix-colors cyan,magenta,yellow \"npm --prefix server run dev\" \"npm --prefix web run dev\" \"uv run --directory lab python -m lab.api || echo lab service exited - charting keeps running\"",
+    "test": "npm --prefix server run test && npm --prefix web run test && uv run --directory lab pytest -q",
     "typecheck": "npm --prefix server run typecheck && npm --prefix web run typecheck",
     "lint": "npm --prefix server run lint && npm --prefix web run lint"
   },

@@ -4,3 +4,5 @@
 - [Phase 5 server sync](project_web_phase5_sync.md) — ServerProvider status combo, createServerSync semantics; 1008 loop fixed; open gap: indicators cross-tab
 - [Server conventions and gaps](project_server_conventions.md) — Phase 5 cache/limiter/hub design not to re-flag; open gaps (window semantics, stale heartbeat, serve-stale)
 - [Phase 6 drawings/alerts](project_web_phase6_drawings_alerts.md) — controller/LWC event policy, lifecycle order confirmed; main gaps fixed; open: Escape gated off after rail-button focus
+- [Phase 7 Strategy Tester](project_web_phase7_tester.md) — labApi contract, overlay pane lifecycle confirmed; open: history-load stall, intraday cap, focus reapply, per-tick rerender
+- [No-trade bars](project_web_no_trade_bars.md) — raw `candles` vs plotted `bars` split, which consumer uses which; open: sparse-pair paging, empty-view clicks

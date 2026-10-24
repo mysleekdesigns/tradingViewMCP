@@ -65,3 +65,10 @@
   text-align: center;
   pointer-events: none;
 }
+
+.side-rail__divider {
+  width: 20px;
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}

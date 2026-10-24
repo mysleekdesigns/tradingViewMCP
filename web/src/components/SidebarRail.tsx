@@ -1,4 +1,5 @@
 import { badgeText } from './alertsView'
+import { TesterIcon } from './BacktestPanel'
 import './SidebarRail.css'
 
 export type SidebarPanel = 'watchlist' | 'alerts'
@@ -7,6 +8,9 @@ export interface SidebarRailProps {
   active: SidebarPanel | null
   onSelect(panel: SidebarPanel | null): void
   alertBadge: number
+  /** The Strategy Tester dock (under the chart) is open. Independent of the sidebar panel. */
+  testerOpen: boolean
+  onToggleTester(): void
 }
 
 const PANELS: readonly { id: SidebarPanel; label: string }[] = [
@@ -18,7 +22,13 @@ const PANELS: readonly { id: SidebarPanel; label: string }[] = [
  * Far-right icon rail (TradingView style). Picks the sidebar panel; clicking the open panel's
  * button collapses the sidebar.
  */
-export function SidebarRail({ active, onSelect, alertBadge }: SidebarRailProps) {
+export function SidebarRail({
+  active,
+  onSelect,
+  alertBadge,
+  testerOpen,
+  onToggleTester,
+}: SidebarRailProps) {
   const badge = badgeText(alertBadge)
   return (
     <nav className="side-rail" aria-label="Sidebar panels">
@@ -44,6 +54,17 @@ export function SidebarRail({ active, onSelect, alertBadge }: SidebarRailProps) 
           </button>
         )
       })}
+      <span className="side-rail__divider" aria-hidden="true" />
+      <button
+        type="button"
+        className="side-rail__btn"
+        aria-pressed={testerOpen}
+        aria-label="Strategy Tester"
+        title={testerOpen ? 'Hide Strategy Tester' : 'Strategy Tester (backtest a plan)'}
+        onClick={onToggleTester}
+      >
+        <TesterIcon size={22} />
+      </button>
     </nav>
   )
 }

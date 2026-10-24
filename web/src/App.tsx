@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react'
+import { buildChartData, tradesOnChart } from './chart/backtestOverlay'
 import { Chart } from './chart/Chart'
 import {
   DEFAULT_DRAWING_STYLE,
@@ -11,6 +20,26 @@ import {
 import { AlertDialog, type AlertDialogValues } from './components/AlertDialog'
 import { AlertsPanel } from './components/AlertsPanel'
 import { AlertToasts, type AlertToast } from './components/AlertToasts'
+import { BacktestPanel, type BacktestChartLink } from './components/BacktestPanel'
+import {
+  clampDockHeight,
+  HISTORY_RETRY_MS,
+  historyLoadFailed,
+  historyLoadReducer,
+  historyPlan,
+  initialHistoryLoad,
+  initTesterState,
+  isChartInterval,
+  loadDockPrefs,
+  loadPlanText,
+  MAX_HISTORY_BARS,
+  reportMatchesChart,
+  saveDockPrefs,
+  savePlanText,
+  testerReducer,
+  type DockPrefs,
+} from './components/backtestView'
+import type { FocusPlan } from './chart/backtestOverlay'
 import { ChartContextMenu } from './components/ChartContextMenu'
 import { DrawingStyleBar } from './components/DrawingStyleBar'
 import { DrawingToolbar } from './components/DrawingToolbar'
@@ -21,6 +50,7 @@ import { IndicatorSettings } from './components/IndicatorSettings'
 import { summarizeQuote, formatUtcClock } from './components/quote'
 import { SidebarRail, type SidebarPanel } from './components/SidebarRail'
 import { StatusBar } from './components/StatusBar'
+import { NoTradesView } from './components/NoTradesView'
 import { ErrorView, LoadingView } from './components/StatusViews'
 import { SymbolSearch } from './components/SymbolSearch'
 import { Watchlist } from './components/Watchlist'
@@ -28,6 +58,7 @@ import type { Alert, AlertEvent, NotifyPermission } from './data/alertTypes'
 import { createAlertsClient } from './data/alertsApi'
 import { BinanceProvider } from './data/binance'
 import { createDrawingsClient } from './data/drawingsApi'
+import { createLabClient } from './data/labApi'
 import type { MarketDataProvider } from './data/provider'
 import { ServerProvider } from './data/server'
 import { getIndicatorDef } from './indicators/registry'
@@ -51,6 +82,7 @@ import {
   showBrowserNotification,
 } from './state/notify'
 import { loadPrefs, savePrefs } from './state/prefs'
+import { atHistoryLimit } from './state/liveCandles'
 import { useLiveCandles } from './state/useLiveCandles'
 import { useSymbols } from './state/useSymbols'
 import { useWatchlist } from './state/watchlist'
@@ -63,8 +95,12 @@ const provider: MarketDataProvider = DIRECT ? new BinanceProvider() : new Server
 // in localStorage and alerts are unavailable.
 const drawingsClient = DIRECT ? null : createDrawingsClient()
 const alertsClient = DIRECT ? null : createAlertsClient()
+// The Python lab (backtests + ledger) is its own service behind the `/lab` proxy, in both modes.
+const labClient = createLabClient()
 
-const SOURCE = DIRECT ? 'Binance.US' : 'Binance.US · local server'
+/** The exchange the data comes from (in both modes). */
+const EXCHANGE = 'Binance.US'
+const SOURCE = DIRECT ? EXCHANGE : `${EXCHANGE} · local server`
 const LIMIT = 500
 /** How long a small error notice (e.g. a failed alert delete) stays up. */
 const NOTICE_MS = 6000
@@ -99,6 +135,16 @@ interface ContextMenuState {
   /** Fresh per request so the menu re-measures and refocuses. */
   key: number
   request: ChartContextMenuRequest
+}
+
+/** A time range the chart should scroll to; a fresh key per request. */
+interface FocusRequest {
+  key: number
+  from: number
+  to: number
+  /** Only applied to the chart it was made for (a symbol switch remounts the chart). */
+  symbol: string
+  interval: Interval
 }
 
 interface AlertDialogState {
@@ -137,6 +183,15 @@ function App() {
   const [permission, setPermission] = useState<NotifyPermission>(notificationPermission)
   const keySeq = useRef(0)
 
+  // Strategy Tester: dock layout, panel state (kept here so a run survives closing the dock).
+  const [dock, setDock] = useState<DockPrefs>(loadDockPrefs)
+  const [tester, dispatchTester] = useReducer(testerReducer, null, () =>
+    initTesterState(loadPlanText()),
+  )
+  const [historyLoad, dispatchHistory] = useReducer(historyLoadReducer, initialHistoryLoad)
+  const historyTarget = historyLoad.target
+  const [focusRange, setFocusRange] = useState<FocusRequest | null>(null)
+
   useEffect(() => {
     savePrefs({ symbol, interval, chartType })
   }, [symbol, interval, chartType])
@@ -146,12 +201,20 @@ function App() {
   }, [panel])
 
   useEffect(() => {
+    saveDockPrefs(dock)
+  }, [dock])
+
+  useEffect(() => {
+    savePlanText(tester.planText, tester.planEdited)
+  }, [tester.planText, tester.planEdited])
+
+  useEffect(() => {
     if (notice === null) return
     const t = setTimeout(() => setNotice(null), NOTICE_MS)
     return () => clearTimeout(t)
   }, [notice])
 
-  const live = useLiveCandles(provider, symbol, interval, LIMIT, SOURCE)
+  const live = useLiveCandles(provider, symbol, interval, LIMIT, SOURCE, MAX_HISTORY_BARS)
   const { load } = live
   const symbolList = useSymbols(provider)
   const watchlist = useWatchlist()
@@ -175,15 +238,140 @@ function App() {
     settingsUid !== null ? indicators.items.find((c) => c.uid === settingsUid) : undefined
   const settingsDef = settingsConfig ? getIndicatorDef(settingsConfig.type) : undefined
 
+  // Every loaded bar, traded or not: the pagination cursor, history planning, and the quote.
   const candles = load.kind === 'ready' ? load.candles : null
-  const lastCandle = candles !== null && candles.length > 0 ? candles[candles.length - 1] : null
-  // The last candle may still be forming; it is a display/default value only.
-  const lastClose = lastCandle?.close ?? null
-  const lastCandleTime = lastCandle?.time ?? null
+  // What the chart plots: bars without trades are left out, as on TradingView.
+  const bars = load.kind === 'ready' ? load.bars : null
+  // The last candle may still be forming; it is a display/default value only. A bar without
+  // trades carries the previous close, so the raw last close is the last traded price.
+  const lastClose =
+    candles !== null && candles.length > 0 ? candles[candles.length - 1].close : null
+  const lastCandleTime = bars !== null && bars.length > 0 ? bars[bars.length - 1].time : null
   const quote = useMemo(
     () => (candles ? summarizeQuote(candles, interval) : null),
     [candles, interval],
   )
+  // ---- Strategy Tester ↔ chart ----
+
+  const report = tester.report
+  const reportOnMarket = report !== null && reportMatchesChart(report, symbol, interval)
+  const chartData = useMemo(() => (report ? buildChartData(report) : null), [report])
+  const backtestDrawn = tester.shownOnChart && reportOnMarket
+  // Raw first bar: a page of bars without trades still moves the history back.
+  const firstBarTime = candles !== null && candles.length > 0 ? candles[0].time : null
+  // Live ticks replace `candles` but rarely change its length; plans depend on the length only.
+  const candleCount = candles?.length ?? null
+  const history = useMemo(
+    () =>
+      backtestDrawn && report && candleCount !== null
+        ? historyPlan(
+            firstBarTime,
+            report.window,
+            interval,
+            Math.max(0, MAX_HISTORY_BARS - candleCount),
+          )
+        : null,
+    [backtestDrawn, report, candleCount, firstBarTime, interval],
+  )
+  // Active only for the market it was started on, until the window start is loaded.
+  const historyActive =
+    historyTarget !== null &&
+    backtestDrawn &&
+    historyTarget.symbol === symbol &&
+    historyTarget.interval === interval &&
+    firstBarTime !== null &&
+    firstBarTime > historyTarget.target &&
+    !live.historyExhausted
+  const historyFailed = backtestDrawn && historyLoadFailed(historyLoad, symbol, interval)
+  const { loadOlder, loadingOlder, retryBlocked } = live
+
+  // Count pages of the auto-load: a page that ends without moving the first bar back failed.
+  // The reducer gives up after a few consecutive failures instead of spinning forever.
+  const pageStartRef = useRef<number | null | undefined>(undefined)
+  useEffect(() => {
+    if (!historyActive) {
+      pageStartRef.current = undefined
+      return
+    }
+    if (loadingOlder) {
+      if (pageStartRef.current === undefined) {
+        pageStartRef.current = firstBarTime
+        dispatchHistory({ type: 'request' })
+      }
+      return
+    }
+    const start = pageStartRef.current
+    if (start === undefined) return
+    pageStartRef.current = undefined
+    dispatchHistory({ type: 'page-done', progressed: firstBarTime !== start })
+  }, [historyActive, loadingOlder, firstBarTime])
+
+  // Ask for the next page now and keep asking on an interval: loadOlder is a no-op during its
+  // cooldown after a failed page, so a single retry could land inside it and never re-arm.
+  // A Retry-After block pauses the loop; it re-arms when the block lifts. The user asked for
+  // this history, so it may go past the bar limit that caps scrolling back (historyPlan
+  // already bounds the target).
+  useEffect(() => {
+    if (!historyActive || loadingOlder || retryBlocked) return
+    loadOlder(true)
+    const id = window.setInterval(() => {
+      dispatchHistory({ type: 'tick' })
+      loadOlder(true)
+    }, HISTORY_RETRY_MS)
+    return () => window.clearInterval(id)
+  }, [historyActive, loadingOlder, retryBlocked, firstBarTime, loadOlder])
+
+  // While loading, count the bars left to the target the load was started with.
+  const historyTargetTime = historyActive ? historyTarget.target : null
+  const historyLeft = useMemo(
+    () =>
+      historyTargetTime !== null && history && report
+        ? {
+            ...history,
+            bars: historyPlan(
+              firstBarTime,
+              { ...report.window, start: historyTargetTime },
+              interval,
+            ).bars,
+          }
+        : history,
+    [historyTargetTime, history, report, firstBarTime, interval],
+  )
+  // The chart draws trade markers on plotted bars only, so the Strategy Tester counts and
+  // links trades from the first PLOTTED bar (history planning above stays on raw bars).
+  const plottedFirstTime = bars !== null && bars.length > 0 ? bars[0].time : null
+  // Runs over every trade, so only when the report or the first plotted bar changes.
+  const onChartCount = useMemo(
+    () => (report && backtestDrawn ? tradesOnChart(report.trades, plottedFirstTime) : 0),
+    [report, backtestDrawn, plottedFirstTime],
+  )
+  const historyExhausted = live.historyExhausted
+  // Stable between live ticks so the memoised dock does not re-render on every tick.
+  const testerLink = useMemo<BacktestChartLink>(
+    () => ({
+      drawn: backtestDrawn,
+      matches: reportOnMarket,
+      canSwitch: report !== null && isChartInterval(report.interval),
+      tradesOnChart: onChartCount,
+      firstBarTime: plottedFirstTime,
+      history: historyLeft,
+      historyLoading: historyActive,
+      historyExhausted,
+      historyFailed,
+    }),
+    [
+      backtestDrawn,
+      reportOnMarket,
+      report,
+      onChartCount,
+      plottedFirstTime,
+      historyLeft,
+      historyActive,
+      historyExhausted,
+      historyFailed,
+    ],
+  )
+
   const byName = symbolList.byName
   const info = byName?.get(symbol)
   const description = info ? `${info.baseAsset} / ${info.quoteAsset}` : ''
@@ -222,12 +410,67 @@ function App() {
 
   const selectSymbol = useCallback((next: string) => {
     setSymbol(next)
+    // A pending scroll request belongs to the old chart.
+    setFocusRange(null)
     setSearch(null)
     // Drawing state belongs to the old symbol's chart (this also hides the style bar).
     setTool('cursor')
     setSelectedDrawingId(null)
     setContextMenu(null)
   }, [])
+
+  const changeInterval = useCallback((next: Interval) => {
+    setTimeframe(next)
+    setFocusRange(null)
+  }, [])
+
+  const showBacktestOnChart = useCallback(() => {
+    if (report === null) return
+    if (report.symbol !== symbol) selectSymbol(report.symbol)
+    if (report.interval !== interval && isChartInterval(report.interval)) {
+      changeInterval(report.interval)
+    }
+    dispatchTester({ type: 'show-on-chart', shown: true })
+  }, [report, symbol, interval, selectSymbol, changeInterval])
+
+  const clearBacktestFromChart = useCallback(() => {
+    dispatchTester({ type: 'show-on-chart', shown: false })
+    dispatchHistory({ type: 'stop' })
+  }, [])
+
+  const loadBacktestHistory = useCallback(() => {
+    // An unreachable window lies beyond the chart's bar limit: fetching would never reach it.
+    if (history === null || !history.needed || history.unreachable) return
+    dispatchHistory({ type: 'start', target: { symbol, interval, target: history.target } })
+  }, [history, symbol, interval])
+
+  const stopBacktestHistory = useCallback(() => dispatchHistory({ type: 'stop' }), [])
+
+  const focusChartRange = useCallback(
+    (from: number, to: number) => {
+      keySeq.current += 1
+      setFocusRange({ key: keySeq.current, from, to, symbol, interval })
+    },
+    [symbol, interval],
+  )
+
+  // The chart handled a request: drop it so a remounted chart does not replay it.
+  const focusDone = useCallback((key: number, result: FocusPlan['kind']) => {
+    setFocusRange((cur) => (cur?.key === key ? null : cur))
+    if (result === 'before-data') {
+      setNotice(
+        'That part of the backtest is older than the bars on the chart. Use “Load full history” in the Strategy Tester first.',
+      )
+    } else if (result === 'after-data') {
+      setNotice('That part of the backtest is newer than the bars on the chart.')
+    }
+  }, [])
+
+  const resizeDock = useCallback((height: number) => {
+    setDock((d) => ({ ...d, height: clampDockHeight(height, window.innerHeight) }))
+  }, [])
+  const closeDock = useCallback(() => setDock((d) => ({ ...d, open: false })), [])
+  const toggleDock = useCallback(() => setDock((d) => ({ ...d, open: !d.open })), [])
 
   const toggleWatchlistItem = useCallback(
     (s: string) => (watchlist.has(s) ? watchlist.remove(s) : watchlist.add(s)),
@@ -393,14 +636,19 @@ function App() {
   ])
 
   const sidebarOpen = panel !== null
+  const dockHeight = clampDockHeight(dock.height, window.innerHeight)
+  const appClass = `app${sidebarOpen ? ' app--with-sidebar' : ''}${
+    dock.open ? ' app--with-tester' : ''
+  }`
+  const appStyle = dock.open ? ({ '--tester-h': `${dockHeight}px` } as CSSProperties) : undefined
 
   return (
-    <div className={`app${sidebarOpen ? ' app--with-sidebar' : ''}`}>
+    <div className={appClass} style={appStyle}>
       <Header
         symbol={symbol}
         description={description}
         interval={interval}
-        onIntervalChange={setTimeframe}
+        onIntervalChange={changeInterval}
         chartType={chartType}
         onChartTypeChange={setChartType}
         onOpenIndicators={openIndicatorMenu}
@@ -424,9 +672,10 @@ function App() {
         onClearAll={clearDrawings}
       />
       <main className="workspace">
-        {load.kind === 'ready' && (
+        {load.kind === 'ready' && load.bars.length > 0 && (
           <Chart
-            candles={load.candles}
+            candles={load.bars}
+            historyStart={firstBarTime}
             symbol={symbol}
             interval={interval}
             source={SOURCE}
@@ -447,9 +696,30 @@ function App() {
             onDrawingDelete={removeDrawing}
             onContextMenu={openContextMenu}
             alertLines={activeAlertLines}
+            backtest={backtestDrawn ? chartData : null}
+            focusRange={
+              focusRange?.symbol === symbol && focusRange.interval === interval ? focusRange : null
+            }
+            onFocusDone={focusDone}
           />
         )}
-        {load.kind === 'ready' && selectedDrawing && (
+        {load.kind === 'ready' && load.bars.length === 0 && (
+          <NoTradesView
+            symbol={symbol}
+            interval={interval}
+            exchange={EXCHANGE}
+            raw={load.candles}
+            maxBars={MAX_HISTORY_BARS}
+            loadingOlder={live.loadingOlder}
+            historyExhausted={live.historyExhausted}
+            atLimit={atHistoryLimit(load.candles.length, MAX_HISTORY_BARS)}
+            retryBlocked={live.retryBlocked}
+            olderCooldown={live.olderCooldown}
+            offline={live.status === 'offline'}
+            onLoadOlder={live.loadOlder}
+          />
+        )}
+        {load.kind === 'ready' && load.bars.length > 0 && selectedDrawing && (
           <DrawingStyleBar
             key={selectedDrawing.id}
             drawing={selectedDrawing}
@@ -457,7 +727,7 @@ function App() {
             onDelete={() => deleteDrawing(selectedDrawing.id)}
           />
         )}
-        {load.kind === 'ready' && live.loadingOlder && (
+        {load.kind === 'ready' && load.bars.length > 0 && live.loadingOlder && (
           <div className="history-hint" role="status">
             <span className="history-hint__spinner" aria-hidden="true" />
             Loading older bars…
@@ -512,9 +782,34 @@ function App() {
           )}
         </div>
       )}
-      <SidebarRail active={panel} onSelect={setPanel} alertBadge={alerts.unseen} />
+      {dock.open && (
+        <BacktestPanel
+          client={labClient}
+          state={tester}
+          dispatch={dispatchTester}
+          chartSymbol={symbol}
+          chartInterval={interval}
+          link={testerLink}
+          onShowOnChart={showBacktestOnChart}
+          onClearFromChart={clearBacktestFromChart}
+          onLoadHistory={loadBacktestHistory}
+          onStopHistory={stopBacktestHistory}
+          onFocusRange={focusChartRange}
+          onClose={closeDock}
+          height={dockHeight}
+          onResize={resizeDock}
+          formatPrice={formatSymbolPrice}
+        />
+      )}
+      <SidebarRail
+        active={panel}
+        onSelect={setPanel}
+        alertBadge={alerts.unseen}
+        testerOpen={dock.open}
+        onToggleTester={toggleDock}
+      />
       <StatusBar
-        barCount={candles ? candles.length : null}
+        barCount={bars ? bars.length : null}
         status={live.status}
         lastUpdate={live.lastUpdate !== null ? formatUtcClock(new Date(live.lastUpdate)) : null}
         refreshError={load.kind === 'ready' ? live.refreshError : null}
