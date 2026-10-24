@@ -26,4 +26,4 @@ Checks: npx tsc --noEmit (clean), npx vitest run (18 passed)
 Manual: survived a Wi-Fi toggle in the browser (owner verified)
 ```
 
-7. Report the commit hash and subject. Do not push; pushing is a separate decision.
+7. Push to `Development` (owner's standing instruction): on branch `Development`, run `git push origin Development`. Never force-push and never push to `main`. Report the commit hash, subject, and push result.

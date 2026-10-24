@@ -26,7 +26,7 @@ Next phase progress:
 - [ ] 4. Integration: typecheck + lint + tests green in every touched area
 - [ ] 5. Review (code-reviewer and/or quant-reviewer) and gate-runner in parallel; findings fixed
 - [ ] 6. PLAN.md boxes ticked for verified items only; manual checks listed
-- [ ] 7. Committed (no push)
+- [ ] 7. Committed and pushed to origin/Development
 ```
 
 ## 1. Preconditions
@@ -45,6 +45,8 @@ Partition the unchecked items so no two packages create or edit the same file. T
 - Phase 4: one package per indicator group (overlays, oscillators) plus one for the registry + menu + settings dialog.
 - Phase 5: (a) server scaffold + SQLite migrations, then in parallel (b) candle cache endpoint, (c) WS fan-out, (d) persistence endpoints, (e) `ServerProvider` in `web/`.
 - Phase 7: (a) archive downloader, (b) registry + look-ahead tests, (c) plan schema + validator, (d) engine + accounting tests, (e) splits + ledger, (f) stats. Fix shared dataclasses/schemas first.
+
+Any package that builds or changes UI layout or components in `web/` must be told to load the `frontend-design` skill first and aim for a professional, TradingView-like, easy-to-use interface (owner's standing instruction).
 
 Write the shared interfaces (exact signatures and types) into every prompt that depends on them. If an API or formula is uncertain, launch `researcher` in the same message and pass its answer on.
 
@@ -70,9 +72,11 @@ Fix every Critical and Warning finding, re-run step 4, and re-run `gate-runner` 
 
 Flip `[ ]` → `[x]` only for items with code and a passing test, or verified by the gate. Leave manual-check items unticked. Do not touch other phases.
 
-## 7. Commit
+## 7. Commit and push
 
-Stage only this change's files (never `.env*`, `*.db`, `node_modules/`, `dist/`, data or cache files). Conventional Commit, scope `phase-<n>`, body listing completed items and the checks that passed, plus any attribution trailer the session requires. Do not push.
+Stage only this change's files (never `.env*`, `*.db`, `node_modules/`, `dist/`, data or cache files). Conventional Commit, scope `phase-<n>`, body listing completed items and the checks that passed, plus any attribution trailer the session requires.
+
+Once the gate is `Gate: PASS` and every touched area's checks are green, push the commit to `Development` (the owner's standing instruction): be on the `Development` branch, then `git push origin Development`. Never force-push, never push to `main`, and do not push if the gate failed or anything is red.
 
 ## Final report
 

@@ -6,5 +6,5 @@
 - When a checklist item is finished and verified, flip `[ ]` to `[x]` in `PLAN.md` in the same change. Never tick an item that is unverified or needs a manual browser check you did not do; list those for the user instead.
 - The checkboxes under Phase 8 **Success criteria** are acceptance criteria for strategies, not build tasks. Never tick them while building.
 - Tooling: `npm` inside `web/` and `server/`; `uv` inside `lab/` and `agents/` (`uv run pytest`, `uv add <pkg>`). Never `pip install` into the system Python.
-- Once git exists (Phase 0): work on a branch, use Conventional Commits with the phase as scope, e.g. `feat(phase-2): reconnect websocket with backoff`. Commit with `/commit-phase`; do not push unless asked.
+- Once git exists (Phase 0): work on a branch, use Conventional Commits with the phase as scope, e.g. `feat(phase-2): reconnect websocket with backoff`. Commit with `/commit-phase`. When a phase is done and its gate passes, commit and push to `origin Development` (owner's standing instruction); never force-push and never push to `main`.
 - Before claiming a phase complete, run `/run-gate`. Delegate broad investigations to a subagent (`researcher`, Explore) rather than reading many files into the main conversation.

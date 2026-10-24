@@ -5,6 +5,7 @@ paths:
 
 # Frontend (Vite + React + TypeScript)
 
+- Load the `frontend-design` skill before designing or changing app layout or UI components (toolbar, watchlist, symbol search, panels, dialogs, legend, status states). Target: professional, looks like TradingView (dark theme, dense top toolbar, left drawing rail, right watchlist), and easy to understand and use (owner's standing instruction).
 - Strict TypeScript. Shared types (`Candle`, `Interval`, `SymbolInfo`) live in `web/src/types.ts`; do not redeclare them. `Candle.time` is UNIX **seconds** UTC; format dates only at render time.
 - Components never call an exchange directly. All market data goes through the `MarketDataProvider` interface in `web/src/data/provider.ts`, so swapping Binance / Binance.US / Coinbase / `ServerProvider` is a one-file change.
 - Lightweight Charts is **v5**: `chart.addSeries(CandlestickSeries, opts, paneIndex?)`, not the v4 `addCandlestickSeries`. Load the `lightweight-charts-v5` skill before writing chart code.
