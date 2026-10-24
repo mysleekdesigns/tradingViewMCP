@@ -1,33 +1,40 @@
 import {
   ColorType,
   CrosshairMode,
+  LineStyle,
   type CandlestickSeriesPartialOptions,
   type DeepPartial,
   type HistogramSeriesPartialOptions,
+  type TextWatermarkOptions,
   type TimeChartOptions,
 } from 'lightweight-charts'
 
-/** TradingView-like dark palette. */
+/** TradingView-like dark palette. Keep in sync with the CSS variables in index.css. */
 export const colors = {
   background: '#131722',
-  grid: '#1e222d',
+  grid: '#1c2030',
   border: '#2a2e39',
-  text: '#d1d4dc',
+  text: '#b2b5be',
   mutedText: '#787b86',
-  up: '#26a69a',
-  down: '#ef5350',
-  /** Volume bars use the candle colours at ~50% alpha. */
-  volumeUp: '#26a69a80',
-  volumeDown: '#ef535080',
-  crosshair: '#758696',
+  up: '#089981',
+  down: '#f23645',
+  /** Volume bars use the candle colours at ~45% alpha. */
+  volumeUp: '#08998173',
+  volumeDown: '#f2364573',
+  crosshair: '#9598a1',
+  crosshairLabel: '#363a45',
+  watermark: 'rgba(178, 181, 190, 0.06)',
 } as const
+
+export const fontFamily = "'IBM Plex Sans', -apple-system, 'Segoe UI', sans-serif"
 
 export const chartOptions: DeepPartial<TimeChartOptions> = {
   autoSize: true,
   layout: {
     background: { type: ColorType.Solid, color: colors.background },
     textColor: colors.text,
-    fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+    fontFamily,
+    fontSize: 11,
   },
   grid: {
     vertLines: { color: colors.grid },
@@ -35,11 +42,27 @@ export const chartOptions: DeepPartial<TimeChartOptions> = {
   },
   crosshair: {
     mode: CrosshairMode.Normal,
-    vertLine: { color: colors.crosshair, labelBackgroundColor: colors.border },
-    horzLine: { color: colors.crosshair, labelBackgroundColor: colors.border },
+    vertLine: {
+      color: colors.crosshair,
+      style: LineStyle.Dashed,
+      width: 1,
+      labelBackgroundColor: colors.crosshairLabel,
+    },
+    horzLine: {
+      color: colors.crosshair,
+      style: LineStyle.Dashed,
+      width: 1,
+      labelBackgroundColor: colors.crosshairLabel,
+    },
   },
-  rightPriceScale: { borderColor: colors.border },
-  timeScale: { borderColor: colors.border, timeVisible: true, secondsVisible: false },
+  rightPriceScale: { borderColor: colors.border, scaleMargins: { top: 0.12, bottom: 0.24 } },
+  timeScale: {
+    borderColor: colors.border,
+    timeVisible: true,
+    secondsVisible: false,
+    rightOffset: 6,
+    barSpacing: 8,
+  },
 }
 
 export const candlestickOptions: CandlestickSeriesPartialOptions = {
@@ -59,3 +82,11 @@ export const volumeOptions: HistogramSeriesPartialOptions = {
 }
 
 export const volumeScaleMargins = { top: 0.8, bottom: 0 } as const
+
+export function watermarkOptions(text: string): DeepPartial<TextWatermarkOptions> {
+  return {
+    horzAlign: 'center',
+    vertAlign: 'center',
+    lines: [{ text, color: colors.watermark, fontSize: 72, fontStyle: '600', fontFamily }],
+  }
+}

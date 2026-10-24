@@ -1,0 +1,2 @@
+- [web toolchain conventions](project_web_toolchain.md) — TS6 strict default, ESLint+Prettier, Vitest node env; what not to re-flag
+- [web conventions and recurring gaps](project_web_conventions.md) — provider/chart/App lifecycle, UTC helpers, LWC font-cache quirk; open gaps (pagination, aria-live, 1m quote)
