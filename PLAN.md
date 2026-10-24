@@ -252,13 +252,13 @@ tradingView/
 
 **Goal:** an empty app that runs locally.
 
-- [ ] Install Node.js 20+ (`node -v` to check)
-- [ ] `git init` and add a `.gitignore` (`node_modules`, `dist`, `*.db`, `.env`)
-- [ ] Scaffold frontend: `npm create vite@latest web -- --template react-ts`
-- [ ] `cd web && npm install && npm install lightweight-charts`
-- [ ] Run `npm run dev` and confirm the page loads at `http://localhost:5173`
-- [ ] Add ESLint/Prettier (optional but recommended)
-- [ ] Decide data provider based on region (Binance / Binance.US / Coinbase)
+- [x] Install Node.js 20+ (`node -v` to check)
+- [x] `git init` and add a `.gitignore` (`node_modules`, `dist`, `*.db`, `.env`)
+- [x] Scaffold frontend: `npm create vite@latest web -- --template react-ts`
+- [x] `cd web && npm install && npm install lightweight-charts`
+- [x] Run `npm run dev` and confirm the page loads at `http://localhost:5173`
+- [x] Add ESLint/Prettier (optional but recommended)
+- [x] Decide data provider based on region (Binance / Binance.US / Coinbase) — **Decided 2026-10-24: Binance.US** (`api.binance.us`, `wss://stream.binance.us:9443`); `api.binance.com` returns HTTP 451 from the owner's IP.
 
 **Done when:** blank React page runs locally.
 
