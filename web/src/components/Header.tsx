@@ -25,7 +25,7 @@ export function Header({
 }: HeaderProps) {
   return (
     <header className="topbar">
-      <div className="topbar__brand" aria-label="tradingView">
+      <div className="topbar__brand" role="img" aria-label="tradingView">
         <LogoMark />
       </div>
 
@@ -42,7 +42,8 @@ export function Header({
 
       <div className="topbar__divider" aria-hidden="true" />
 
-      <div className={`quote quote--${quote?.direction ?? 'flat'}`} aria-live="polite">
+      {/* No aria-live: once prices stream, it would announce every tick. */}
+      <div className={`quote quote--${quote?.direction ?? 'flat'}`}>
         {quote ? (
           <>
             <span className="quote__price">{quote.price}</span>
@@ -66,10 +67,10 @@ export function Header({
       <button
         type="button"
         className="btn btn--ghost"
-        onClick={onRefresh}
-        disabled={refreshDisabled || loading}
+        // aria-disabled instead of disabled keeps keyboard focus on the button while loading.
+        onClick={refreshDisabled || loading ? undefined : onRefresh}
+        aria-disabled={refreshDisabled || loading}
         title="Reload the latest candles"
-        aria-label="Refresh"
       >
         <RefreshIcon spinning={loading} />
         <span>Refresh</span>

@@ -16,10 +16,12 @@ import {
   candlestickOptions,
   chartOptions,
   colors,
+  fallbackFontFamily,
   fontFamily,
   volumeOptions,
   volumeScaleMargins,
   watermarkOptions,
+  webFonts,
 } from './theme'
 import { toCandlestickData, toVolumeData } from './volume'
 
@@ -37,6 +39,7 @@ export function Chart({ candles, symbol, interval, source }: ChartProps) {
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const watermarkRef = useRef<ITextWatermarkPluginApi<Time> | null>(null)
   const [hoveredTime, setHoveredTime] = useState<number | undefined>(undefined)
+  const [fontsReady, setFontsReady] = useState(false)
 
   // Create the chart once per mount. StrictMode mounts twice; cleanup removes the first chart.
   useEffect(() => {
@@ -46,13 +49,25 @@ export function Chart({ candles, symbol, interval, source }: ChartProps) {
     const candleSeries = chart.addSeries(CandlestickSeries, candlestickOptions)
     const volumeSeries = chart.addSeries(HistogramSeries, volumeOptions)
     volumeSeries.priceScale().applyOptions({ scaleMargins: volumeScaleMargins })
-    watermarkRef.current = createTextWatermark(chart.panes()[0], watermarkOptions(''))
+    watermarkRef.current = createTextWatermark(
+      chart.panes()[0],
+      watermarkOptions('', fallbackFontFamily),
+    )
 
-    // The canvas draws text once; redraw after the web fonts arrive so axes use them.
+    // LWC re-measures text only when the font string changes, so the chart starts on system
+    // fonts and switches to IBM Plex once it has loaded. If it never loads, it stays on them.
     let disposed = false
-    void document.fonts?.ready.then(() => {
-      if (!disposed) chart.applyOptions({ layout: { fontFamily } })
-    })
+    const fonts = document.fonts
+    if (fonts) {
+      void fonts.ready
+        .then(() => Promise.all(webFonts.map((font) => fonts.load(font))))
+        .then((loaded) => {
+          if (disposed || !loaded.every((faces) => faces.length > 0)) return
+          chart.applyOptions({ layout: { fontFamily } })
+          setFontsReady(true)
+        })
+        .catch(() => {})
+    }
 
     const onCrosshairMove = (param: MouseEventParams) => {
       const bar = param.time !== undefined ? param.seriesData.get(candleSeries) : undefined
@@ -77,8 +92,10 @@ export function Chart({ candles, symbol, interval, source }: ChartProps) {
 
   // Faint "BTCUSDT, 1h" behind the candles, as on TradingView.
   useEffect(() => {
-    watermarkRef.current?.applyOptions(watermarkOptions(`${symbol}, ${interval}`))
-  }, [symbol, interval])
+    watermarkRef.current?.applyOptions(
+      watermarkOptions(`${symbol}, ${interval}`, fontsReady ? fontFamily : fallbackFontFamily),
+    )
+  }, [symbol, interval, fontsReady])
 
   // Push data whenever the candles change. Runs after the creation effect on mount.
   useEffect(() => {

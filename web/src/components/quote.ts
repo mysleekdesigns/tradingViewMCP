@@ -3,7 +3,7 @@ import type { Candle, Interval } from '../types'
 
 const DAY_SECONDS = 86_400
 
-/** Intervals shorter than a day compare against the close 24h earlier; longer ones against the previous bar. */
+/** Intervals shorter than a day compare against the price 24h earlier; longer ones against the previous bar. */
 const INTRADAY: ReadonlySet<Interval> = new Set(['1m', '5m', '15m', '1h', '4h'])
 
 export interface Quote {
@@ -17,7 +17,7 @@ export interface Quote {
 }
 
 /** Last candle with time <= `target`, or undefined. `candles` sorted ascending. */
-function closeAtOrBefore(candles: readonly Candle[], target: number): Candle | undefined {
+function candleAtOrBefore(candles: readonly Candle[], target: number): Candle | undefined {
   let lo = 0
   let hi = candles.length - 1
   let found: Candle | undefined
@@ -34,26 +34,48 @@ function closeAtOrBefore(candles: readonly Candle[], target: number): Candle | u
 }
 
 /**
+ * Price at the instant `target`: the open of the bar starting exactly then, else the close of
+ * the latest bar before it (a gap means nothing traded in between, so that close still stands).
+ */
+function priceAt(candles: readonly Candle[], target: number): number | undefined {
+  const bar = candleAtOrBefore(candles, target)
+  if (bar === undefined) return undefined
+  return bar.time === target ? bar.open : bar.close
+}
+
+/** `diff` rounded to the same decimals as `price`, so tiny moves read "0.00" and never "-0.00". */
+function roundDiff(diff: number, price: string): { value: number; text: string } {
+  const decimals = price.split('.')[1]?.length ?? 0
+  const value = Number(diff.toFixed(decimals))
+  if (value === 0) return { value: 0, text: (0).toFixed(decimals) }
+  return { value, text: `${value > 0 ? '+' : ''}${value.toFixed(decimals)}` }
+}
+
+/**
  * Header quote for the latest candle. The latest candle may still be forming, so this is
  * a display value only.
+ *
+ * Intraday intervals compare against the price 24h before the last bar's open time. When less
+ * than 24h is loaded (e.g. 1m with 500 bars), they fall back to the previous close, and `basis`
+ * says so.
  */
 export function summarizeQuote(candles: readonly Candle[], interval: Interval): Quote | null {
   const last = candles[candles.length - 1]
   if (last === undefined) return null
-  const intraday = INTRADAY.has(interval)
-  const base = intraday
-    ? closeAtOrBefore(candles, last.time - DAY_SECONDS)?.close
-    : candles[candles.length - 2]?.close
+  const dayBase = INTRADAY.has(interval) ? priceAt(candles, last.time - DAY_SECONDS) : undefined
+  const base = dayBase ?? candles[candles.length - 2]?.close
   const pct = changePercent(last.close, base)
-  const diff = base === undefined ? null : last.close - base
+  const price = formatPrice(last.close)
+  const diff = base === undefined ? null : roundDiff(last.close - base, price)
+  // Colour follows the change the user reads, so "+0.50" on BTC is green even at "0.00%".
   const direction: Direction =
-    pct === null || Number(pct.toFixed(2)) === 0 ? 'flat' : pct > 0 ? 'up' : 'down'
+    diff === null || diff.value === 0 ? 'flat' : diff.value > 0 ? 'up' : 'down'
   return {
-    price: formatPrice(last.close),
-    change: diff === null ? '—' : `${diff > 0 ? '+' : ''}${formatPrice(diff)}`,
+    price,
+    change: diff === null ? '—' : diff.text,
     changePct: formatChange(pct),
     direction,
-    basis: intraday ? '24h' : 'vs prev close',
+    basis: dayBase !== undefined ? '24h' : 'vs prev close',
   }
 }
 

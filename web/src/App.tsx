@@ -18,7 +18,7 @@ const LIMIT = 500
 
 type LoadState =
   | { status: 'loading' }
-  | { status: 'error'; title: string; message: string; retryAfter?: number }
+  | { status: 'error'; title: string; message: string }
   | { status: 'ready'; candles: Candle[]; loadedAt: string }
 
 function describeError(err: unknown, symbol: string): { title: string; message: string } {
@@ -64,7 +64,10 @@ function App() {
   const [state, setState] = useState<LoadState>({ status: 'loading' })
   const [refreshing, setRefreshing] = useState(false)
   const [attempt, setAttempt] = useState(0)
-  const [retryBlocked, setRetryBlocked] = useState(false)
+  const [retryBlockedFor, setRetryBlockedFor] = useState(0)
+  /** Title of the last failed refresh; the chart from the previous load stays on screen. */
+  const [refreshError, setRefreshError] = useState<string | null>(null)
+  const retryBlocked = retryBlockedFor > 0
 
   useEffect(() => {
     let stale = false
@@ -74,13 +77,17 @@ function App() {
         if (stale) return
         setState({ status: 'ready', candles, loadedAt: formatUtcClock(new Date()) })
         setRefreshing(false)
+        setRefreshError(null)
       },
       (err: unknown) => {
         if (stale) return
         const retryAfter = err instanceof MarketDataError ? err.retryAfter : undefined
-        setState({ status: 'error', ...describeError(err, SYMBOL), retryAfter })
+        const error = describeError(err, SYMBOL)
+        // A failed refresh keeps the chart that is already on screen.
+        setState((prev) => (prev.status === 'ready' ? prev : { status: 'error', ...error }))
+        setRefreshError(error.title)
         setRefreshing(false)
-        setRetryBlocked(retryAfter !== undefined && retryAfter > 0)
+        setRetryBlockedFor(retryAfter !== undefined && retryAfter > 0 ? retryAfter : 0)
       },
     )
     return () => {
@@ -89,16 +96,17 @@ function App() {
     }
   }, [attempt])
 
-  // Keep Retry disabled for the Retry-After window of a 429/418.
-  const retryAfter = state.status === 'error' ? state.retryAfter : undefined
+  // Keep Retry and Refresh disabled for the Retry-After window of a 429/418.
   useEffect(() => {
-    if (!retryBlocked || retryAfter === undefined) return
-    const id = setTimeout(() => setRetryBlocked(false), retryAfter * 1000)
+    if (retryBlockedFor <= 0) return
+    const id = setTimeout(() => setRetryBlockedFor(0), retryBlockedFor * 1000)
     return () => clearTimeout(id)
-  }, [retryBlocked, retryAfter])
+  }, [retryBlockedFor])
 
   // A refresh keeps the current chart on screen; only a failed or first load replaces it.
   const reload = () => {
+    // Clearing first lets a repeat of the same failure be announced again.
+    setRefreshError(null)
     if (state.status === 'ready') setRefreshing(true)
     else setState({ status: 'loading' })
     setAttempt((n) => n + 1)
@@ -138,6 +146,7 @@ function App() {
       <StatusBar
         barCount={candles ? candles.length : null}
         loadedAt={state.status === 'ready' ? state.loadedAt : null}
+        refreshError={state.status === 'ready' ? refreshError : null}
       />
     </div>
   )

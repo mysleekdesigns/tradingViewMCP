@@ -21,7 +21,7 @@ describe('summarizeQuote', () => {
     expect(summarizeQuote([], '1h')).toBeNull()
   })
 
-  it('measures intraday change against the close 24h earlier', () => {
+  it('measures intraday change against the price 24h earlier', () => {
     // 25 bars: index 0 is exactly 24h before the last bar.
     const closes = Array.from({ length: 25 }, (_, i) => 100 + i)
     closes[24] = 110
@@ -35,11 +35,55 @@ describe('summarizeQuote', () => {
     })
   })
 
-  it('reports unknown change when less than 24h of data is loaded', () => {
-    const q = summarizeQuote(hourly([100, 101]), '1h')
+  it('uses the open of the bar starting exactly 24h before the last bar', () => {
+    const candles = hourly(Array.from({ length: 25 }, () => 105))
+    candles[0] = { ...candles[0], open: 100, close: 104 }
+    candles[24] = { ...candles[24], close: 110 }
+    // Base is bar 0's open (the price at last.time - 24h), not its close.
+    expect(summarizeQuote(candles, '1h')).toMatchObject({ change: '+10.00', basis: '24h' })
+  })
+
+  it('uses the close of the bar before a gap at the 24h mark', () => {
+    const candles = hourly(Array.from({ length: 26 }, () => 105))
+    candles[0] = { ...candles[0], open: 90, close: 100 }
+    candles[25] = { ...candles[25], close: 120 }
+    // Drop bar 1, the one starting exactly 24h before the last bar.
+    const gapped = [candles[0], ...candles.slice(2)]
+    expect(summarizeQuote(gapped, '1h')).toMatchObject({
+      change: '+20.00',
+      changePct: '+20.00%',
+      basis: '24h',
+    })
+  })
+
+  it('falls back to the previous close when less than 24h is loaded', () => {
+    for (const interval of ['1m', '1h'] as const) {
+      const q = summarizeQuote(hourly([100, 101]), interval)
+      expect(q).toMatchObject({ change: '+1.00', changePct: '+1.00%', basis: 'vs prev close' })
+    }
+  })
+
+  it('reports unknown change for a single candle', () => {
+    const q = summarizeQuote(hourly([100]), '1h')
     expect(q?.change).toBe('—')
     expect(q?.changePct).toBe('—')
     expect(q?.direction).toBe('flat')
+  })
+
+  it('formats the change at the price precision, signed after rounding', () => {
+    expect(summarizeQuote(hourly([60_000, 60_000.5]), '1d')).toMatchObject({
+      change: '+0.50',
+      changePct: '0.00%',
+      direction: 'up',
+    })
+    expect(summarizeQuote(hourly([60_000, 60_000.001]), '1d')).toMatchObject({
+      change: '0.00',
+      direction: 'flat',
+    })
+    expect(summarizeQuote(hourly([60_000, 59_999.999]), '1d')).toMatchObject({
+      change: '0.00',
+      direction: 'flat',
+    })
   })
 
   it('measures daily-and-up intervals against the previous close', () => {

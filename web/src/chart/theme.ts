@@ -26,14 +26,18 @@ export const colors = {
   watermark: 'rgba(178, 181, 190, 0.06)',
 } as const
 
-export const fontFamily = "'IBM Plex Sans', -apple-system, 'Segoe UI', sans-serif"
+export const fallbackFontFamily = "-apple-system, 'Segoe UI', sans-serif"
+export const fontFamily = `'IBM Plex Sans', ${fallbackFontFamily}`
+/** Font descriptors `document.fonts.load` must resolve before the chart switches to `fontFamily`. */
+export const webFonts = ["11px 'IBM Plex Sans'", "600 72px 'IBM Plex Sans'"] as const
 
 export const chartOptions: DeepPartial<TimeChartOptions> = {
   autoSize: true,
   layout: {
     background: { type: ColorType.Solid, color: colors.background },
     textColor: colors.text,
-    fontFamily,
+    // Start on system fonts; Chart switches to `fontFamily` once IBM Plex has loaded.
+    fontFamily: fallbackFontFamily,
     fontSize: 11,
   },
   grid: {
@@ -83,10 +87,13 @@ export const volumeOptions: HistogramSeriesPartialOptions = {
 
 export const volumeScaleMargins = { top: 0.8, bottom: 0 } as const
 
-export function watermarkOptions(text: string): DeepPartial<TextWatermarkOptions> {
+export function watermarkOptions(
+  text: string,
+  family: string = fontFamily,
+): DeepPartial<TextWatermarkOptions> {
   return {
     horzAlign: 'center',
     vertAlign: 'center',
-    lines: [{ text, color: colors.watermark, fontSize: 72, fontStyle: '600', fontFamily }],
+    lines: [{ text, color: colors.watermark, fontSize: 72, fontStyle: '600', fontFamily: family }],
   }
 }
