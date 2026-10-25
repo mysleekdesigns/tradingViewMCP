@@ -695,7 +695,7 @@ can't have memorized.
 - [x] Idea library + dedupe
 - [x] Seed importer: Freqtrade strategies → plans, run through the honest pipeline as a calibration baseline
 - [x] Research journal + end-of-run report (including "no edge found"), written Obsidian-friendly: YAML frontmatter (run ID, idea IDs, date, outcome) and `[[links]]` to idea and ledger run IDs; never records holdout results, and scout-sourced text is marked untrusted
-- [ ] Research page in the UI
+- [x] Research page in the UI (candidate → chart browser-checked 2026-10-25 with a temporary stand-in candidate, since no real one exists yet)
 - [x] Paper-trading runner + forward-vs-backtest comparison
 - [x] Prompt-injection screening for scraped content
 
