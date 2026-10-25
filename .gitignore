@@ -91,5 +91,8 @@ CLAUDE.local.md
 Thumbs.db
 Desktop.ini
 
+# ---------- Research runtime data (agents/): idea library, run state, paper trading ----------
+agents/data/
+
 # ---------- Local backend runtime data (server/) ----------
 server/data/

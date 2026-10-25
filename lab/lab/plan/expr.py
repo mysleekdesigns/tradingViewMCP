@@ -22,6 +22,12 @@ NaN semantics (conservative, no look-ahead): every value carries a validity mask
 non-finite operand anywhere in an expression makes the whole expression False at that bar,
 including through ``or`` and ``not``. The top-level result must be a condition.
 
+Units (:mod:`lab.plan.units`): every number carries a dimension (price-scale, volume-scale,
+dimensionless). ``+``/``-`` and comparisons (including ``crosses_*``) need equal dimensions,
+so ``close > 50000`` (a price level, in effect a date switch) is rejected while
+``close / ema_slow > 1.02``, ``close > ema_slow`` and ``rsi < 30`` are fine. The literal ``0``
+fits any dimension.
+
 Results are historical and not forward-looking.
 """
 
@@ -37,6 +43,7 @@ from typing import Literal
 import numpy as np
 import numpy.typing as npt
 
+from lab.plan.units import DIMENSIONLESS, INPUT_SCALES, PRICE, VOLUME, Dim, describe
 from lab.types import PRICE_INPUTS, PlanError
 
 FUNCTIONS: tuple[str, ...] = ("crosses_above", "crosses_below", "prev")
@@ -47,7 +54,9 @@ MAX_DEPTH = 60  # nesting limit; keeps the checker far from Python's recursion l
 ALLOWED_SUMMARY = (
     "Allowed: numbers; price inputs (open, high, low, close, volume); feature aliases "
     "defined under `features` (multi-output ones as `alias.output`); arithmetic + - * /; "
-    "comparisons > < >= <=; and, or, not; crosses_above(a, b), crosses_below(a, b), prev(x, n)."
+    "comparisons > < >= <=; and, or, not; crosses_above(a, b), crosses_below(a, b), prev(x, n). "
+    "Compared or added values must share units (prices with prices, volume with volume, or "
+    "ratios such as close / ema_slow)."
 )
 
 FloatArray = npt.NDArray[np.float64]
@@ -115,12 +124,20 @@ class ExprScope:
     ``lenient``: aliases whose feature definition already has an error; references to them are
     accepted silently so one mistake does not cascade. ``registry_names``: registry features,
     used only to suggest a fix when an expression names a feature the plan did not define.
+    ``scales``: dimension of each alias / ``alias.output`` (:mod:`lab.plan.units`); price
+    inputs default to their own scales and a reference without a scale is not unit-checked.
     """
 
     single: frozenset[str]
     multi: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     lenient: frozenset[str] = frozenset()
     registry_names: frozenset[str] = frozenset()
+    scales: Mapping[str, Dim] = field(default_factory=dict)
+
+    def scale_of(self, ref: str) -> Dim | None:
+        if ref in self.scales:
+            return self.scales[ref]
+        return INPUT_SCALES.get(ref)
 
     def known_names(self) -> list[str]:
         return sorted({*self.single, *self.multi, *self.lenient})
@@ -148,9 +165,16 @@ Kind = Literal["num", "bool", "bad"]
 
 @dataclass(frozen=True)
 class _T:
+    """Static type of a node. For numbers: ``dim`` is the dimension (None = unknown, not
+    unit-checked), ``zero`` marks the literal 0 (fits any dimension), ``lit`` marks an
+    expression containing a nonzero literal."""
+
     kind: Kind
     const: bool = False
     lag: int = 0
+    dim: Dim | None = None
+    zero: bool = False
+    lit: bool = False
 
 
 _BAD = _T("bad")
@@ -282,7 +306,7 @@ class _Checker:
             fv = math.inf
         if not math.isfinite(fv):
             return self.err(node, f"number `{self.text(node)}` is too large; use a finite number")
-        return _T("num", const=True)
+        return _T("num", const=True, dim=DIMENSIONLESS, zero=fv == 0.0, lit=fv != 0.0)
 
     def name(self, node: ast.Name) -> _T:
         n = node.id
@@ -291,7 +315,7 @@ class _Checker:
             return _T("num")
         if n in sc.single:
             self.refs.add(n)
-            return _T("num")
+            return _T("num", dim=sc.scale_of(n))
         if n in sc.multi:
             outs = ", ".join(f"{n}.{o}" for o in sc.multi[n])
             return self.err(node, f"`{n}` has several outputs; use one of: {outs}")
@@ -322,7 +346,7 @@ class _Checker:
             outs = sc.multi[b]
             if attr in outs:
                 self.refs.add(f"{b}.{attr}")
-                return _T("num")
+                return _T("num", dim=sc.scale_of(f"{b}.{attr}"))
             listed = ", ".join(f"{b}.{o}" for o in outs)
             return self.err(
                 node,
@@ -365,7 +389,9 @@ class _Checker:
         if isinstance(node.op, ast.Not):
             return _T("bool", t.const, t.lag) if self.need_bool(node.operand, t, "`not`") else _BAD
         if isinstance(node.op, ast.USub | ast.UAdd):
-            return _T("num", t.const, t.lag) if self.need_num(node.operand, t, "`-`") else _BAD
+            if not self.need_num(node.operand, t, "`-`"):
+                return _BAD
+            return _T("num", t.const, t.lag, t.dim, t.zero, t.lit)
         return self.err(node, f"`{self.text(node)}` is not allowed: use `not` to negate conditions")
 
     def binop(self, node: ast.BinOp) -> _T:
@@ -383,7 +409,19 @@ class _Checker:
         ok = self.need_num(node.right, rt, "arithmetic") and ok
         if not ok:
             return _BAD
-        return _T("num", lt.const and rt.const, max(lt.lag, rt.lag))
+        const, lag, lit = lt.const and rt.const, max(lt.lag, rt.lag), lt.lit or rt.lit
+        if lt.dim is None or rt.dim is None:
+            return _T("num", const, lag, None, False, lit)
+        if isinstance(node.op, ast.Mult):
+            dim = (lt.dim[0] + rt.dim[0], lt.dim[1] + rt.dim[1])
+            return _T("num", const, lag, dim, False, lit)
+        if isinstance(node.op, ast.Div):
+            dim = (lt.dim[0] - rt.dim[0], lt.dim[1] - rt.dim[1])
+            return _T("num", const, lag, dim, False, lit)
+        if lt.zero or rt.zero or lt.dim == rt.dim:
+            dim = rt.dim if lt.zero else lt.dim
+            return _T("num", const, lag, dim, lt.zero and rt.zero, lit)
+        return self.err(node, self.mixed_sum_message(node, lt, rt))
 
     def boolop(self, node: ast.BoolOp) -> _T:
         word = "`and`" if isinstance(node.op, ast.And) else "`or`"
@@ -417,6 +455,12 @@ class _Checker:
                 f"`{self.text(node)}` compares constants only, so it never changes; compare a "
                 "feature or price input, e.g. `rsi < 30`",
             )
+        for i in range(len(node.ops)):
+            pair = (operands[i], operands[i + 1]), (types[i], types[i + 1])
+            if not self.check_units(node, *pair, "compares"):
+                ok = False
+        if not ok:
+            return _BAD
         return _T("bool", False, max(t.lag for t in types))
 
     def call(self, node: ast.Call) -> _T:
@@ -465,6 +509,8 @@ class _Checker:
             return self.err(
                 node, f"`{fname}` of two constants never fires; pass a feature or price input"
             )
+        if not self.check_units(node, (node.args[0], node.args[1]), (ta, tb), "crosses"):
+            return _BAD
         return _T("bool", False, max(ta.lag, tb.lag) + 1)
 
     def prev_call(self, node: ast.Call, bad: bool) -> _T:
@@ -486,7 +532,111 @@ class _Checker:
         if tx.const:
             return self.err(node, "`prev` of a constant is the same constant; drop the `prev`")
         self.max_prev = max(self.max_prev, n.value)
-        return _T(tx.kind, False, tx.lag + n.value)
+        return _T(tx.kind, False, tx.lag + n.value, tx.dim, tx.zero, tx.lit)
+
+    # -- units
+
+    def ratio_hint(self, dim: Dim, node: ast.AST, side_lit: bool = False) -> str:
+        """A ratio example built from this plan's own names when possible: the side ``node``
+        (wrapped in parentheses unless it is a name or a call) over another name of the same
+        scale."""
+        side = self.text(node)
+        plain = isinstance(node, ast.Name | ast.Attribute | ast.Call)
+        wrapped = not plain and not side_lit  # a compound side: (close - ema_slow) / atr
+        if plain:
+            top = side
+        elif wrapped:
+            top = f"({side})"
+        else:  # the side itself holds the literal; start from one of its names instead
+            top = self.same_scale_name(dim, "") or ("close" if dim == PRICE else "volume")
+        if dim == VOLUME:
+            other = self.same_scale_name(dim, top) or "volume_avg"
+            return f"`{top} / {other} > 2` or `{top} > 2 * {other}`"
+        if dim == PRICE:
+            other = self.same_scale_name(dim, top)
+            if other is None:
+                return f"`{top} / ema_slow > 1.02` (with an `ema_slow` feature)"
+            if wrapped:
+                return f"`{top} / {other} > 0.02`"
+            return f"`{top} / {other} > 1.02` or `{top} > {other}`"
+        return "a dimensionless expression such as `close / ema_slow > 1.02` or `rsi < 30`"
+
+    def same_scale_name(self, dim: Dim, avoid: str) -> str | None:
+        """A name of dimension ``dim`` other than ``avoid``: one the expression already reads
+        if possible, else any the plan defines (price inputs last)."""
+        used = sorted(n for n in self.refs if self.scope.scale_of(n) == dim and n != avoid)
+        defined = sorted(n for n, d in self.scope.scales.items() if d == dim and n != avoid)
+        order = ("close", "open", "high", "low", "volume")
+        inputs = [n for n in order if INPUT_SCALES[n] == dim and n != avoid]
+        names = [*used, *defined, *inputs]
+        return names[0] if names else None
+
+    def check_units(
+        self,
+        node: ast.AST,
+        sides: tuple[ast.AST, ast.AST],
+        types: tuple[_T, _T],
+        verb: str,
+    ) -> bool:
+        """Both sides of a comparison / cross must have the same dimension (0 fits any)."""
+        (a, b), (ta, tb) = sides, types
+        if ta.dim is None or tb.dim is None or ta.zero or tb.zero or ta.dim == tb.dim:
+            return True
+        whole = self.text(node)
+        sa, sb = self.text(a), self.text(b)
+        if ta.dim == DIMENSIONLESS or tb.dim == DIMENSIONLESS:
+            scaled, plain, ts, tp = (b, a, tb, ta) if ta.dim == DIMENSIONLESS else (a, b, ta, tb)
+            s_txt, p_txt = self.text(scaled), self.text(plain)
+            assert ts.dim is not None
+            kind = describe(ts.dim)
+            unit = {PRICE: "price", VOLUME: "volume"}.get(ts.dim, kind)
+            if tp.lit:
+                self.err(
+                    node,
+                    f"`{whole}` {verb} a {kind} value (`{s_txt}`) with a fixed number "
+                    f"(`{p_txt}`): that is a {unit} level, which on trending markets acts as a "
+                    "hidden date switch, so plans must not contain prices or levels. Make the "
+                    f"rule scale-free with a ratio, e.g. {self.ratio_hint(ts.dim, scaled, ts.lit)}",
+                )
+                return False
+            self.err(
+                node,
+                f"`{whole}` {verb} a {kind} value (`{s_txt}`) with a dimensionless one "
+                f"(`{p_txt}`); their units differ, so the rule depends on the {unit} level. "
+                f"Compare like with like, e.g. {self.ratio_hint(ts.dim, scaled)}",
+            )
+            return False
+        self.err(
+            node,
+            f"`{whole}` {verb} a {describe(ta.dim)} value (`{sa}`) with a {describe(tb.dim)} "
+            f"one (`{sb}`); their units differ, so the rule depends on the price/volume level. "
+            "Compare values of the same scale (close > ema_slow, volume > 2 * volume_avg) or "
+            "ratios (close / ema_slow > 1.02)",
+        )
+        return False
+
+    def mixed_sum_message(self, node: ast.BinOp, lt: _T, rt: _T) -> str:
+        assert lt.dim is not None and rt.dim is not None
+        word = "adds" if isinstance(node.op, ast.Add) else "subtracts"
+        sl, sr = self.text(node.left), self.text(node.right)
+        left_scaled = lt.dim != DIMENSIONLESS
+        side, scaled_dim = (node.left, lt.dim) if left_scaled else (node.right, rt.dim)
+        scaled = self.text(side)
+        plain = isinstance(side, ast.Name | ast.Attribute | ast.Call)
+        scaled_x = f"{scaled} * " if plain else f"({scaled}) * "
+        fixed = (rt.lit and rt.dim == DIMENSIONLESS) or (lt.lit and lt.dim == DIMENSIONLESS)
+        why = (
+            f"a fixed number added to a {describe(scaled_dim)} value is a "
+            f"{describe(scaled_dim).split('-')[0]} amount (a hidden level)"
+            if fixed
+            else "the two sides have different units"
+        )
+        return (
+            f"`{self.text(node)}` {word} a {describe(lt.dim)} value (`{sl}`) and a "
+            f"{describe(rt.dim)} one (`{sr}`); {why}. + and - need the same scale: scale it "
+            f"instead (e.g. `{scaled_x}1.01`) or compare a ratio, e.g. "
+            f"{self.ratio_hint(scaled_dim, side, True)}"
+        )
 
 
 def _example_call(fname: str) -> str:

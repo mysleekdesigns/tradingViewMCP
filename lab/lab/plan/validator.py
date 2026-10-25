@@ -36,6 +36,7 @@ from lab.plan.schema import (
     SYMBOL_PATTERN,
     TOP_LEVEL_KEYS,
 )
+from lab.plan.units import output_scale
 from lab.types import (
     INTERVAL_SECONDS,
     PRICE_INPUTS,
@@ -312,6 +313,7 @@ def _check_features(
     single: set[str] = set(PRICE_INPUTS)
     multi: dict[str, tuple[str, ...]] = {}
     lenient: set[str] = set()
+    scales: dict[str, tuple[int, int]] = {}
     names = sorted(registry)
     scope_reg = frozenset(names)
     if "features" not in raw:
@@ -423,8 +425,15 @@ def _check_features(
             lenient.add(alias_s)
         elif len(spec.outputs) == 1:
             single.add(alias_s)
+            dim = output_scale(spec.name, spec.outputs[0])
+            if dim is not None:
+                scales[alias_s] = dim
         else:
             multi[alias_s] = tuple(spec.outputs)
+            for out in spec.outputs:
+                dim = output_scale(spec.name, out)
+                if dim is not None:
+                    scales[f"{alias_s}.{out}"] = dim
     total = sum(param_counts.values())
     if total > MAX_FEATURE_PARAMS:
         detail = ", ".join(f"{a}: {n}" for a, n in param_counts.items())
@@ -436,7 +445,7 @@ def _check_features(
                 "with fewer params",
             )
         )
-    return refs, ExprScope(frozenset(single), multi, frozenset(lenient), scope_reg)
+    return refs, ExprScope(frozenset(single), multi, frozenset(lenient), scope_reg, scales)
 
 
 def _check_risk(raw: Mapping[str, Any], errors: list[PlanError]) -> RiskSpec:

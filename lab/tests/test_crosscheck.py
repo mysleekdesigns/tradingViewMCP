@@ -51,21 +51,24 @@ def ema_plan(risk: dict | None = None, fast: int = 10, slow: int = 30) -> Plan:
 
 
 def level_plan(risk: dict) -> Plan:
-    """Enter when close crosses above 101; never exit by signal (stops do the exits)."""
+    """Enter when the bar's close/open ratio crosses above 1.01 (on ROWS: bars 2 and 6, the
+    same bars where close crosses above 101); never exit by signal (close never doubles its open
+    here), so stops do the exits. Scale-free: plans may not compare prices with fixed numbers."""
     return parse_plan(
         {
             "name": "level_break",
             "symbol": "BTCUSDT",
             "interval": "4h",
             "features": {"m": {"sma": {"period": 1}}},
-            "long_entry": "crosses_above(m, 101)",
-            "long_exit": "m > 100000",
+            "long_entry": "crosses_above(m / open, 1.01)",
+            "long_exit": "m > 2 * open",
             "risk": risk,
         }
     )
 
 
-# (open, high, low, close). Signals at bar 2 and bar 6 closes (close crosses above 101).
+# (open, high, low, close). Signals at bar 2 and bar 6 closes (close/open crosses above 1.01:
+# 101.2/100 = 1.012 and 101.5/98.5 = 1.030; every other bar is below 1.01).
 ROWS = [
     (100.0, 100.5, 99.5, 100.0),  # 0
     (100.0, 100.5, 99.5, 100.0),  # 1
@@ -380,8 +383,8 @@ def test_exit_signal_at_the_open_beats_an_intrabar_stop() -> None:
             "symbol": "BTCUSDT",
             "interval": "4h",
             "features": {"m": {"sma": {"period": 1}}},
-            "long_entry": "crosses_above(m, 101)",
-            "long_exit": "crosses_below(m, 100.2)",
+            "long_entry": "crosses_above(m / open, 1.01)",
+            "long_exit": "crosses_below(m / open, 0.99)",
             "risk": {"position_size_pct": 100, "stop_loss_pct": 5},
         }
     )
@@ -390,7 +393,7 @@ def test_exit_signal_at_the_open_beats_an_intrabar_stop() -> None:
         (100.0, 100.5, 99.5, 100.0),  # 1
         (100.0, 101.5, 99.8, 101.2),  # 2  entry signal
         (100.0, 100.8, 99.5, 100.5),  # 3  entry at 100.00; SL 5% -> 95.00
-        (100.5, 101.0, 96.5, 98.0),  # 4  exit signal (close crosses below 100.2); low > 95
+        (100.5, 101.0, 96.5, 98.0),  # 4  exit signal (close/open 0.975 < 0.99); low > 95
         (98.0, 98.5, 94.0, 94.5),  # 5  exit at the open 98.00, before the low 94 hits the stop
         (94.5, 95.0, 94.0, 94.8),  # 6
     ]

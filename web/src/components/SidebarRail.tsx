@@ -1,5 +1,6 @@
 import { badgeText } from './alertsView'
 import { TesterIcon } from './BacktestPanel'
+import { ResearchIcon } from './ResearchPage'
 import './SidebarRail.css'
 
 export type SidebarPanel = 'watchlist' | 'alerts'
@@ -11,6 +12,9 @@ export interface SidebarRailProps {
   /** The Strategy Tester dock (under the chart) is open. Independent of the sidebar panel. */
   testerOpen: boolean
   onToggleTester(): void
+  /** The Research view (over the chart area) is open. */
+  researchOpen: boolean
+  onToggleResearch(): void
 }
 
 const PANELS: readonly { id: SidebarPanel; label: string }[] = [
@@ -28,6 +32,8 @@ export function SidebarRail({
   alertBadge,
   testerOpen,
   onToggleTester,
+  researchOpen,
+  onToggleResearch,
 }: SidebarRailProps) {
   const badge = badgeText(alertBadge)
   return (
@@ -64,6 +70,16 @@ export function SidebarRail({
         onClick={onToggleTester}
       >
         <TesterIcon size={22} />
+      </button>
+      <button
+        type="button"
+        className="side-rail__btn"
+        aria-pressed={researchOpen}
+        aria-label="Research"
+        title={researchOpen ? 'Back to chart' : 'Research (runs, ideas, journal, candidates)'}
+        onClick={onToggleResearch}
+      >
+        <ResearchIcon size={22} />
       </button>
     </nav>
   )

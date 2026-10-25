@@ -1,0 +1,20 @@
+{
+  "name": "freqtrade-strategies Strategy003",
+  "source_url": "https://github.com/freqtrade/freqtrade-strategies/blob/main/user_data/strategies/Strategy003.py",
+  "translation_notes": "Entry: RSI(14) below 28 (and above 0), close below SMA(40), and EMA(50) above EMA(100). Four features, the plan limit. Dropped from the entry: MFI < 16 (no MFI), fast stochastic fastd > fastk (no stochastic), and the alternative trigger 'EMA(5) crosses above EMA(10)' that the original ORs with the EMA(50) > EMA(100) trend filter (it would need two more features; dropping it gives fewer entries). The original's Fisher-RSI < -0.94 condition is RSI < 32.6 and therefore already implied by RSI < 28, so dropping it loses nothing. Exit as in the Strategy002 seed: Fisher-RSI > 0.3 is exactly RSI > 53.1; 'SAR above close' is approximated by close below the previous close. The ROI table (0 min: 5%, 20: 4%, 30: 3%, 60: 1%) becomes a single 5% take-profit. Stop-loss 10% kept. Timeframe changed 5m -> 1h.",
+  "plan": {
+    "name": "seed_freqtrade_strategy003",
+    "description": "Calibration seed translated from freqtrade-strategies Strategy003 (oversold RSI in an uptrend). Popular published strategy; expected to fail honest testing.",
+    "symbol": "BTCUSDT",
+    "interval": "1h",
+    "features": {
+      "rsi": {"rsi": {"period": 14}},
+      "sma40": {"sma": {"period": 40}},
+      "ema50": {"ema": {"period": 50}},
+      "ema100": {"ema": {"period": 100}}
+    },
+    "long_entry": "rsi < 28 and rsi > 0 and close < sma40 and ema50 > ema100",
+    "long_exit": "rsi > 53.1 and close < prev(close, 1)",
+    "risk": {"position_size_pct": 100, "stop_loss_pct": 10, "take_profit_pct": 5}
+  }
+}

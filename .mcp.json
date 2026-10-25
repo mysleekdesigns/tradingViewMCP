@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "strategy-lab": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["--directory", "lab", "run", "python", "-m", "lab.mcp_server"],
+      "env": {}
+    }
+  }
+}

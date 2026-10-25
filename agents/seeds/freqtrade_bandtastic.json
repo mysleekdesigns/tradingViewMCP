@@ -1,0 +1,18 @@
+{
+  "name": "freqtrade-strategies Bandtastic",
+  "source_url": "https://github.com/freqtrade/freqtrade-strategies/blob/main/user_data/strategies/Bandtastic.py",
+  "translation_notes": "Uses the strategy's default hyperopt parameters. Entry (default trigger bb_lower1; the optional RSI/MFI/EMA buy guards are disabled by default): close below the lower Bollinger(20, 1) band. Exit (default trigger sell-bb_upper2): close above the upper Bollinger(20, 2) band; the default-enabled MFI > 46 exit guard is dropped (no MFI in the registry). The band multiplier differs between entry and exit, so the plan uses two Bollinger aliases (bb1, bb2). Bands use close; the original uses typical price. The ROI table (0 min: 16.2%, 69: 9.7%, 229: 6.1%, 566: 0%) becomes a single 16.2% take-profit. Stop-loss 34.5% kept: it is inside the lab's (0, 50] stop-loss bound, so no clamping was needed. The trailing stop (+1% once +5.8% is reached) is dropped: the lab engine has no trailing stop. Timeframe changed 15m -> 1h to match the other seeds.",
+  "plan": {
+    "name": "seed_freqtrade_bandtastic",
+    "description": "Calibration seed translated from freqtrade-strategies Bandtastic (Bollinger mean reversion). Popular published strategy; expected to fail honest testing.",
+    "symbol": "BTCUSDT",
+    "interval": "1h",
+    "features": {
+      "bb1": {"bollinger": {"period": 20, "mult": 1.0}},
+      "bb2": {"bollinger": {"period": 20, "mult": 2.0}}
+    },
+    "long_entry": "close < bb1.lower",
+    "long_exit": "close > bb2.upper",
+    "risk": {"position_size_pct": 100, "stop_loss_pct": 34.5, "take_profit_pct": 16.2}
+  }
+}

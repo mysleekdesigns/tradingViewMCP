@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ErrorInfo,
 } from 'react'
 import { buildChartData, tradesOnChart, tradesZoomRange } from './chart/backtestOverlay'
 import { INTERVAL_SECONDS } from './chart/drawings/timeIndex'
@@ -24,6 +25,7 @@ import { AlertToasts, type AlertToast } from './components/AlertToasts'
 import { BacktestPanel, type BacktestChartLink } from './components/BacktestPanel'
 import {
   clampDockHeight,
+  describeLabError,
   HISTORY_RETRY_MS,
   autoHistoryKey,
   autoHistoryStep,
@@ -53,6 +55,17 @@ import { Header } from './components/Header'
 import { IndicatorMenu } from './components/IndicatorMenu'
 import { IndicatorSettings } from './components/IndicatorSettings'
 import { summarizeQuote, formatUtcClock } from './components/quote'
+import { ErrorBoundary } from './components/ErrorBoundary'
+import { ResearchFallback, ResearchPage } from './components/ResearchPage'
+import {
+  loadPlanRestore,
+  planRestoreAfterLoad,
+  planRestoreValid,
+  resetResearchTab,
+  savePlanRestore,
+  type CandidateRunRequest,
+  type PlanRestore,
+} from './components/researchView'
 import { SidebarRail, type SidebarPanel } from './components/SidebarRail'
 import { StatusBar } from './components/StatusBar'
 import { NoTradesView } from './components/NoTradesView'
@@ -64,6 +77,7 @@ import { createAlertsClient } from './data/alertsApi'
 import { BinanceProvider } from './data/binance'
 import { createDrawingsClient } from './data/drawingsApi'
 import { createLabClient } from './data/labApi'
+import { createResearchClient } from './data/researchApi'
 import type { MarketDataProvider } from './data/provider'
 import { ServerProvider } from './data/server'
 import { DIRECT_VENUE, VENUE_NAME, venueLabels, type VenueInfo } from './data/venue'
@@ -104,6 +118,14 @@ const drawingsClient = DIRECT ? null : createDrawingsClient()
 const alertsClient = DIRECT ? null : createAlertsClient()
 // The Python lab (backtests + ledger) is its own service behind the `/lab` proxy, in both modes.
 const labClient = createLabClient()
+// Phase 8 research runs, ideas, journal, candidates: read-only endpoints of the same lab service.
+const researchClient = createResearchClient()
+
+/** The Research view threw while rendering: log it, and reopen it on Runs next time. */
+function onResearchError(error: Error, info: ErrorInfo): void {
+  resetResearchTab()
+  console.error('The Research view failed to render', error, info.componentStack)
+}
 
 /**
  * Source name inside chart error messages. Stable for the app's lifetime, so learning the
@@ -202,6 +224,11 @@ function App() {
   const [historyLoad, dispatchHistory] = useReducer(historyLoadReducer, initialHistoryLoad)
   const historyTarget = historyLoad.target
   const [focusRange, setFocusRange] = useState<FocusRequest | null>(null)
+  /** The Research view covers the chart area; the chart stays mounted underneath. */
+  const [researchOpen, setResearchOpen] = useState(false)
+  /** A candidate's plan replaced the user's own tester plan; offered back until dismissed. */
+  const [planRestore, setPlanRestore] = useState<PlanRestore | null>(loadPlanRestore)
+  const appRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     savePrefs({ symbol, interval, chartType })
@@ -543,6 +570,123 @@ function App() {
     }
   }, [])
 
+  // ---- Research → Strategy Tester ----
+
+  // A candidate click: put its plan in the Strategy Tester, switch the chart to its market, run
+  // it (design window, like the Run button), and show the chart with the trades and equity.
+  const testerRunning = tester.run.kind === 'running'
+  const testerRunSeq = tester.runSeq
+  const testerPlanText = tester.planText
+  const testerPlanEdited = tester.planEdited
+
+  // Put a candidate's plan in the editor. The user's own edited plan is never lost: it is kept
+  // and offered back with "Restore previous plan" (no blocking confirm).
+  const loadPlanIntoTester = useCallback(
+    (req: CandidateRunRequest) => {
+      setPlanRestore((pending) =>
+        planRestoreAfterLoad(
+          { planText: testerPlanText, planEdited: testerPlanEdited },
+          pending,
+          req.planText,
+        ),
+      )
+      dispatchTester({ type: 'edit', text: req.planText })
+    },
+    [testerPlanText, testerPlanEdited],
+  )
+  const restoreValid = planRestoreValid(
+    { planText: testerPlanText, planEdited: testerPlanEdited },
+    planRestore,
+  )
+  const restorePreviousPlan = useCallback(() => {
+    if (planRestore === null) return
+    dispatchTester({ type: 'edit', text: planRestore.previous })
+    setPlanRestore(null)
+  }, [planRestore])
+  const dismissPlanRestore = useCallback(() => setPlanRestore(null), [])
+  // Kept across a page reload while the offer still applies; a lapsed offer is dropped.
+  const storedPlanRestore = restoreValid ? planRestore : null
+  useEffect(() => {
+    savePlanRestore(storedPlanRestore)
+  }, [storedPlanRestore])
+
+  const showCandidate = useCallback(
+    (req: CandidateRunRequest) => {
+      if (testerRunning) {
+        setNotice('A Strategy Tester backtest is already running. Try again when it finishes.')
+        return
+      }
+      loadPlanIntoTester(req)
+      if (req.symbol !== symbol) selectSymbol(req.symbol)
+      if (req.chartInterval !== null && req.chartInterval !== interval) {
+        changeInterval(req.chartInterval)
+      }
+      setDock((d) => (d.open ? d : { ...d, open: true }))
+      setResearchOpen(false)
+      const id = testerRunSeq
+      dispatchTester({ type: 'run-start', startedAt: Date.now() })
+      void labClient.backtest(req.plan).then(
+        (r) => dispatchTester({ type: 'run-done', id, report: r }),
+        (err: unknown) =>
+          dispatchTester({
+            type: 'run-fail',
+            id,
+            text: req.planText,
+            error: describeLabError(err),
+          }),
+      )
+    },
+    [
+      testerRunning,
+      testerRunSeq,
+      symbol,
+      interval,
+      selectSymbol,
+      changeInterval,
+      loadPlanIntoTester,
+    ],
+  )
+
+  const loadCandidatePlan = useCallback(
+    (req: CandidateRunRequest) => {
+      loadPlanIntoTester(req)
+      setDock((d) => (d.open ? d : { ...d, open: true }))
+      setResearchOpen(false)
+    },
+    [loadPlanIntoTester],
+  )
+
+  const closeResearch = useCallback(() => setResearchOpen(false), [])
+
+  // While Research covers them, the chart, the tester dock and the sidebar leave the tab order
+  // (`inert`). The dock is BacktestPanel's own root, so it is marked through the DOM.
+  const dockOpen = dock.open
+  useEffect(() => {
+    if (!researchOpen || !dockOpen) return
+    const dockEl = appRef.current?.querySelector<HTMLElement>(':scope > .tester') ?? null
+    dockEl?.setAttribute('inert', '')
+    return () => dockEl?.removeAttribute('inert')
+  }, [researchOpen, dockOpen])
+
+  // When Research closes (Esc, Back, a candidate click, the rail), focus would fall to <body>
+  // with the unmounted view: hand it to the rail's Research button instead.
+  const wasResearchOpen = useRef(false)
+  useEffect(() => {
+    const was = wasResearchOpen.current
+    wasResearchOpen.current = researchOpen
+    if (!was || researchOpen) return
+    const active = document.activeElement
+    if (active !== null && active !== document.body && active.isConnected) return
+    appRef.current?.querySelector<HTMLElement>('.side-rail button[aria-label="Research"]')?.focus()
+  }, [researchOpen])
+  const toggleResearch = useCallback(() => {
+    // Chart keys (Esc, Delete) must not act on a drawing hidden under the Research view.
+    setTool('cursor')
+    setSelectedDrawingId(null)
+    setContextMenu(null)
+    setResearchOpen((o) => !o)
+  }, [])
+
   const resizeDock = useCallback((height: number) => {
     setDock((d) => ({ ...d, height: clampDockHeight(height, window.innerHeight) }))
   }, [])
@@ -669,7 +813,9 @@ function App() {
     indicatorMenuOpen ||
     settingsConfig !== undefined ||
     alertDialog !== null ||
-    contextMenu !== null
+    contextMenu !== null ||
+    // The Research view takes the keyboard (Esc closes it); chart shortcuts wait.
+    researchOpen
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (dialogOpen || e.isComposing || e.defaultPrevented) return
@@ -720,7 +866,7 @@ function App() {
   const appStyle = dock.open ? ({ '--tester-h': `${dockHeight}px` } as CSSProperties) : undefined
 
   return (
-    <div className={appClass} style={appStyle}>
+    <div ref={appRef} className={appClass} style={appStyle}>
       <Header
         symbol={symbol}
         description={description}
@@ -748,7 +894,7 @@ function App() {
         drawingCount={drawings.items.length}
         onClearAll={clearDrawings}
       />
-      <main className="workspace">
+      <main className="workspace" inert={researchOpen}>
         {load.kind === 'ready' && load.bars.length > 0 && (
           <Chart
             candles={load.bars}
@@ -843,7 +989,7 @@ function App() {
         )}
       </main>
       {sidebarOpen && (
-        <div className="sidebar">
+        <div className="sidebar" inert={researchOpen}>
           {panel === 'watchlist' ? (
             <Watchlist
               provider={provider}
@@ -899,12 +1045,39 @@ function App() {
           chartVenue={venue}
         />
       )}
+      {researchOpen && (
+        <ErrorBoundary
+          onError={onResearchError}
+          fallback={({ error, reset }) => (
+            <ResearchFallback
+              error={error}
+              onReload={() => {
+                // Reopen on Runs: the saved tab may be the one that threw.
+                resetResearchTab()
+                reset()
+              }}
+              onClose={closeResearch}
+            />
+          )}
+        >
+          <ResearchPage
+            client={researchClient}
+            labClient={labClient}
+            onClose={closeResearch}
+            onShowCandidate={showCandidate}
+            onLoadPlan={loadCandidatePlan}
+            testerBusy={testerRunning}
+          />
+        </ErrorBoundary>
+      )}
       <SidebarRail
         active={panel}
         onSelect={setPanel}
         alertBadge={alerts.unseen}
         testerOpen={dock.open}
         onToggleTester={toggleDock}
+        researchOpen={researchOpen}
+        onToggleResearch={toggleResearch}
       />
       <StatusBar
         barCount={bars ? bars.length : null}
@@ -946,6 +1119,25 @@ function App() {
             className="app-notice__close"
             aria-label="Dismiss"
             onClick={() => setNotice(null)}
+          >
+            ×
+          </button>
+        </div>
+      )}
+      {restoreValid && planRestore !== null && (
+        <div className="app-notice app-notice--restore" role="status">
+          <span className="app-notice__text">
+            A research candidate&apos;s plan replaced your Strategy Tester plan.
+          </span>
+          <button type="button" className="app-notice__action" onClick={restorePreviousPlan}>
+            Restore previous plan
+          </button>
+          <button
+            type="button"
+            className="app-notice__close"
+            aria-label="Dismiss (keep the candidate's plan)"
+            title="Keep the candidate's plan"
+            onClick={dismissPlanRestore}
           >
             ×
           </button>

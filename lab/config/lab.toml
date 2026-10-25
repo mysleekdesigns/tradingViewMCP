@@ -37,7 +37,7 @@ bootstrap_mean_block = 20        # mean block length in bars (Politis-Romano)
 confidence = 0.95                # two-sided CI level
 pbo_splits = 16                  # CSCV partitions S (Bailey et al. 2017 use 16)
 neighbourhood_steps = [0.8, 0.9, 1.0, 1.1, 1.2]  # +/-20% parameter neighbours for PBO/robustness
-neighbourhood_max_trials = 16    # cap so one UI backtest stays fast
+neighbourhood_max_trials = 25    # base + 6 tunables (Phase 8 cap) x 4 non-base steps, so every +/-20% neighbour runs
 adversarial_delays = [1, 3, 5]   # PLAN.md signal delay checks
 monte_carlo_paths = 1000         # trade-order reshuffles
 permutation_paths = 100          # full-pipeline permutation null in the default run (slow: 1000)
@@ -46,6 +46,13 @@ permutation_paths = 100          # full-pipeline permutation null in the default
 n_trials = 50                    # default budget per search; every trial goes to the ledger
 seed = 7                         # explicit sampler seed for reproducibility
 min_trades = 30                  # below ~30 trades a Sharpe is a few outcomes; search treats it as failed
+
+[research]
+family_return_corr = 0.8         # >=0.8: same-logic re-tunes 0.85-0.99 and EMA vs SMA at equal periods 0.88 on BTC 4h are one idea; distinct ideas (RSI MR vs EMA cross) <=0.34; no-op clauses ~1.0
+family_min_overlap_bars = 250    # common bars needed to correlate two series (other interval/window); s.e. of r near 0.8 is (1-r^2)/sqrt(n) ~0.02, small against the threshold
+min_variance_plans = 10          # DSR V[SR] needs >=10 commensurable plans: the sample variance's relative s.e. is sqrt(2/(n-1)), ~47% at 10 and worse below
+min_pbo_trials = 16              # sweep-CSCV PBO needs >=16 usable Optuna trials: as many as the 16 CSCV splits, fewer columns make the in-sample "best" a near coin flip
+literal_lineage_corr = 0.95      # another family logic's hand-tuned literals block this plan's walk-forward only at >=0.95: no-op/cosmetic copies correlate ~1.0, genuinely different trend followers (EMA vs ROC) 0.8-0.9
 
 [api]
 host = "127.0.0.1"               # local only

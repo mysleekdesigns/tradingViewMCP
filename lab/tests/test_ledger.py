@@ -16,6 +16,7 @@ import pytest
 
 from lab.ledger import (
     _MIGRATIONS,
+    HoldoutAlreadyCheckedError,
     HoldoutBudgetExceeded,
     Ledger,
     costs_to_json,
@@ -344,11 +345,16 @@ def test_migrations_are_idempotent_on_reopen(tmp_path: Path) -> None:
     path = tmp_path / "ledger.db"
     for _ in range(3):
         with Ledger(path) as led:
-            assert led.schema_version == 2
+            assert led.schema_version == 4
     conn = sqlite3.connect(path)
     rows = conn.execute("SELECT version, name FROM schema_version").fetchall()
     conn.close()
-    assert rows == [(1, "init"), (2, "costs_json")]
+    assert rows == [
+        (1, "init"),
+        (2, "costs_json"),
+        (3, "research_runs"),
+        (4, "holdout_logic_hash"),
+    ]
 
 
 def test_database_uses_wal(tmp_path: Path) -> None:
@@ -565,8 +571,103 @@ def test_migration_2_adds_costs_json_to_an_existing_v1_ledger(tmp_path: Path) ->
     )
     conn.close()
     with Ledger(path) as led:
-        assert led.schema_version == 2
+        assert led.schema_version == 4  # every later migration applies on top of v1
         (old,) = led.list(run_id="old")
         assert old.costs_json == "{}"
         new_id = led.record(replace(make_record(), costs_json=costs_to_json(CostModel())))
         assert led.get(new_id).costs_json == costs_to_json(CostModel())
+
+
+# --------------------------------------------------------------------------- Phase 8 additions
+
+
+def _research(led: Ledger, run_id: str) -> None:
+    led.start_research_run(run_id, label="t", config_json="{}", config_sha256="x")
+
+
+def test_count_distinct_plans_research_spans_every_run(ledger: Ledger) -> None:
+    """DSR N for research: distinct plans across ALL runs (research runs and the web UI's; any
+    interval/symbol); a new run does not reset it; non-selection sources do not count."""
+    _research(ledger, "r1")
+    _research(ledger, "r2")
+    ledger.record(replace(make_record(run_id="r1"), plan_hash="a" * 64))
+    ledger.record(replace(make_record(run_id="r1"), plan_hash="b" * 64, interval="1h"))
+    ledger.record(
+        replace(make_record(run_id="r2", status="error", sharpe=None), plan_hash="c" * 64)
+    )
+    ledger.record(replace(make_record(run_id="r2"), plan_hash="a" * 64))  # repeat: no inflation
+    ledger.record(replace(make_record(run_id="r2", source="benchmark"), plan_hash="d" * 64))
+    ledger.record(replace(make_record(run_id="ui-run"), plan_hash="e" * 64))  # web UI: counts
+    assert ledger.count_distinct_plans_research() == 4
+    assert ledger.count_distinct_plans("r2") == 2
+    _research(ledger, "r3")  # a fresh run starts at the global N, not 0
+    assert ledger.count_distinct_plans_research() == 4
+    assert ledger.count_distinct_plans_research(sources=("benchmark",)) == 1
+
+
+def test_list_and_count_can_exclude_window_kinds(ledger: Ledger) -> None:
+    ledger.record(make_record())
+    ledger.record(replace(make_record(), window_kind="holdout"))
+    ledger.record(replace(make_record(), window_kind="design"))
+    assert ledger.count("run-a") == 3
+    assert ledger.count("run-a", exclude_window_kinds=("holdout",)) == 2
+    kinds = [r.window_kind for r in ledger.list(run_id="run-a", exclude_window_kinds=["holdout"])]
+    assert sorted(kinds) == ["design", "walk_forward_test"]
+    with pytest.raises(ValueError, match="window kinds"):
+        ledger.count(exclude_window_kinds=("nope",))
+
+
+def test_holdout_check_refuses_a_logic_already_checked_in_any_run(ledger: Ledger) -> None:
+    assert ledger.record_holdout_check("r1", "p1", budget=3, logic_hash="L") == 1
+    assert ledger.holdout_logic_checked("L") and not ledger.holdout_logic_checked("M")
+    with pytest.raises(HoldoutAlreadyCheckedError, match="already holdout-checked"):
+        ledger.record_holdout_check("r2", "p2", budget=3, logic_hash="L")  # another run
+    with pytest.raises(HoldoutAlreadyCheckedError):
+        ledger.record_holdout_check("r1", "p3", budget=3, logic_hash="L")  # same run
+    assert ledger.holdout_checks_used("r2") == 0 and ledger.holdout_checks_used("r1") == 1
+    assert ledger.record_holdout_check("r2", "p2", budget=3, logic_hash="M") == 1
+    assert ledger.record_holdout_check("r2", "p4", budget=3) == 2  # no logic: budget only
+
+
+def test_concurrent_holdout_checks_of_one_logic_spend_once(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.db"
+    Ledger(path).close()
+    results: list[str] = []
+
+    def spend(run_id: str) -> None:
+        with Ledger(path) as led:
+            try:
+                led.record_holdout_check(run_id, "p", budget=5, logic_hash="L")
+                results.append("ok")
+            except HoldoutAlreadyCheckedError:
+                results.append("refused")
+
+    threads = [threading.Thread(target=spend, args=(f"r{i}",)) for i in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results) == ["ok"] + ["refused"] * 5
+
+
+def test_returns_matrix_filters_by_source_and_study(ledger: Ledger) -> None:
+    def study_params(name: str) -> str:
+        return json.dumps({"x": 1, "_study": {"study": name}})
+
+    r = np.arange(6, dtype=float)
+    a = ledger.record(
+        replace(make_record(source="optuna", returns=r), params_json=study_params("A"))
+    )
+    b = ledger.record(
+        replace(make_record(source="optuna", returns=r), params_json=study_params("B"))
+    )
+    ledger.record(replace(make_record(source="optuna", returns=r), params_json=study_params("C")))
+    ledger.record(make_record(source="neighbourhood", returns=r))
+    _, ids = ledger.returns_matrix("run-a", window_start=W_START, window_end=W_END)
+    assert len(ids) == 4
+    _, ids = ledger.returns_matrix(
+        "run-a", window_start=W_START, window_end=W_END, sources=("optuna",), studies={"A", "B"}
+    )
+    assert ids == [a, b]
+    m, ids = ledger.returns_matrix("run-a", window_start=W_START, window_end=W_END, studies=[])
+    assert m.shape == (0, 0) and ids == []

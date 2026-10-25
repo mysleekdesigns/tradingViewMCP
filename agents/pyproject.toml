@@ -1,0 +1,50 @@
+[project]
+name = "research"
+version = "0.1.0"
+description = "Phase 8 AI strategy research: Agent SDK orchestrator, Jev gates, idea library, journal, seeds, paper trading"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "claude-agent-sdk>=0.2.174,<0.3",
+    "httpx>=0.28.1",
+    "lab",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.6,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+
+[tool.uv.sources]
+lab = { path = "../lab", editable = true }
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["research", "tests"]
+extend-exclude = [".venv", "data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["research", "lab"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning:research.*"]
+xfail_strict = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.2",
+    "pyyaml>=6.0.3",
+    "ruff>=0.17.2",
+]

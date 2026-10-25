@@ -1,0 +1,19 @@
+{
+  "name": "freqtrade-strategies Strategy001",
+  "source_url": "https://github.com/freqtrade/freqtrade-strategies/blob/main/user_data/strategies/Strategy001.py",
+  "translation_notes": "Entry: EMA(20) crosses above EMA(50). The original also requires a green Heikin-Ashi candle closing above EMA(20); Heikin-Ashi is not in the registry, so both HA filters are dropped (more entries than the original). Exit: EMA(50) crosses above EMA(100) - kept as written even though it is odd (a bullish cross used as an exit); the original also requires a red Heikin-Ashi candle closing below EMA(20), dropped. The ROI table (0 min: 5%, 20: 4%, 30: 3%, 60: 1%) becomes a single 5% take-profit. Stop-loss 10% kept; the (disabled) trailing-stop settings are ignored. Timeframe changed 5m -> 1h.",
+  "plan": {
+    "name": "seed_freqtrade_strategy001",
+    "description": "Calibration seed translated from freqtrade-strategies Strategy001 (EMA crossover). Popular published strategy; expected to fail honest testing.",
+    "symbol": "BTCUSDT",
+    "interval": "1h",
+    "features": {
+      "ema20": {"ema": {"period": 20}},
+      "ema50": {"ema": {"period": 50}},
+      "ema100": {"ema": {"period": 100}}
+    },
+    "long_entry": "crosses_above(ema20, ema50)",
+    "long_exit": "crosses_above(ema50, ema100)",
+    "risk": {"position_size_pct": 100, "stop_loss_pct": 10, "take_profit_pct": 5}
+  }
+}

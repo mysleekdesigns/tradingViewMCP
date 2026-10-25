@@ -230,3 +230,42 @@ def test_host_allowlist(host: str | None, ok: bool) -> None:
 
 def test_vite_proxied_host_is_allowed(client: TestClient) -> None:
     assert client.get("/lab/health", headers={"host": "localhost:5173"}).status_code == 200
+
+
+def _holdout_row(tmp_path: Path, run_id: str) -> int:
+    with Ledger(tmp_path / "ledger.db") as led:
+        design = led.list(run_id=run_id, limit=1)[0]
+        return led.record(
+            replace(
+                design,
+                id=None,
+                created_at=None,
+                window_kind="holdout",
+                metrics_json='{"sharpe": 9.9, "total_return": 0.5}',
+            )
+        )
+
+
+def test_ledger_list_never_serves_holdout_trials(client: TestClient, tmp_path: Path) -> None:
+    client.post("/lab/backtest", json={"plan": EMA_PLAN, "run_id": "hold"})
+    before = client.get("/lab/ledger", params={"run_id": "hold", "limit": 500}).json()
+    everything_before = client.get("/lab/ledger").json()["total"]
+    hidden = _holdout_row(tmp_path, "hold")
+    after = client.get("/lab/ledger", params={"run_id": "hold", "limit": 500}).json()
+    assert after["total"] == before["total"]  # the total excludes holdout rows too
+    assert hidden not in [i["id"] for i in after["items"]]
+    assert all(i["window_kind"] != "holdout" for i in after["items"])
+    assert client.get("/lab/ledger").json()["total"] == everything_before
+    # paging stays consistent with the filtered total
+    page = client.get("/lab/ledger", params={"run_id": "hold", "limit": 2, "offset": 0}).json()
+    assert page["items"][0]["id"] == after["items"][0]["id"]
+
+
+def test_ledger_detail_of_a_holdout_trial_is_404(client: TestClient, tmp_path: Path) -> None:
+    client.post("/lab/backtest", json={"plan": EMA_PLAN, "run_id": "hold"})
+    hidden = _holdout_row(tmp_path, "hold")
+    r = client.get(f"/lab/ledger/{hidden}")
+    assert r.status_code == 404 and r.json() == {
+        "detail": f"no trial with id {hidden} in the ledger"
+    }
+    assert "9.9" not in r.text

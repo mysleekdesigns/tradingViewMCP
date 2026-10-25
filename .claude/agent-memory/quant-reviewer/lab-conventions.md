@@ -25,4 +25,22 @@ Checked by hand-built probes on 2026-10-24. Do not re-flag these unless the code
 - nautilus cross-check timing: the bar ts is at close and the open is a trade tick 1 ns after the open. The replay strategy only reads signal rows < the current row, so the close cannot leak into the fill. The no-stop EMA 20/50 run agrees exactly (137 trades).
 - Files can change mid-review because implementers run in parallel. Check mtimes and config values before quoting numbers.
 
+Phase 8 research layer (verified sound on 2026-10-24; do not re-flag unless the code changes):
+
+- `criteria.regime_breakdown` assigns bar t's return to the label at t-1, using the frozen 90d/±10% definition on the base design trial's returns.
+- The DSR row re-deflates the stored design-trial returns with the current N. V is scoped by interval, window, and costs. With N > 1 and no estimable V it reads "missing".
+- Missing evidence is never a pass. A backtest evidence trial_id is checked against run_id, plan_hash, and status.
+- Evidence is written only by server code, keyed by the hash of the submitted plan.
+- Holdout eval: data up to the last closed bar (now floored to the interval), `evaluate_on_window` (next-bar open, warm-up from the full history), 365-day metrics. The check is spent under BEGIN IMMEDIATE before any holdout bar is evaluated.
+- In autonomous SDK roles the designer has no built-in tools, a pinned server, and holdout and start_run disabled. The critic has read-only tools and strict_mcp_config.
+- The seed JSONs match the freqtrade sources (checked against raw GitHub): Fisher-RSI to RSI conversions are exact, and deviations are disclosed.
+- `paper/compare.py` has no annualisation. The replay warms up from `startup_candle_count`.
+- Probe recipe: call `start_research_run` + `backtest_evidence` + `evaluate_plan` directly with `load_research_config(agents/config/success_criteria.proposed.toml)` and a tmp ledger. About 20 s on BTC 4h.
+- Round 2 (2026-10-24), verified: the cross-check runs two passes (configured + zero-slippage mechanics), which closes recurring #7. Holdout min trades = max(5, ceil(min_trades*holdout_bars/design_bars)). PBO = max(neighbourhood, sweep CSCV of the logic). Unknown SDK cost is charged at the cap, and the reservation is persisted for --resume.
+- Hook quirk: any Bash command whose text contains `lab/lab/registry` or `success_criteria.toml` is blocked by the lab-lock hook, even for reads. Use Read, or introspect via Python (`from lab.registry import REGISTRY`).
+- Round 3 (2026-10-24), verified: family code reads design-window trials only (no holdout metrics; holdout_checked reads only the check's plan_json); correlation needs equal-length arrays from the exact same symbol/interval/window; record_holdout_check re-checks the family's logic+plan hashes under BEGIN IMMEDIATE (family itself computed outside the txn); neighbourhood grid uncapped with cap 25 = base + 6x4; journal DSR N global. behaviour_family costs ~1.7 s per 3000 4h trials (decodes every blob, even same-logic rows); holdout_check computes it twice.
+- Probe scripts live in the scratchpad: probe_v.py (V laundering), probe_wf.py, probe_wf_mcp.py (narrow WF via MCP), probe_r3.py / probe_r3b.py (interval composite dodge, literal tuning, correlation table, perf). Run them with `uv run python <script> ../agents/config/success_criteria.proposed.toml` from lab/.
+
+- Round 4 (2026-10-24), verified: family alignment loads with end=holdout_start + design_view (no holdout read); _to_grid drops gap bars and incomplete buckets, lcm grid, all intervals epoch-aligned (no 1w/3d/1M). "uncertain" fail-closed only blocks same-feature-multiset logics that were already holdout-checked (RSI not refused with 1h loader broken). min_variance_plans counts neighbours: one 2-param plan = 9 plans (DSR missing), a second plan or any sweep clears it; PBO needs a >=16 sweep anyway, so the floor never blocks an otherwise-passing first run. Orchestrator: crosscheck -> pre_holdout_passed -> holdout; family/uncertain refusals classify as logic_spent (dead). Probes: scratchpad qr4/probe_q4*.py.
+
 Related: [[recurring-issues]]

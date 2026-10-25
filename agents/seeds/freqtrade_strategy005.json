@@ -1,0 +1,20 @@
+{
+  "name": "freqtrade-strategies Strategy005",
+  "source_url": "https://github.com/freqtrade/freqtrade-strategies/blob/main/user_data/strategies/Strategy005.py",
+  "translation_notes": "Uses the strategy's own hyperopt results (buy_params / sell_params) as the parameter values. Entry: volume above 4x its 150-bar average, close below SMA(40), RSI(14) above 26, and Fisher-RSI-normalised below 5; the latter is 50 x (tanh(0.1 x (RSI - 50)) + 1) < 5, which is exactly RSI < 35.28. Dropped from the entry: fast stochastic fastd > fastk and fastd > 1 (no stochastic), and a minimum-price guard (irrelevant for BTC). Exit (the hyperopt-selected 'rsi-macd-minusdi' trigger): RSI(14) crosses above 74 and the MACD(12, 26, 9) line is below 0; the third condition, minus-DI > 4, is dropped (no DMI in the registry; it is true almost always). The ROI table (0 min: 5%, 20: 4%, 40: 3%, 80: 2%, 1440: 1%) becomes a single 5% take-profit. Stop-loss 10% kept. Timeframe changed 5m -> 1h. Four features and six params, both at the plan limit.",
+  "plan": {
+    "name": "seed_freqtrade_strategy005",
+    "description": "Calibration seed translated from freqtrade-strategies Strategy005 (volume spike below the mean). Popular published strategy; expected to fail honest testing.",
+    "symbol": "BTCUSDT",
+    "interval": "1h",
+    "features": {
+      "vol_avg": {"volume_sma": {"period": 150}},
+      "sma40": {"sma": {"period": 40}},
+      "rsi": {"rsi": {"period": 14}},
+      "macd": {"macd": {"fast": 12, "slow": 26, "signal": 9}}
+    },
+    "long_entry": "volume > 4 * vol_avg and close < sma40 and rsi > 26 and rsi < 35.28",
+    "long_exit": "crosses_above(rsi, 74) and macd.macd < 0",
+    "risk": {"position_size_pct": 100, "stop_loss_pct": 10, "take_profit_pct": 5}
+  }
+}

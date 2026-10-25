@@ -95,7 +95,11 @@ def plan_json_schema(registry: Mapping[str, FeatureSpec] | None = None) -> dict[
         "description": (
             "Condition over feature aliases (`alias` or `alias.output`), price inputs "
             f"({', '.join(PRICE_INPUTS)}), numbers, + - * /, > < >= <=, and/or/not, "
-            f"crosses_above(a, b), crosses_below(a, b), prev(x, n) with 1 <= n <= {MAX_PREV_BARS}."
+            f"crosses_above(a, b), crosses_below(a, b), prev(x, n) with 1 <= n <= {MAX_PREV_BARS}. "
+            "Units must match: compare prices with prices (close > ema_slow), volume with volume "
+            "(volume > 2 * vol_avg), or use a ratio (close / ema_slow > 1.02); a price or volume "
+            "compared with a fixed number (close > 50000) is a hidden level and is rejected. "
+            "0 fits any scale (macd.hist > 0)."
         ),
     }
 

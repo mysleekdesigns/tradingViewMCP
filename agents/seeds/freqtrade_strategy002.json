@@ -1,0 +1,18 @@
+{
+  "name": "freqtrade-strategies Strategy002",
+  "source_url": "https://github.com/freqtrade/freqtrade-strategies/blob/main/user_data/strategies/Strategy002.py",
+  "translation_notes": "Entry: RSI(14) below 30 and close below the lower Bollinger(20, 2) band (bands on close here; the original uses typical price). Dropped from the entry: slow stochastic %K < 20 (no stochastic in the registry) and a TA-Lib hammer candle (no candle patterns). Exit: the original exits when Parabolic SAR is above close and Fisher-RSI > 0.3. Fisher-RSI is tanh(0.1 x (RSI - 50)), a monotone transform of RSI, so Fisher-RSI > 0.3 is exactly RSI > 53.1 (50 + 10 x atanh(0.3)). SAR is not in the registry; 'SAR above close' (price has turned down) is approximated by close below the previous close. The ROI table (0 min: 5%, 20: 4%, 30: 3%, 60: 1%) becomes a single 5% take-profit. Stop-loss 10% kept. Timeframe changed 5m -> 1h.",
+  "plan": {
+    "name": "seed_freqtrade_strategy002",
+    "description": "Calibration seed translated from freqtrade-strategies Strategy002 (RSI + Bollinger mean reversion). Popular published strategy; expected to fail honest testing.",
+    "symbol": "BTCUSDT",
+    "interval": "1h",
+    "features": {
+      "rsi": {"rsi": {"period": 14}},
+      "bb": {"bollinger": {"period": 20, "mult": 2.0}}
+    },
+    "long_entry": "rsi < 30 and close < bb.lower",
+    "long_exit": "rsi > 53.1 and close < prev(close, 1)",
+    "risk": {"position_size_pct": 100, "stop_loss_pct": 10, "take_profit_pct": 5}
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "freqtrade SampleStrategy",
+  "source_url": "https://raw.githubusercontent.com/freqtrade/freqtrade/develop/freqtrade/templates/sample_strategy.py",
+  "translation_notes": "Long side only (the template's short rules dropped: spot long/flat engine). Entry: RSI(14) crosses above 30 while TEMA(9) is at or below the Bollinger(20, 2) middle band and rising versus the previous bar. Exit: RSI(14) crosses above 70 while TEMA(9) is above the middle band and falling. TEMA is not in the registry, so EMA(9) stands in for it. Bollinger bands use close here; freqtrade's template uses typical price (H+L+C)/3. The ROI table (0 min: 4%, 30 min: 2%, 60 min: 1%) becomes a single 4% take-profit, because time-decaying ROI has no registry equivalent. Stop-loss 10% kept. The template's volume > 0 guard is implicit (zero-volume bars are untradable in the lab). Timeframe changed 5m -> 1h (5m archive data is not kept for research).",
+  "plan": {
+    "name": "seed_freqtrade_sample_strategy",
+    "description": "Calibration seed translated from freqtrade's SampleStrategy template (long side). Popular published strategy; expected to fail honest testing.",
+    "symbol": "BTCUSDT",
+    "interval": "1h",
+    "features": {
+      "rsi": {"rsi": {"period": 14}},
+      "tema_proxy": {"ema": {"period": 9}},
+      "bb": {"bollinger": {"period": 20, "mult": 2.0}}
+    },
+    "long_entry": "crosses_above(rsi, 30) and tema_proxy <= bb.mid and tema_proxy > prev(tema_proxy, 1)",
+    "long_exit": "crosses_above(rsi, 70) and tema_proxy > bb.mid and tema_proxy < prev(tema_proxy, 1)",
+    "risk": {"position_size_pct": 100, "stop_loss_pct": 10, "take_profit_pct": 4}
+  }
+}

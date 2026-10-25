@@ -13,8 +13,9 @@ Target: $ARGUMENTS (e.g. `BTCUSDT 4h volatility targeting`). Default: BTCUSDT 4h
 
 - The `strategy-lab` MCP server is connected (tools named `mcp__strategy-lab__*`). If not: say Phase 8 step 1–2 comes first (`claude mcp add strategy-lab -- uv --directory lab run python -m lab.mcp_server`).
 - Read Phase 8's **Success criteria** and **Guardrails** in `PLAN.md` (and `lab/config/success_criteria*` if present; it wins).
-- Ask the owner for this session's budget with AskUserQuestion if not given: max hypotheses, max proposals, max holdout checks (default 5 / 15 / 1). Write the criteria and budget at the top of the journal **before** any backtest. They do not change during the run.
-- Create the journal at `agents/journal/<YYYY-MM-DD>-<symbol>-<slug>.md`.
+- The budget (max hypotheses, proposals, backtests, holdout checks, $) comes from `lab/config/success_criteria.toml` and is frozen by `start_run`; the session cannot raise it. If the owner wants a smaller budget for this session, note it and stop early yourself. Write the criteria and budget returned by `start_run` at the top of the journal **before** any backtest. They do not change during the run.
+- Call `start_run` (label = target). It freezes the success criteria and budget from `lab/config/success_criteria.toml` into the ledger and returns the server-assigned `run_id`; pass that `run_id` to every other tool. If it errors because the file is missing, stop: the owner installs it.
+- Create the journal at `agents/journal/<YYYY-MM-DD>-<symbol>-<slug>.md` (format: `agents/journal/README.md`).
 
 Copy and maintain:
 
@@ -41,7 +42,7 @@ For each hypothesis, in priority order:
 
 ## 3. Lab run (design window only)
 
-`run_backtest` → `run_sweep` (Optuna) → `walk_forward`. Every call lands in the ledger. Never request holdout data here.
+`run_backtest` → `run_sweep` (Optuna, with your `space`) → `walk_forward` (its space must cover at least the sweep's ranges; the worst walk-forward result counts) → `run_adversarial` → `run_crosscheck` (event-driven engine) → `get_report` (criteria rows: pass / fail / missing). `get_budget` shows what is left. Every call lands in the ledger, and the server refuses calls over budget. Never request holdout data here.
 
 ## 4. Critic
 
@@ -51,7 +52,7 @@ Launch `strategy-critic` with the plan, the metrics, the sweep surface, and the 
 
 - `refine` → change the **logic**, not just parameters; back to step 2. Log the lesson.
 - `abandon` → log why; next hypothesis.
-- `promising` → a `holdout_check` is allowed only if the budget has one left. A hook will ask the owner to confirm. Pass → candidate (next: event-driven cross-check, then paper trading). Fail → hypothesis is dead; never re-tune.
+- `promising` → a `holdout_check` is allowed only if `get_report` shows `pre_holdout_passed` (which includes a matched `run_crosscheck`) and the budget has one left (the server enforces both). Near-copies of a checked strategy (renamed, re-tuned, a no-op clause, another interval, or highly correlated returns) are refused as already checked. A hook will ask the owner to confirm. It returns pass/fail only; never write holdout numbers to the journal. Pass → candidate (next: event-driven cross-check, then paper trading). Fail → hypothesis is dead; never re-tune.
 - Budget exhausted → stop and write the report.
 
 ## 6. Report

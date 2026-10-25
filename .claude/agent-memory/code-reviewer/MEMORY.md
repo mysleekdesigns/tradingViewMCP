@@ -7,3 +7,4 @@
 - [Phase 7 Strategy Tester](project_web_phase7_tester.md) — labApi contract, overlay pane lifecycle confirmed; auto-history state machine; open: no zoom at 20k cap, double role=status
 - [No-trade bars](project_web_no_trade_bars.md) — raw `candles` vs plotted `bars` split, which consumer uses which; open: sparse-pair paging, empty-view clicks
 - [Market venue](project_market_venue.md) — TV_MARKET_VENUE binance|binance-us, live-verified limits/sizes; DB lock/startup order, tsx-watch safe; open: lock takeover race, venue label cached
+- [Phase 8 Research page](project_web_phase8_research.md) — poll triggers, tab boundaries, persisted plan-restore confirmed; open: stalled run stops new-run check, backtick regex cost

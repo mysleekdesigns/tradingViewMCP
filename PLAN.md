@@ -684,20 +684,20 @@ can't have memorized.
 8. Optional: schedule nightly research runs (`/schedule` cloud routine or cron + `claude -p`).
 
 ### Checklist
-- [ ] `strategy-lab` MCP server with all tools + tests
-- [ ] Holdout check enforces its budget server-side (agents can't bypass it)
-- [ ] Research skill / CLAUDE.md instructions
+- [x] `strategy-lab` MCP server with all tools + tests
+- [x] Holdout check enforces its budget server-side (agents can't bypass it)
+- [x] Research skill / CLAUDE.md instructions
 - [ ] Manual interactive research session completed end-to-end
-- [ ] Jev gates (source screen, dedupe, sweep triage, done-check) with fail-open behaviour
-- [ ] Agent SDK orchestrator with Scout / Designer / Critic subagents
-- [ ] Per-run budgets (proposals, backtests, holdout checks, $)
-- [ ] Lab code and success criteria protected from agent edits (permissions/hooks)
-- [ ] Idea library + dedupe
+- [x] Jev gates (source screen, dedupe, sweep triage, done-check) with fail-open behaviour
+- [x] Agent SDK orchestrator with Scout / Designer / Critic subagents
+- [x] Per-run budgets (proposals, backtests, holdout checks, $)
+- [x] Lab code and success criteria protected from agent edits (permissions/hooks)
+- [x] Idea library + dedupe
 - [ ] Seed importer: Freqtrade strategies → plans, run through the honest pipeline as a calibration baseline
-- [ ] Research journal + end-of-run report (including "no edge found"), written Obsidian-friendly: YAML frontmatter (run ID, idea IDs, date, outcome) and `[[links]]` to idea and ledger run IDs; never records holdout results, and scout-sourced text is marked untrusted
+- [x] Research journal + end-of-run report (including "no edge found"), written Obsidian-friendly: YAML frontmatter (run ID, idea IDs, date, outcome) and `[[links]]` to idea and ledger run IDs; never records holdout results, and scout-sourced text is marked untrusted
 - [ ] Research page in the UI
 - [ ] Paper-trading runner + forward-vs-backtest comparison
-- [ ] Prompt-injection screening for scraped content
+- [x] Prompt-injection screening for scraped content
 
 **Done when:** an autonomous run on BTCUSDT/ETHUSDT finishes within budget and produces either a candidate
 that passes every success criterion (and then enters paper trading) or a clear, well-documented "no edge
