@@ -693,7 +693,7 @@ can't have memorized.
 - [x] Per-run budgets (proposals, backtests, holdout checks, $)
 - [x] Lab code and success criteria protected from agent edits (permissions/hooks)
 - [x] Idea library + dedupe
-- [ ] Seed importer: Freqtrade strategies → plans, run through the honest pipeline as a calibration baseline
+- [x] Seed importer: Freqtrade strategies → plans, run through the honest pipeline as a calibration baseline
 - [x] Research journal + end-of-run report (including "no edge found"), written Obsidian-friendly: YAML frontmatter (run ID, idea IDs, date, outcome) and `[[links]]` to idea and ledger run IDs; never records holdout results, and scout-sourced text is marked untrusted
 - [ ] Research page in the UI
 - [ ] Paper-trading runner + forward-vs-backtest comparison
