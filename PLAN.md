@@ -687,7 +687,7 @@ can't have memorized.
 - [x] `strategy-lab` MCP server with all tools + tests
 - [x] Holdout check enforces its budget server-side (agents can't bypass it)
 - [x] Research skill / CLAUDE.md instructions
-- [ ] Manual interactive research session completed end-to-end
+- [x] Manual interactive research session completed end-to-end
 - [x] Jev gates (source screen, dedupe, sweep triage, done-check) with fail-open behaviour
 - [x] Agent SDK orchestrator with Scout / Designer / Critic subagents
 - [x] Per-run budgets (proposals, backtests, holdout checks, $)
