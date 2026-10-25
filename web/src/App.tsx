@@ -10,7 +10,10 @@ import {
 } from 'react'
 import { buildChartData, tradesOnChart, tradesZoomRange } from './chart/backtestOverlay'
 import { INTERVAL_SECONDS } from './chart/drawings/timeIndex'
-import { Chart } from './chart/Chart'
+import { Chart, type ChartApi } from './chart/Chart'
+import { downloadCanvas, screenshotFilename } from './chart/screenshot'
+import type { ChartAppearance } from './chart/theme'
+import { timezoneLabel } from './chart/timeFormat'
 import {
   DEFAULT_DRAWING_STYLE,
   type ChartContextMenuRequest,
@@ -54,7 +57,7 @@ import { shortcutCommand } from './components/drawingTools'
 import { Header } from './components/Header'
 import { IndicatorMenu } from './components/IndicatorMenu'
 import { IndicatorSettings } from './components/IndicatorSettings'
-import { summarizeQuote, formatUtcClock } from './components/quote'
+import { summarizeQuote } from './components/quote'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { ResearchFallback, ResearchPage } from './components/ResearchPage'
 import {
@@ -69,20 +72,33 @@ import {
 import { SidebarRail, type SidebarPanel } from './components/SidebarRail'
 import { StatusBar } from './components/StatusBar'
 import { NoTradesView } from './components/NoTradesView'
+import { SeasonalsView } from './components/SeasonalsView'
+import { SettingsDialog } from './components/SettingsDialog'
+import { ShortcutsDialog } from './components/ShortcutsDialog'
 import { ErrorView, LoadingView } from './components/StatusViews'
 import { SymbolSearch } from './components/SymbolSearch'
 import { Watchlist } from './components/Watchlist'
 import type { Alert, AlertEvent, NotifyPermission } from './data/alertTypes'
 import { createAlertsClient } from './data/alertsApi'
-import { BinanceProvider } from './data/binance'
 import { createDrawingsClient } from './data/drawingsApi'
 import { createLabClient } from './data/labApi'
 import { createResearchClient } from './data/researchApi'
 import type { MarketDataProvider } from './data/provider'
-import { ServerProvider } from './data/server'
-import { DIRECT_VENUE, VENUE_NAME, venueLabels, type VenueInfo } from './data/venue'
+import { createProvider } from './data/providers'
+import { venueLabels, type VenueInfo } from './data/venue'
 import { getIndicatorDef } from './indicators/registry'
 import { useAlerts } from './state/alerts'
+import {
+  alertsUnavailableReason,
+  fallbackSymbol,
+  formatClock,
+  labOnChart,
+  labOverlayBlockedNotice,
+  providerNeedsReload,
+  providerProfile,
+  symbolFallbackNotice,
+  toggledTheme,
+} from './state/appSettings'
 import {
   alertLinesFor,
   buildHLineDrawing,
@@ -102,18 +118,32 @@ import {
   showBrowserNotification,
 } from './state/notify'
 import { loadPrefs, savePrefs } from './state/prefs'
+import {
+  applyCandleColorsToDocument,
+  applyThemeToDocument,
+  loadSettings,
+  saveSettings,
+  type Settings,
+} from './state/settings'
+import { appShortcut, isMacPlatform, shortcutRepeats } from './state/shortcuts'
 import { atHistoryLimit } from './state/liveCandles'
 import { useLiveCandles } from './state/useLiveCandles'
 import { useSymbols } from './state/useSymbols'
 import { useWatchlist } from './state/watchlist'
 import type { ChartType, Interval } from './types'
 
-// Default: the local server (cache + fan-out). `VITE_DATA_SOURCE=direct` talks to Binance's
-// market-data-only hosts (data-api / data-stream.binance.vision) from the browser.
-const DIRECT = import.meta.env.VITE_DATA_SOURCE === 'direct'
-const provider: MarketDataProvider = DIRECT ? new BinanceProvider() : new ServerProvider()
-// Module-level so the hooks see stable clients. Direct mode has no local server: drawings stay
-// in localStorage and alerts are unavailable.
+// The data provider comes from Settings, read once: it is fixed for the page's lifetime, and
+// changing it in Settings saves and reloads. Default: the local server (cache + fan-out);
+// `VITE_DATA_SOURCE=direct` defaults to Binance's market-data-only hosts from the browser
+// (see defaultSettings). Coinbase is a second direct provider.
+const PROVIDER_ID = loadSettings().provider
+const PROFILE = providerProfile(PROVIDER_ID)
+const DIRECT = PROFILE.direct
+const provider: MarketDataProvider = createProvider(PROVIDER_ID)
+const IS_MAC = isMacPlatform()
+const needsReload = (next: Settings): boolean => providerNeedsReload(PROVIDER_ID, next)
+// Module-level so the hooks see stable clients. Direct providers have no local server: drawings
+// stay in localStorage and alerts are unavailable.
 const drawingsClient = DIRECT ? null : createDrawingsClient()
 const alertsClient = DIRECT ? null : createAlertsClient()
 // The Python lab (backtests + ledger) is its own service behind the `/lab` proxy, in both modes.
@@ -131,12 +161,37 @@ function onResearchError(error: Error, info: ErrorInfo): void {
  * Source name inside chart error messages. Stable for the app's lifetime, so learning the
  * server's venue later does not restart the candle stream. Labels use `venueLabels` instead.
  */
-const ERROR_SOURCE = DIRECT ? VENUE_NAME : 'the local server'
+const ERROR_SOURCE = PROFILE.errorSource
 /** Retry interval while the server has not reported its venue yet. */
 const VENUE_RETRY_MS = 5000
 const LIMIT = 500
 /** How long a small error notice (e.g. a failed alert delete) stays up. */
 const NOTICE_MS = 6000
+/** Candle colours reach the chart at most this often while a colour picker is dragged. */
+const COLOR_APPLY_MS = 100
+/** Settings are written to localStorage this long after the last change (trailing). */
+const SETTINGS_SAVE_MS = 400
+
+/**
+ * `value`, updated at most once per `ms` (leading and trailing): the first change shows at once,
+ * a burst of changes (a colour picker fires `input` continuously) shows its latest value at the
+ * next slot, and the last value always lands. Compare by value (strings), not identity.
+ */
+function useThrottledValue<T>(value: T, ms: number): T {
+  const [shown, setShown] = useState(value)
+  const lastRef = useRef(0)
+  useEffect(() => {
+    if (Object.is(value, shown)) return
+    // The slot is fixed by the last apply, so a stream of changes cannot postpone it.
+    const wait = Math.max(0, lastRef.current + ms - Date.now())
+    const timer = window.setTimeout(() => {
+      lastRef.current = Date.now()
+      setShown(value)
+    }, wait)
+    return () => window.clearTimeout(timer)
+  }, [value, shown, ms])
+  return shown
+}
 
 /** True when a keystroke should go to the focused control rather than open the search. */
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -216,6 +271,80 @@ function App() {
   const [permission, setPermission] = useState<NotifyPermission>(notificationPermission)
   const keySeq = useRef(0)
 
+  // ---- Settings (theme, colours, time zone; the provider applies on reload) ----
+  const [settings, setSettings] = useState<Settings>(loadSettings)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  /** Keyboard shortcuts / Seasonals dialogs: a fresh key per open, null when closed. */
+  const [shortcutsKey, setShortcutsKey] = useState<number | null>(null)
+  const [seasonalsKey, setSeasonalsKey] = useState<number | null>(null)
+  const { theme, timezone } = settings
+  // The dialog shows every colour-picker step at once; the chart, the document tokens and the
+  // backtest markers follow at most every COLOR_APPLY_MS (each step re-sets the volume series).
+  const upColor = useThrottledValue(settings.upColor, COLOR_APPLY_MS)
+  const downColor = useThrottledValue(settings.downColor, COLOR_APPLY_MS)
+  // Persisted on a trailing debounce, and flushed when the page goes away.
+  const settingsRef = useRef(settings)
+  const saveTimerRef = useRef<number | null>(null)
+  useEffect(() => {
+    settingsRef.current = settings
+    const timer = window.setTimeout(() => saveSettings(settings), SETTINGS_SAVE_MS)
+    saveTimerRef.current = timer
+    return () => window.clearTimeout(timer)
+  }, [settings])
+  useEffect(() => {
+    const flush = () => saveSettings(settingsRef.current)
+    window.addEventListener('pagehide', flush)
+    return () => {
+      window.removeEventListener('pagehide', flush)
+      flush()
+    }
+  }, [])
+  useEffect(() => {
+    applyThemeToDocument(theme)
+  }, [theme])
+  useEffect(() => {
+    applyCandleColorsToDocument(upColor, downColor)
+  }, [upColor, downColor])
+  const appearance = useMemo<ChartAppearance>(
+    () => ({ theme, upColor, downColor, timezone }),
+    [theme, upColor, downColor, timezone],
+  )
+  const changeSettings = useCallback((next: Settings) => {
+    if (needsReload(next)) {
+      // A new provider means new symbols, streams and server features: start the page over.
+      // The ref first, so the pagehide flush writes `next` rather than the old settings, and
+      // drop any pending debounced save of the old settings.
+      settingsRef.current = next
+      if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current)
+      saveSettings(next)
+      window.location.reload()
+      return
+    }
+    setSettings(next)
+  }, [])
+  const toggleTheme = useCallback(
+    () => setSettings((s) => ({ ...s, theme: toggledTheme(s.theme) })),
+    [],
+  )
+  const openSettingsDialog = useCallback(() => setSettingsOpen(true), [])
+  const closeSettingsDialog = useCallback(() => setSettingsOpen(false), [])
+  const openShortcuts = useCallback(() => {
+    keySeq.current += 1
+    setShortcutsKey(keySeq.current)
+  }, [])
+  const closeShortcuts = useCallback(() => setShortcutsKey(null), [])
+  const openSeasonals = useCallback(() => {
+    keySeq.current += 1
+    setSeasonalsKey(keySeq.current)
+  }, [])
+  const closeSeasonals = useCallback(() => setSeasonalsKey(null), [])
+
+  /** The mounted chart's API (screenshots); null while no chart is shown. */
+  const chartApiRef = useRef<ChartApi | null>(null)
+  const onChartApi = useCallback((api: ChartApi | null) => {
+    chartApiRef.current = api
+  }, [])
+
   // Strategy Tester: dock layout, panel state (kept here so a run survives closing the dock).
   const [dock, setDock] = useState<DockPrefs>(loadDockPrefs)
   const [tester, dispatchTester] = useReducer(testerReducer, null, () =>
@@ -253,7 +382,7 @@ function App() {
   }, [notice])
 
   // The venue the chart's data comes from: fixed in direct mode, reported by the server else.
-  const [venue, setVenue] = useState<VenueInfo | null>(DIRECT ? DIRECT_VENUE : null)
+  const [venue, setVenue] = useState<VenueInfo | null>(PROFILE.initialVenue)
   useEffect(() => {
     if (venue !== null || provider.getVenue === undefined) return
     const ctrl = new AbortController()
@@ -275,6 +404,10 @@ function App() {
     }
   }, [venue])
   const { exchange: EXCHANGE, source: SOURCE } = venueLabels(venue, DIRECT)
+  // Lab backtests are Binance global spot data: drawn only when the chart's data really is
+  // (the server may run on Binance.US; Coinbase is another market). Unknown venue: not drawn.
+  const labAllowed = labOnChart(venue)
+  const labBlockedNotice = labAllowed ? null : labOverlayBlockedNotice(venue, DIRECT)
 
   const live = useLiveCandles(provider, symbol, interval, LIMIT, ERROR_SOURCE, MAX_HISTORY_BARS)
   const { load } = live
@@ -316,8 +449,13 @@ function App() {
   // ---- Strategy Tester ↔ chart ----
 
   const report = tester.report
-  const reportOnMarket = report !== null && reportMatchesChart(report, symbol, interval)
-  const chartData = useMemo(() => (report ? buildChartData(report) : null), [report])
+  // Never on a chart whose prices are another venue's (Coinbase, Binance.US): see labAllowed.
+  const reportOnMarket =
+    labAllowed && report !== null && reportMatchesChart(report, symbol, interval)
+  const chartData = useMemo(
+    () => (report ? buildChartData(report, { win: upColor, loss: downColor }) : null),
+    [report, upColor, downColor],
+  )
   const backtestDrawn = tester.shownOnChart && reportOnMarket
   // Raw first bar: a page of bars without trades still moves the history back.
   const firstBarTime = candles !== null && candles.length > 0 ? candles[0].time : null
@@ -456,13 +594,7 @@ function App() {
   )
 
   const alertsAvailable = alerts.status === 'ready'
-  const alertDisabledReason = alertsAvailable
-    ? null
-    : alerts.status === 'loading'
-      ? 'Connecting to the local server…'
-      : DIRECT
-        ? 'Alerts need the local server (not available in direct mode)'
-        : 'Alerts need the local server, which cannot be reached'
+  const alertDisabledReason = alertsUnavailableReason(PROVIDER_ID, alerts.status)
 
   const activeAlertLines = useMemo(
     () => alertLinesFor(alerts.alerts, symbol),
@@ -496,12 +628,16 @@ function App() {
 
   const showBacktestOnChart = useCallback(() => {
     if (report === null) return
+    if (labBlockedNotice !== null) {
+      setNotice(labBlockedNotice)
+      return
+    }
     if (report.symbol !== symbol) selectSymbol(report.symbol)
     if (report.interval !== interval && isChartInterval(report.interval)) {
       changeInterval(report.interval)
     }
     dispatchTester({ type: 'show-on-chart', shown: true })
-  }, [report, symbol, interval, selectSymbol, changeInterval])
+  }, [report, symbol, interval, selectSymbol, changeInterval, labBlockedNotice])
 
   const clearBacktestFromChart = useCallback(() => {
     dispatchTester({ type: 'show-on-chart', shown: false })
@@ -617,9 +753,14 @@ function App() {
         return
       }
       loadPlanIntoTester(req)
-      if (req.symbol !== symbol) selectSymbol(req.symbol)
-      if (req.chartInterval !== null && req.chartInterval !== interval) {
-        changeInterval(req.chartInterval)
+      if (labBlockedNotice !== null) {
+        // The run still goes ahead in the Strategy Tester; the chart keeps its own market.
+        setNotice(labBlockedNotice)
+      } else {
+        if (req.symbol !== symbol) selectSymbol(req.symbol)
+        if (req.chartInterval !== null && req.chartInterval !== interval) {
+          changeInterval(req.chartInterval)
+        }
       }
       setDock((d) => (d.open ? d : { ...d, open: true }))
       setResearchOpen(false)
@@ -644,6 +785,7 @@ function App() {
       selectSymbol,
       changeInterval,
       loadPlanIntoTester,
+      labBlockedNotice,
     ],
   )
 
@@ -692,6 +834,48 @@ function App() {
   }, [])
   const closeDock = useCallback(() => setDock((d) => ({ ...d, open: false })), [])
   const toggleDock = useCallback(() => setDock((d) => ({ ...d, open: !d.open })), [])
+
+  // The persisted symbol may not exist on this provider (e.g. SUIUSDT after switching to
+  // Coinbase). Checked once, when the provider's symbol list first arrives, so it cannot loop.
+  // Adjusted during render (React's "state from changed data" pattern), not in an effect.
+  const listedSymbols = symbolList.symbols
+  const [symbolsChecked, setSymbolsChecked] = useState(false)
+  if (!symbolsChecked && listedSymbols !== null) {
+    setSymbolsChecked(true)
+    const next = fallbackSymbol(
+      symbol,
+      listedSymbols.map((s) => s.symbol),
+      PROFILE.defaultSymbol,
+    )
+    if (next !== null) {
+      setNotice(symbolFallbackNotice(symbol, next, EXCHANGE))
+      selectSymbol(next)
+    }
+  }
+
+  // ---- Screenshot ----
+
+  const saveScreenshot = useCallback(() => {
+    const api = chartApiRef.current
+    if (api === null) {
+      setNotice('There is no chart to save yet. Try again once the candles have loaded.')
+      return
+    }
+    let canvas: HTMLCanvasElement
+    try {
+      canvas = api.screenshot()
+    } catch (err) {
+      console.warn('Chart screenshot failed', err)
+      setNotice(`Could not capture the chart: ${errorText(err, 'unknown error')}`)
+      return
+    }
+    downloadCanvas(canvas, screenshotFilename(symbol, interval, Date.now() / 1000)).catch(
+      (err: unknown) => {
+        console.warn('Saving the chart image failed', err)
+        setNotice(`Could not save the chart image: ${errorText(err, 'unknown error')}`)
+      },
+    )
+  }, [symbol, interval])
 
   const toggleWatchlistItem = useCallback(
     (s: string) => (watchlist.has(s) ? watchlist.remove(s) : watchlist.add(s)),
@@ -814,6 +998,9 @@ function App() {
     settingsConfig !== undefined ||
     alertDialog !== null ||
     contextMenu !== null ||
+    settingsOpen ||
+    shortcutsKey !== null ||
+    seasonalsKey !== null ||
     // The Research view takes the keyboard (Esc closes it); chart shortcuts wait.
     researchOpen
   useEffect(() => {
@@ -836,6 +1023,19 @@ function App() {
         openSearch()
         return
       }
+      // Alt+1…7 / [ ] timeframes, Alt+S screenshot, Alt+Shift+L theme, ? help (state/shortcuts).
+      const app = isTypingTarget(e.target) ? null : appShortcut(e, interval)
+      if (app !== null) {
+        e.preventDefault()
+        // A held key: '[' / ']' keep stepping; screenshot, theme and help fire once per press.
+        if (e.repeat && !shortcutRepeats(app)) return
+        if (app.kind === 'interval') {
+          if (app.interval !== interval) changeInterval(app.interval)
+        } else if (app.kind === 'screenshot') saveScreenshot()
+        else if (app.kind === 'theme') toggleTheme()
+        else openShortcuts()
+        return
+      }
       if (e.metaKey || e.ctrlKey || e.altKey) return
       if (isTypingTarget(e.target)) return
       if (e.key === '/') {
@@ -856,6 +1056,11 @@ function App() {
     alertsAvailable,
     alertDisabledReason,
     openAlertAtLast,
+    interval,
+    changeInterval,
+    saveScreenshot,
+    toggleTheme,
+    openShortcuts,
   ])
 
   const sidebarOpen = panel !== null
@@ -886,6 +1091,13 @@ function App() {
         loading={load.kind === 'loading' || live.refreshing}
         onRefresh={live.reload}
         refreshDisabled={live.retryBlocked}
+        onOpenSeasonals={openSeasonals}
+        onScreenshot={saveScreenshot}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+        onOpenShortcuts={openShortcuts}
+        onOpenSettings={openSettingsDialog}
+        isMac={IS_MAC}
       />
       <DrawingToolbar
         tool={tool}
@@ -924,6 +1136,9 @@ function App() {
               focusRange?.symbol === symbol && focusRange.interval === interval ? focusRange : null
             }
             onFocusDone={focusDone}
+            appearance={appearance}
+            onApi={onChartApi}
+            keyboardBlocked={dialogOpen}
           />
         )}
         {load.kind === 'ready' && load.bars.length === 0 && (
@@ -1082,7 +1297,8 @@ function App() {
       <StatusBar
         barCount={bars ? bars.length : null}
         status={live.status}
-        lastUpdate={live.lastUpdate !== null ? formatUtcClock(new Date(live.lastUpdate)) : null}
+        lastUpdate={live.lastUpdate !== null ? formatClock(live.lastUpdate, timezone) : null}
+        timezoneName={timezoneLabel(timezone)}
         refreshError={load.kind === 'ready' ? live.refreshError : null}
       />
       {contextMenu !== null && (
@@ -1162,6 +1378,26 @@ function App() {
           items={indicators.items}
           onAdd={indicators.add}
           onClose={closeIndicatorMenu}
+        />
+      )}
+      {settingsOpen && (
+        <SettingsDialog
+          settings={settings}
+          onChange={changeSettings}
+          onClose={closeSettingsDialog}
+          providerNeedsReload={needsReload}
+        />
+      )}
+      {shortcutsKey !== null && (
+        <ShortcutsDialog key={shortcutsKey} isMac={IS_MAC} onClose={closeShortcuts} />
+      )}
+      {seasonalsKey !== null && (
+        <SeasonalsView
+          key={seasonalsKey}
+          symbol={symbol}
+          provider={provider}
+          venueName={EXCHANGE}
+          onClose={closeSeasonals}
         />
       )}
       {settingsConfig && settingsDef && (

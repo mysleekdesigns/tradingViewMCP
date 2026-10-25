@@ -14,6 +14,17 @@ function indexOfTime(candles: readonly Candle[], time: number): number {
   return -1
 }
 
+function sameFields(a: Candle, b: Candle): boolean {
+  return (
+    a.time === b.time &&
+    a.open === b.open &&
+    a.high === b.high &&
+    a.low === b.low &&
+    a.close === b.close &&
+    a.volume === b.volume
+  )
+}
+
 /**
  * Apply one live candle to an ascending, unique-time array. Never mutates input.
  *  - empty input -> [c]
@@ -21,6 +32,8 @@ function indexOfTime(candles: readonly Candle[], time: number): number {
  *  - c.time > last.time -> copy with c appended
  *  - c.time < last.time -> copy with the same-time element replaced if present;
  *    otherwise return `candles` itself (same reference)
+ *  - the bar with c.time already has identical fields -> `candles` itself (same reference),
+ *    so repeated read-backs and matching gap rows cost no copy and trigger no re-render
  * All untouched elements keep object identity.
  */
 export function applyLiveCandle(candles: readonly Candle[], c: Candle): Candle[] {
@@ -28,7 +41,7 @@ export function applyLiveCandle(candles: readonly Candle[], c: Candle): Candle[]
   const last = candles[candles.length - 1]
   if (c.time > last.time) return [...candles, c]
   const idx = c.time === last.time ? candles.length - 1 : indexOfTime(candles, c.time)
-  if (idx === -1) return candles as Candle[]
+  if (idx === -1 || sameFields(candles[idx], c)) return candles as Candle[]
   const out = candles.slice()
   out[idx] = c
   return out

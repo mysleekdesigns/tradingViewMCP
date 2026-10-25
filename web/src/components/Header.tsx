@@ -1,3 +1,5 @@
+import { shortcutHint } from '../state/appSettings'
+import type { ThemeName } from '../state/settings'
 import type { ChartType, ConnectionStatus, Interval } from '../types'
 import { ChartTypeMenu } from './ChartTypeMenu'
 import { ConnectionIndicator } from './ConnectionStatus'
@@ -30,6 +32,16 @@ interface HeaderProps {
   loading: boolean
   onRefresh: () => void
   refreshDisabled: boolean
+  /** Opens the Seasonals view (monthly / weekday returns) for the current symbol. */
+  onOpenSeasonals: () => void
+  /** Saves the chart as a PNG. */
+  onScreenshot: () => void
+  theme: ThemeName
+  onToggleTheme: () => void
+  onOpenShortcuts: () => void
+  onOpenSettings: () => void
+  /** Shortcut hints in macOS notation (⌥S) or Alt+S. */
+  isMac: boolean
 }
 
 export function Header({
@@ -51,7 +63,19 @@ export function Header({
   loading,
   onRefresh,
   refreshDisabled,
+  onOpenSeasonals,
+  onScreenshot,
+  theme,
+  onToggleTheme,
+  onOpenShortcuts,
+  onOpenSettings,
+  isMac,
 }: HeaderProps) {
+  const nextTheme = theme === 'dark' ? 'light' : 'dark'
+  // "Binance · local server": the transport part can hide on narrow windows (the tooltip keeps it).
+  const split = source.indexOf(' · ')
+  const sourceVenue = split < 0 ? source : source.slice(0, split)
+  const sourceTransport = split < 0 ? '' : source.slice(split)
   return (
     <header className="topbar">
       <div className="topbar__brand" role="img" aria-label="tradingView">
@@ -124,6 +148,18 @@ export function Header({
         <span className="ind-btn__label">Alert</span>
       </button>
 
+      <button
+        type="button"
+        className="ind-btn ind-btn--secondary"
+        onClick={onOpenSeasonals}
+        aria-haspopup="dialog"
+        aria-label="Seasonals"
+        title={`Seasonals: monthly and weekday returns of ${symbol}`}
+      >
+        <CalendarIcon />
+        <span className="ind-btn__label">Seasonals</span>
+      </button>
+
       <div className="topbar__divider" aria-hidden="true" />
 
       {/* No aria-live: once prices stream, it would announce every tick. */}
@@ -143,9 +179,12 @@ export function Header({
 
       <div className="topbar__spacer" />
 
-      <span className="source-badge" title="Public market data, no API key">
+      <span className="source-badge" title={`${source}: public market data, no API key`}>
         <span className="source-badge__dot" aria-hidden="true" />
-        {source}
+        {sourceVenue}
+        {sourceTransport !== '' && (
+          <span className="source-badge__transport">{sourceTransport}</span>
+        )}
       </span>
 
       <button
@@ -159,6 +198,51 @@ export function Header({
         <RefreshIcon spinning={loading} />
         <span>Refresh</span>
       </button>
+
+      <div className="topbar__divider" aria-hidden="true" />
+
+      <div className="topbar__tools" role="group" aria-label="Chart tools">
+        <button
+          type="button"
+          className="icon-btn"
+          aria-label="Save chart image"
+          title={`Save chart image as PNG (${shortcutHint(isMac, 'screenshot')})`}
+          onClick={onScreenshot}
+        >
+          <CameraIcon />
+        </button>
+        <button
+          type="button"
+          className="icon-btn"
+          aria-label={`Switch to ${nextTheme} theme`}
+          title={`Switch to ${nextTheme} theme (${shortcutHint(isMac, 'theme')})`}
+          onClick={onToggleTheme}
+        >
+          {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
+        </button>
+        <button
+          type="button"
+          className="icon-btn"
+          aria-haspopup="dialog"
+          aria-label="Keyboard shortcuts"
+          title={`Keyboard shortcuts (${shortcutHint(isMac, 'help')})`}
+          onClick={onOpenShortcuts}
+        >
+          <KeyboardIcon />
+        </button>
+        <button
+          type="button"
+          className="icon-btn"
+          aria-haspopup="dialog"
+          aria-label="Settings"
+          title="Settings: theme, colours, data provider, time zone"
+          onClick={onOpenSettings}
+        >
+          <GearIcon />
+        </button>
+      </div>
+
+      <div className="topbar__divider" aria-hidden="true" />
 
       <button
         type="button"
@@ -264,6 +348,116 @@ function RefreshIcon({ spinning }: { spinning: boolean }) {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  )
+}
+
+function CalendarIcon() {
+  return (
+    <svg className="ind-btn__icon" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+      <rect
+        x="3.5"
+        y="4.5"
+        width="13"
+        height="12"
+        rx="1.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+      />
+      <path
+        d="M3.5 8.2h13M7 3v3M13 3v3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+      <rect x="6" y="10.4" width="2.4" height="2.2" rx=".4" fill="var(--up)" />
+      <rect x="9.3" y="10.4" width="2.4" height="2.2" rx=".4" fill="var(--down)" />
+      <rect x="12.6" y="10.4" width="2.4" height="2.2" rx=".4" fill="currentColor" opacity=".45" />
+      <rect x="6" y="13.3" width="2.4" height="2.2" rx=".4" fill="currentColor" opacity=".45" />
+      <rect x="9.3" y="13.3" width="2.4" height="2.2" rx=".4" fill="var(--up)" />
+    </svg>
+  )
+}
+
+function CameraIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+      <path
+        d="M2.5 6.2c0-.8.6-1.4 1.4-1.4h1.9l1.2-1.8h4l1.2 1.8h1.9c.8 0 1.4.6 1.4 1.4v7.3c0 .8-.6 1.4-1.4 1.4H3.9c-.8 0-1.4-.6-1.4-1.4V6.2Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+      <circle cx="9" cy="9.7" r="2.7" fill="none" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  )
+}
+
+function SunIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+      <circle cx="9" cy="9" r="3.2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M9 1.8v1.8M9 14.4v1.8M1.8 9h1.8M14.4 9h1.8M3.9 3.9l1.3 1.3M12.8 12.8l1.3 1.3M3.9 14.1l1.3-1.3M12.8 5.2l1.3-1.3"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
+function MoonIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+      <path
+        d="M14.8 11.2A6 6 0 0 1 6.8 3.2a6 6 0 1 0 8 8Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function KeyboardIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+      <rect
+        x="1.8"
+        y="4.5"
+        width="14.4"
+        height="9"
+        rx="1.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+      />
+      <path
+        d="M4.6 7.3h.1M7.1 7.3h.1M9.6 7.3h.1M12.1 7.3h.1M4.6 9.6h.1M13.4 9.6h.1M6.4 11.4h5.2"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
+function GearIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+      <path
+        d="M7.6 2.2h2.8l.4 1.9 1.3.7 1.8-.7 1.4 2.4-1.5 1.3v1.4l1.5 1.3-1.4 2.4-1.8-.7-1.3.7-.4 1.9H7.6l-.4-1.9-1.3-.7-1.8.7-1.4-2.4 1.5-1.3V7.8L2.7 6.5l1.4-2.4 1.8.7 1.3-.7.4-1.9Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+      <circle cx="9" cy="9" r="2.2" fill="none" stroke="currentColor" strokeWidth="1.3" />
     </svg>
   )
 }

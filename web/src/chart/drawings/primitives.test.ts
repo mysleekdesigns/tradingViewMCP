@@ -68,4 +68,44 @@ describe('DrawingsPrimitive', () => {
     const { primitive } = setup()
     expect(primitive.paneViews()).toBe(primitive.paneViews())
   })
+
+  it('draws selection handles in the theme colours set by setHandleColors', () => {
+    const { controller, primitive } = setup()
+    let redraws = 0
+    primitive.attached({
+      requestUpdate: () => redraws++,
+      series: { priceFormatter: () => ({ format: (p: number) => p.toFixed(2) }) },
+    } as unknown as Parameters<DrawingsPrimitive['attached']>[0])
+    controller.setSelected('t')
+    primitive.setHandleColors({ fill: '#ffffff', ring: '#131722' })
+    expect(redraws).toBe(1)
+    primitive.updateAllViews()
+
+    const arcs: { fill: unknown; stroke: unknown }[] = []
+    const ctx = new Proxy(
+      { fillStyle: '' as unknown, strokeStyle: '' as unknown },
+      {
+        get(target, key) {
+          if (key in target) return target[key as keyof typeof target]
+          if (key === 'fill')
+            return () => arcs.push({ fill: target.fillStyle, stroke: target.strokeStyle })
+          return () => undefined
+        },
+        set(target, key, value) {
+          ;(target as Record<string | symbol, unknown>)[key] = value
+          return true
+        },
+      },
+    )
+    const scope = { context: ctx, horizontalPixelRatio: 1, verticalPixelRatio: 1 }
+    const target = { useBitmapCoordinateSpace: (f: (s: typeof scope) => void) => f(scope) }
+    const renderer = primitive.paneViews()[0].renderer()
+    renderer?.draw(target as unknown as Parameters<NonNullable<typeof renderer>['draw']>[0])
+
+    // Two anchor handles on the selected trendline, filled with the light background and
+    // stroked in its (blue) line colour, which stays visible on white.
+    const handles = arcs.filter((a) => a.fill === '#ffffff')
+    expect(handles).toHaveLength(2)
+    for (const h of handles) expect(h.stroke).toBe(DEFAULT_DRAWING_STYLE.color)
+  })
 })

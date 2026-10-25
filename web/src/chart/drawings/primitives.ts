@@ -14,7 +14,7 @@ import type {
   SeriesAttachedParameter,
   Time,
 } from 'lightweight-charts'
-import { drawingColors, fontFamily } from '../theme'
+import { colors, fontFamily, handleColorsFor, handleStroke, type HandleColors } from '../theme'
 import type { CursorStyle, DrawingsView } from './controller'
 import {
   HANDLE_RADIUS,
@@ -64,6 +64,8 @@ const FIB_FILL_ALPHAS = [0.06, 0.11] as const
 class DrawingsRenderer implements IPrimitivePaneRenderer {
   private items: readonly RenderItem[] = []
   private width = 0
+  /** Selection handle colours; follow the chart theme (see DrawingsPrimitive.setHandleColors). */
+  handles: HandleColors = handleColorsFor(colors)
 
   set(items: readonly RenderItem[], width: number): void {
     this.items = items
@@ -75,7 +77,8 @@ class DrawingsRenderer implements IPrimitivePaneRenderer {
       const ctx = scope.context
       ctx.save()
       for (const item of this.items) drawItem(scope, item, this.width)
-      for (const item of this.items) if (item.selected) drawHandles(scope, item, this.width)
+      for (const item of this.items)
+        if (item.selected) drawHandles(scope, item, this.width, this.handles)
       ctx.restore()
     })
   }
@@ -141,6 +144,12 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
 
   detached(): void {
     this.requestUpdate = null
+  }
+
+  /** Theme change: handle fill/ring colours, then a redraw. */
+  setHandleColors(colors: HandleColors): void {
+    this.paneView.renderer_.handles = colors
+    this.requestUpdate?.()
   }
 
   /** Redraw (interaction or drawings changed). */
@@ -334,14 +343,19 @@ function drawFib(scope: BitmapScope, item: RenderItem): void {
   }
 }
 
-function drawHandles(scope: BitmapScope, item: RenderItem, paneWidth: number): void {
+function drawHandles(
+  scope: BitmapScope,
+  item: RenderItem,
+  paneWidth: number,
+  handles: HandleColors,
+): void {
   const ctx = scope.context
   const hr = scope.horizontalPixelRatio
   const vr = scope.verticalPixelRatio
   ctx.setLineDash([])
   ctx.lineWidth = Math.max(1, Math.round(1.5 * hr))
-  ctx.strokeStyle = item.drawing.style.color
-  ctx.fillStyle = drawingColors.handleFill
+  ctx.strokeStyle = handleStroke(item.drawing.style.color, handles)
+  ctx.fillStyle = handles.fill
   for (const h of handlePoints(item.shape, paneWidth)) {
     ctx.beginPath()
     ctx.arc(h.x * hr, h.y * vr, HANDLE_RADIUS * hr, 0, Math.PI * 2)

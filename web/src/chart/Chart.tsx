@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type CSSProperties,
+  type ReactNode,
+} from 'react'
 import {
   AreaSeries,
   CandlestickSeries,
@@ -16,10 +24,10 @@ import {
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts'
-import { formatUtc } from '../components/quote'
 import '../components/Backtest.css'
 import { getIndicatorDef } from '../indicators/registry'
 import { chartAcceptsEscape, chartOwnsKeyTarget } from '../state/chartTools'
+import { chartKey } from '../state/shortcuts'
 import type { IndicatorConfig } from '../state/indicators'
 import type { Candle, ChartType, Interval } from '../types'
 import { mainSeriesData, mainSeriesTail, realPriceLine, usesRealPriceLine } from './chartTypes.ts'
@@ -35,22 +43,25 @@ import {
 import { IndicatorSeriesManager } from './indicatorSeries'
 import { buildLegend, selectLegendIndex, type LegendValues } from './legend.ts'
 import {
-  areaOptions,
-  candlestickOptions,
-  chartOptions,
-  colors,
+  DEFAULT_APPEARANCE,
+  alertLineOptions,
+  chartOptionsFor,
+  chartThemeOptionsFor,
   fallbackFontFamily,
   fontFamily,
-  heikinAshiOptions,
-  hollowCandlestickOptions,
-  lineOptions,
-  alertLineOptions,
+  handleColorsFor,
+  mainSeriesOptionsFor,
+  paletteFor,
   realPriceLineOptions,
   volumeOptions,
   volumeScaleMargins,
   watermarkOptions,
   webFonts,
+  type ChartAppearance,
+  type ChartPalette,
 } from './theme'
+import { composeScreenshot } from './screenshot'
+import { formatDateTime, timezoneLabel } from './timeFormat'
 import {
   isNearLeftEdge,
   isExpectedRange,
@@ -76,7 +87,19 @@ import type {
   ToolMode,
 } from './drawings/types'
 
-const volumePalette = { up: colors.volumeUp, down: colors.volumeDown }
+/** Volume bar colours of a palette. */
+function volumePaletteOf(p: ChartPalette) {
+  return { up: p.volumeUp, down: p.volumeDown }
+}
+
+/** What the app can ask of a mounted chart (see the `onApi` prop). */
+export interface ChartApi {
+  /**
+   * The chart as one canvas: a header strip (symbol · interval · venue, last bar, capture time)
+   * above `chart.takeScreenshot()` with drawings and primitives, without the crosshair.
+   */
+  screenshot(): HTMLCanvasElement
+}
 
 type MainSeries = ISeriesApi<'Candlestick' | 'Line' | 'Area'>
 
@@ -97,25 +120,35 @@ function paneIndicatorKey(indicators: readonly IndicatorConfig[]): string {
     .join('|')
 }
 
-function addMainSeries(chart: IChartApi, type: ChartType): MainSeries {
+function addMainSeries(chart: IChartApi, type: ChartType, palette: ChartPalette): MainSeries {
   switch (type) {
     case 'candles':
-      return chart.addSeries(CandlestickSeries, candlestickOptions)
     case 'hollow':
-      return chart.addSeries(CandlestickSeries, hollowCandlestickOptions)
     case 'heikin-ashi':
-      return chart.addSeries(CandlestickSeries, heikinAshiOptions)
+      return chart.addSeries(CandlestickSeries, mainSeriesOptionsFor(type, palette))
     case 'line':
-      return chart.addSeries(LineSeries, lineOptions)
+      return chart.addSeries(LineSeries, mainSeriesOptionsFor(type, palette))
     case 'area':
-      return chart.addSeries(AreaSeries, areaOptions)
+      return chart.addSeries(AreaSeries, mainSeriesOptionsFor(type, palette))
   }
 }
 
+/** Recolour the main series in place (theme / candle colour change). */
+function applyMainSeriesOptions(series: MainSeries, type: ChartType, palette: ChartPalette): void {
+  // The series kind always matches `type` (it was created for it), so the options fit.
+  ;(series as ISeriesApi<'Candlestick'>).applyOptions(
+    mainSeriesOptionsFor(type, palette) as Parameters<ISeriesApi<'Candlestick'>['applyOptions']>[0],
+  )
+}
+
 /** Move a real-close price line to the last candle (Heikin-Ashi mode only). */
-function syncRealPriceLine(line: IPriceLine | null, candles: readonly Candle[]): void {
+function syncRealPriceLine(
+  line: IPriceLine | null,
+  candles: readonly Candle[],
+  palette: ChartPalette,
+): void {
   if (!line) return
-  const { price, color, visible } = realPriceLine(candles)
+  const { price, color, visible } = realPriceLine(candles, palette)
   line.applyOptions({
     price,
     color,
@@ -203,6 +236,19 @@ interface ChartProps {
    * clear the request so a remounted chart does not apply it again.
    */
   onFocusDone?: (key: number, result: FocusPlan['kind']) => void
+  /**
+   * Theme, candle colours and display time zone (default DEFAULT_APPEARANCE: dark, UTC).
+   * Changes recolour the chart in place with applyOptions; the chart, series, drawings and
+   * indicators are not recreated, and the user's scroll/zoom is kept.
+   */
+  appearance?: ChartAppearance
+  /** Called with the chart's API once the chart exists, and with null on cleanup. */
+  onApi?: (api: ChartApi | null) => void
+  /**
+   * True while a dialog, menu or the Research view has the keyboard: the chart ignores
+   * Escape/Delete/Backspace, even when focus has fallen to <body> under the modal.
+   */
+  keyboardBlocked?: boolean
 }
 
 const NO_INDICATORS: readonly IndicatorConfig[] = []
@@ -263,7 +309,19 @@ export function Chart({
   backtest = null,
   focusRange = null,
   onFocusDone,
+  appearance = DEFAULT_APPEARANCE,
+  onApi,
+  keyboardBlocked = false,
 }: ChartProps) {
+  // Callers may pass a fresh object per render; only the fields matter.
+  const { theme, upColor, downColor, timezone } = appearance
+  const palette = useMemo(
+    () => paletteFor({ theme, upColor, downColor, timezone }),
+    [theme, upColor, downColor, timezone],
+  )
+  /** Latest palette / appearance for effects that create series or read colours later. */
+  const paletteRef = useRef(palette)
+  const appearanceRef = useRef<ChartAppearance>({ theme, upColor, downColor, timezone })
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const mainSeriesRef = useRef<MainSeries | null>(null)
@@ -308,6 +366,8 @@ export function Chart({
   const paneKeyRef = useRef<string | null>(null)
   const onContextMenuRef = useRef(onContextMenu)
   const onFocusDoneRef = useRef(onFocusDone)
+  /** Read by the window keydown listener, so a change does not re-bind it. */
+  const keyboardBlockedRef = useRef(keyboardBlocked)
 
   // Latest drawing callbacks, without re-binding DOM listeners.
   useEffect(() => {
@@ -340,18 +400,21 @@ export function Chart({
   useEffect(() => {
     onFocusDoneRef.current = onFocusDone
   }, [onFocusDone])
+  useEffect(() => {
+    keyboardBlockedRef.current = keyboardBlocked
+  }, [keyboardBlocked])
 
   // Create the chart once per mount. StrictMode mounts twice; cleanup removes the first chart.
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
-    const chart = createChart(container, chartOptions)
+    const chart = createChart(container, chartOptionsFor(appearanceRef.current))
     // Volume first so the main series (added by the chart-type effect) draws over it.
     const volumeSeries = chart.addSeries(HistogramSeries, volumeOptions)
     volumeSeries.priceScale().applyOptions({ scaleMargins: volumeScaleMargins })
     watermarkRef.current = createTextWatermark(
       chart.panes()[0],
-      watermarkOptions('', fallbackFontFamily),
+      watermarkOptions('', fallbackFontFamily, paletteRef.current),
     )
 
     // LWC re-measures text only when the font string changes, so the chart starts on system
@@ -424,7 +487,7 @@ export function Chart({
     const chart = chartRef.current
     if (!chart) return
     chartTypeRef.current = chartType
-    const series = addMainSeries(chart, chartType)
+    const series = addMainSeries(chart, chartType, paletteRef.current)
     // Right above volume (order 0), below indicator overlays, as on TradingView.
     series.setSeriesOrder(1)
     mainSeriesRef.current = series
@@ -435,11 +498,12 @@ export function Chart({
       const { points, ha } = mainSeriesData(chartType, applied)
       series.setData(points)
       haRef.current = ha
-      syncRealPriceLine(realLineRef.current, applied)
+      syncRealPriceLine(realLineRef.current, applied, paletteRef.current)
     }
     // Drawings and alert lines live on the main series, so they move to the new one.
     coords.setSeries(series)
     const primitive = new DrawingsPrimitive(drawingController, coords)
+    primitive.setHandleColors(handleColorsFor(paletteRef.current))
     series.attachPrimitive(primitive)
     drawingsPrimitiveRef.current = primitive
     alertLinesManager.attach(series)
@@ -462,9 +526,13 @@ export function Chart({
   // Faint "BTCUSDT, 1h" behind the candles, as on TradingView.
   useEffect(() => {
     watermarkRef.current?.applyOptions(
-      watermarkOptions(`${symbol}, ${interval}`, fontsReady ? fontFamily : fallbackFontFamily),
+      watermarkOptions(
+        `${symbol}, ${interval}`,
+        fontsReady ? fontFamily : fallbackFontFamily,
+        palette,
+      ),
     )
-  }, [symbol, interval, fontsReady])
+  }, [symbol, interval, fontsReady, palette])
 
   // Bar length for extrapolating drawing anchors past either end of the data.
   useEffect(() => {
@@ -487,7 +555,7 @@ export function Chart({
       const range = plan.kind === 'prepend' ? timeScale.getVisibleLogicalRange() : null
       const { points, ha } = mainSeriesData(type, candles)
       mainSeries.setData(points)
-      volumeSeries.setData(toVolumeData(candles, volumePalette))
+      volumeSeries.setData(toVolumeData(candles, volumePaletteOf(paletteRef.current)))
       haRef.current = ha
       indicatorManager.applyPlan(plan, candles)
       if (plan.kind === 'prepend' && range) {
@@ -499,18 +567,72 @@ export function Chart({
       const { points, ha } = mainSeriesTail(type, candles, plan.from, haRef.current)
       for (const point of points) mainSeries.update(point)
       for (let i = plan.from; i < candles.length; i++) {
-        volumeSeries.update(toVolumePoint(candles[i], volumePalette))
+        volumeSeries.update(toVolumePoint(candles[i], volumePaletteOf(paletteRef.current)))
       }
       haRef.current = ha
       indicatorManager.applyPlan(plan, candles)
     }
-    if (plan.kind !== 'none') syncRealPriceLine(realLineRef.current, candles)
+    if (plan.kind !== 'none') syncRealPriceLine(realLineRef.current, candles, paletteRef.current)
     appliedRef.current = candles
     // O(1): the index keeps a reference; drawings re-project on LWC's next redraw.
     coords.index.setBars(candles)
     // Cheap per tick; re-filters markers/equity only when the bar set changed.
     backtestOverlay.setBars(candles)
   }, [candles, indicatorManager, coords, backtestOverlay])
+
+  // Theme / candle colours / time zone. Everything is recoloured in place (applyOptions, one
+  // volume setData), so the chart, its series, drawings, indicators and the view all survive.
+  // Runs after the creation and data effects, so on mount it only re-applies the same values.
+  useEffect(() => {
+    paletteRef.current = palette
+    const next: ChartAppearance = { theme, upColor, downColor, timezone }
+    appearanceRef.current = next
+    const chart = chartRef.current
+    if (!chart) return
+    chart.applyOptions(chartThemeOptionsFor(next))
+    const series = mainSeriesRef.current
+    if (series) applyMainSeriesOptions(series, chartTypeRef.current, palette)
+    const applied = appliedRef.current
+    if (applied) {
+      volumeSeriesRef.current?.setData(toVolumeData(applied, volumePaletteOf(palette)))
+      syncRealPriceLine(realLineRef.current, applied, palette)
+    }
+    drawingsPrimitiveRef.current?.setHandleColors(handleColorsFor(palette))
+    indicatorManager.setPalette(palette)
+  }, [palette, theme, upColor, downColor, timezone, indicatorManager])
+
+  // Latest header values for screenshots, read when the user exports (not per render).
+  const shotRef = useRef({ symbol, interval, source, candles })
+  useEffect(() => {
+    shotRef.current = { symbol, interval, source, candles }
+  }, [symbol, interval, source, candles])
+  const [api] = useState<ChartApi>(() => ({
+    screenshot() {
+      const chart = chartRef.current
+      if (!chart) throw new Error('The chart is not ready yet')
+      // addTopLayer = true keeps drawings and other primitives; the crosshair is left out.
+      const canvas = chart.takeScreenshot(true, false)
+      const { symbol: sym, interval: iv, source: src, candles: bars } = shotRef.current
+      const tz = appearanceRef.current.timezone
+      const last = buildLegend(bars, bars.length - 1)
+      const nowSec = Date.now() / 1000
+      const captured = `${formatDateTime(nowSec, tz)} ${timezoneLabel(tz, nowSec)}`
+      const subtitle = last
+        ? `O ${last.open}  H ${last.high}  L ${last.low}  C ${last.close}  ${last.change}  ·  Vol ${last.volume}  ·  ${captured}`
+        : captured
+      return composeScreenshot(canvas, {
+        title: `${sym} · ${iv} · ${src}`,
+        subtitle,
+        palette: paletteRef.current,
+      })
+    },
+  }))
+  // Declared after the creation effect, so the chart exists when the API is handed out.
+  useEffect(() => {
+    if (!onApi || !chartRef.current) return
+    onApi(api)
+    return () => onApi(null)
+  }, [onApi, api])
 
   // A page landed (the raw start moved back). On a pair that rarely trades it adds few or no
   // plotted bars, so the view can still sit at the left edge: ask for the next page, at most
@@ -641,10 +763,10 @@ export function Chart({
       handler({ clientX: e.clientX, clientY: e.clientY, ...hit })
     }
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return
-      if (e.key !== 'Escape' && e.key !== 'Delete' && e.key !== 'Backspace') return
+      const key = chartKey(e, keyboardBlockedRef.current)
+      if (key === null) return
       const accepted =
-        e.key === 'Escape'
+        key === 'Escape'
           ? chartAcceptsEscape(e.target)
           : chartOwnsKeyTarget(e.target, document.body, container)
       if (!accepted) return
@@ -777,9 +899,15 @@ export function Chart({
   }
 
   return (
-    <div className="chart">
+    <div className="chart" style={candleColorVars(palette)}>
       <div ref={containerRef} className="chart__canvas" />
-      <Legend symbol={symbol} interval={interval} source={source} values={legend}>
+      <Legend
+        symbol={symbol}
+        interval={interval}
+        source={source}
+        values={legend}
+        timezone={timezone}
+      >
         <IndicatorLegendRows rows={indicatorRows.filter((r) => r.pane === 0)} {...legendActions} />
       </Legend>
       <PaneLegends
@@ -809,16 +937,23 @@ export function Chart({
   )
 }
 
+/** The legend (and indicator legends) colour changes with the user's candle colours. */
+function candleColorVars(p: ChartPalette): CSSProperties {
+  return { '--up': p.up, '--down': p.down } as CSSProperties
+}
+
 interface LegendProps {
   symbol: string
   interval: Interval
   source: string
   values: LegendValues | null
+  /** Display zone for the bar time ('UTC' | 'local' | IANA). */
+  timezone: string
   /** Overlay indicator rows, under the OHLC and volume rows. */
   children?: ReactNode
 }
 
-function Legend({ symbol, interval, source, values, children }: LegendProps) {
+function Legend({ symbol, interval, source, values, timezone, children }: LegendProps) {
   return (
     <div className="chart-legend" aria-live="off">
       <div className="chart-legend__row">
@@ -838,7 +973,9 @@ function Legend({ symbol, interval, source, values, children }: LegendProps) {
       {values && (
         <div className="chart-legend__row chart-legend__row--secondary">
           <Field label="Vol" value={values.volume} />
-          <span className="chart-legend__time">{formatUtc(values.time)} UTC</span>
+          <span className="chart-legend__time">
+            {formatDateTime(values.time, timezone)} {timezoneLabel(timezone, values.time)}
+          </span>
         </div>
       )}
       {children}

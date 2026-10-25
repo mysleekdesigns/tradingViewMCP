@@ -1,12 +1,23 @@
-/* Palette mirrors src/chart/theme.ts. */
+/*
+ * Theme tokens. Dark is the default (`:root`); `:root[data-theme='light']` overrides the colour
+ * tokens (applyThemeToDocument in state/settings.ts sets the attribute). Chart canvas colours
+ * mirror these in src/chart/theme.ts (paletteFor). Colour literals belong in these two blocks
+ * only; everything else uses the tokens.
+ */
 :root {
   color-scheme: dark;
   --bg: #131722;
   --chrome: #0f121a;
   --panel: #1e222d;
   --panel-hover: #2a2e39;
+  /* Pressed / hovered control on a panel (one step above --panel-hover). */
+  --panel-active: #363a45;
+  /* Raised fill on --bg / --chrome: hovers, count pills, code, skeleton bars. */
+  --fill: #1e222d;
   --border: #2a2e39;
   --border-soft: #1f2330;
+  /* Hovered/focused input borders. */
+  --border-strong: #363a45;
   --text: #d1d4dc;
   --text-muted: #787b86;
   --text-faint: #5d606b;
@@ -15,6 +26,32 @@
   --accent: #2962ff;
   --accent-hover: #1e53e5;
   --warn: #f7a600;
+  /* Readable text versions of the accent / status colours on --bg and --panel. */
+  --accent-text: #5b8aff;
+  --accent-text-soft: #8fb0ff;
+  --up-text: #3ec9ad;
+  --down-text: #ff6b77;
+  --warn-text: #f5c35a;
+  --calm: #8fa3bf;
+  --calm-text: #c3cfdf;
+  /* Text and marks on solid accent / up / down fills (buttons, badges). */
+  --on-accent: #ffffff;
+  --on-accent-muted: rgb(255 255 255 / 70%);
+  --on-accent-faint: rgb(255 255 255 / 35%);
+  /* Mixed into a fill to darken it on hover (color-mix). */
+  --shade: #000000;
+  /* Modal backdrop and elevation shadows. */
+  --overlay: rgb(8 10 15 / 62%);
+  --shadow-strong: rgb(0 0 0 / 55%);
+  --shadow: rgb(0 0 0 / 45%);
+  --shadow-soft: rgb(0 0 0 / 28%);
+  /* Hairline around colour swatches so dark/light swatches keep an edge. */
+  --swatch-ring: rgb(255 255 255 / 14%);
+  /* Translucent chart-legend chip behind hovered indicator rows. */
+  --legend-bg: color-mix(in srgb, var(--bg) 82%, transparent);
+  /* Soft halos in the candle colours (follow a custom --up / --down). */
+  --tint-up: color-mix(in srgb, var(--up) 18%, transparent);
+  --tint-down: color-mix(in srgb, var(--down) 18%, transparent);
   --font-ui: 'IBM Plex Sans', -apple-system, 'Segoe UI', sans-serif;
   --font-num: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
   --topbar-h: 48px;
@@ -27,6 +64,44 @@
   background: var(--bg);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --chrome: #f0f3fa;
+  --panel: #ffffff;
+  --panel-hover: #e6e9f0;
+  --panel-active: #d8dce5;
+  --fill: #e6e9f0;
+  --border: #e0e3eb;
+  --border-soft: #ebedf3;
+  --border-strong: #c3c6ce;
+  --text: #131722;
+  --text-muted: #6a6d78;
+  --text-faint: #9598a1;
+  --up: #089981;
+  --down: #f23645;
+  --accent: #2962ff;
+  --accent-hover: #1e53e5;
+  --warn: #e39500;
+  --accent-text: #2962ff;
+  --accent-text-soft: #1e53e5;
+  --up-text: #067d6a;
+  --down-text: #d61f30;
+  --warn-text: #9a6200;
+  --calm: #5b6b82;
+  --calm-text: #3d4a5c;
+  --on-accent: #ffffff;
+  --on-accent-muted: rgb(255 255 255 / 85%);
+  --on-accent-faint: rgb(255 255 255 / 45%);
+  --shade: #000000;
+  --overlay: rgb(19 23 34 / 32%);
+  --shadow-strong: rgb(19 23 34 / 18%);
+  --shadow: rgb(19 23 34 / 14%);
+  --shadow-soft: rgb(19 23 34 / 10%);
+  --swatch-ring: rgb(19 23 34 / 16%);
+  --legend-bg: color-mix(in srgb, var(--bg) 88%, transparent);
 }
 
 html,
@@ -166,7 +241,7 @@ body,
 }
 
 .symbol-btn:hover {
-  background: var(--panel);
+  background: var(--fill);
 }
 
 .symbol-btn:focus-visible {
@@ -221,13 +296,13 @@ body,
 }
 
 .tf-toolbar__btn:hover {
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text);
 }
 
 .tf-toolbar__btn[aria-pressed='true'] {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: #5b8aff;
+  color: var(--accent-text);
   font-weight: 600;
 }
 
@@ -261,7 +336,7 @@ body,
 
 .ct-menu__button:hover,
 .ct-menu__button[aria-expanded='true'] {
-  background: var(--panel);
+  background: var(--fill);
 }
 
 .ct-menu__caret {
@@ -279,7 +354,7 @@ body,
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--panel);
-  box-shadow: 0 10px 28px rgb(0 0 0 / 45%);
+  box-shadow: 0 10px 28px var(--shadow);
   list-style: none;
   outline: none;
 }
@@ -330,7 +405,7 @@ body,
 }
 
 .icon-btn:hover {
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text);
 }
 
@@ -345,6 +420,14 @@ body,
 
 .topbar__spacer {
   flex: 1;
+}
+
+/* Screenshot, theme, shortcuts, settings: a tight cluster of icon buttons at the right. */
+.topbar__tools {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
 }
 
 .quote {
@@ -388,7 +471,7 @@ body,
   width: 160px;
   height: 14px;
   border-radius: 3px;
-  background: var(--panel);
+  background: var(--fill);
   animation: pulse 1.4s ease-in-out infinite;
 }
 
@@ -405,7 +488,7 @@ body,
   height: 6px;
   border-radius: 50%;
   background: var(--up);
-  box-shadow: 0 0 0 3px rgb(8 153 129 / 18%);
+  box-shadow: 0 0 0 3px var(--tint-up);
 }
 
 /* ---------- Buttons ---------- */
@@ -445,12 +528,12 @@ body,
 }
 
 .btn--ghost:hover:not(:disabled, [aria-disabled='true']) {
-  background: var(--panel);
+  background: var(--fill);
 }
 
 .btn--primary {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .btn--primary:hover:not(:disabled) {
@@ -571,7 +654,7 @@ body,
 .skeleton-chart__bar {
   flex: 1;
   border-radius: 2px;
-  background: var(--panel);
+  background: var(--fill);
   animation: pulse 1.4s ease-in-out infinite;
 }
 
@@ -666,7 +749,7 @@ body,
   background: color-mix(in srgb, var(--panel) 94%, transparent);
   color: var(--text);
   font-size: 12px;
-  box-shadow: 0 2px 8px rgb(0 0 0 / 28%);
+  box-shadow: 0 2px 8px var(--shadow-soft);
 }
 
 .history-chip__text {
@@ -716,7 +799,7 @@ body,
   align-items: flex-start;
   justify-content: center;
   padding: 9vh 16px 16px;
-  background: rgb(8 10 15 / 62%);
+  background: var(--overlay);
   animation: fade-in 120ms ease-out;
 }
 
@@ -728,7 +811,7 @@ body,
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel);
-  box-shadow: 0 24px 64px rgb(0 0 0 / 55%);
+  box-shadow: 0 24px 64px var(--shadow-strong);
   overflow: hidden;
   animation: dialog-in 140ms ease-out;
 }
@@ -843,7 +926,7 @@ body,
 }
 
 .symbol-row--current .symbol-row__symbol {
-  color: #5b8aff;
+  color: var(--accent-text);
 }
 
 .symbol-row__symbol {
@@ -902,7 +985,7 @@ body,
 }
 
 .star-btn:hover {
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text);
 }
 
@@ -1103,7 +1186,7 @@ kbd {
   border-radius: 4px;
   background: var(--panel);
   color: var(--text);
-  box-shadow: 0 6px 24px rgb(0 0 0 / 45%);
+  box-shadow: 0 6px 24px var(--shadow);
   transform: translateX(-50%);
   animation: app-notice-in 160ms ease-out;
 }
@@ -1155,6 +1238,24 @@ kbd {
 }
 
 /* ---------- Narrow windows: keep the essentials ---------- */
+
+/* Less-used labels go first; the buttons keep their icon and tooltip. */
+@media (max-width: 1440px) {
+  .ind-btn--secondary .ind-btn__label,
+  .btn--ghost span {
+    display: none;
+  }
+
+  .ind-btn--secondary {
+    padding: 0 6px;
+  }
+}
+
+@media (max-width: 1366px) {
+  .source-badge__transport {
+    display: none;
+  }
+}
 
 @media (max-width: 1280px) {
   .topbar__desc,

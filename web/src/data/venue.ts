@@ -17,6 +17,13 @@ export const BINANCE_WS = 'wss://data-stream.binance.vision'
 export const BINANCE_US_REST = 'https://api.binance.us'
 export const BINANCE_US_WS = 'wss://stream.binance.us:9443'
 
+/**
+ * Coinbase Exchange public market data (no API keys): REST candles/products/stats and the
+ * public `matches` / `heartbeat` / `ticker_batch` WebSocket channels. Used by CoinbaseProvider.
+ */
+export const COINBASE_REST = 'https://api.exchange.coinbase.com'
+export const COINBASE_WS = 'wss://ws-feed.exchange.coinbase.com'
+
 /** The venue the chart's data comes from, as reported by the provider. */
 export interface VenueInfo {
   /** `binance` (Binance global spot) or `binance-us`; other ids are shown by name only. */
@@ -26,6 +33,9 @@ export interface VenueInfo {
 
 /** The direct (no-server) provider's default venue. */
 export const DIRECT_VENUE: VenueInfo = { id: 'binance', name: VENUE_NAME }
+
+/** Coinbase Exchange, reported by CoinbaseProvider.getVenue. */
+export const COINBASE_VENUE: VenueInfo = { id: 'coinbase', name: 'Coinbase' }
 
 /** The venue of the lab's data.binance.vision archive (Binance global spot). */
 export const ARCHIVE_VENUE_ID = 'binance'

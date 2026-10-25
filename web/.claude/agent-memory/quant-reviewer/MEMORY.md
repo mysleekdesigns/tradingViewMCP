@@ -1,0 +1,1 @@
+- [Web data honesty conventions](web-data-honesty-conventions.md) — Coinbase live-close/read-back rules, seasonals t-band screen + caption MC, venue gating (Phase 9 w1, rounds 1-4)

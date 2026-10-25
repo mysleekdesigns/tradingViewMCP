@@ -23,7 +23,7 @@
 
 .ind-btn:hover,
 .ind-btn[aria-expanded='true'] {
-  background: var(--panel);
+  background: var(--fill);
 }
 
 .ind-btn:focus-visible {
@@ -58,7 +58,7 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel);
-  box-shadow: 0 24px 64px rgb(0 0 0 / 55%);
+  box-shadow: 0 24px 64px var(--shadow-strong);
   overflow: hidden;
   animation: dialog-in 140ms ease-out;
 }
@@ -269,7 +269,7 @@
   padding: 1px 6px;
   border-radius: 9px;
   background: color-mix(in srgb, var(--accent) 18%, transparent);
-  color: #5b8aff;
+  color: var(--accent-text);
   font-family: var(--font-num);
   font-size: 11px;
   font-weight: 600;
@@ -392,7 +392,7 @@
   height: 14px;
   border-radius: 50%;
   background: var(--down);
-  color: #fff;
+  color: var(--on-accent);
   font-size: 10px;
   font-weight: 700;
 }
@@ -469,7 +469,7 @@
 }
 
 .ind-input:hover {
-  border-color: #363a45;
+  border-color: var(--border-strong);
 }
 
 .ind-input:focus {

@@ -119,6 +119,12 @@ describe('price line', () => {
     expect(realPriceLine(doji).color).toBe(colors.up)
   })
 
+  it('uses the given palette for custom candle colours', () => {
+    const palette = { up: '#2962ff', down: '#ff9800' }
+    expect(realPriceLine(candles, palette).color).toBe('#ff9800')
+    expect(realPriceLine(candles.slice(0, 2), palette).color).toBe('#2962ff')
+  })
+
   it('is hidden when there are no candles', () => {
     expect(realPriceLine([]).visible).toBe(false)
   })

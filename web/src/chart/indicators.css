@@ -30,7 +30,7 @@
 .ind-legend__row:hover,
 .ind-legend__row:focus-within {
   border-color: var(--border);
-  background: rgba(19, 23, 34, 0.82);
+  background: var(--legend-bg);
 }
 
 .ind-legend__title {

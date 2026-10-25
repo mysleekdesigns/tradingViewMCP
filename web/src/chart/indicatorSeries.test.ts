@@ -245,7 +245,8 @@ class FakeSeries {
   }
   createPriceLine(o: unknown) {
     this.priceLines.push(o)
-    return o
+    // An IPriceLine handle: applyOptions merges into the recorded options.
+    return { applyOptions: (patch: object) => Object.assign(o as object, patch) }
   }
   count(method: string) {
     return this.calls.filter((c) => c.method === method).length
@@ -524,5 +525,27 @@ describe('IndicatorSeriesManager', () => {
     const s = chart.all()[0]
     const data = s.calls.filter((c) => c.method === 'setData').at(-1)?.arg as unknown[]
     expect(data).toHaveLength(candles.length - 19)
+  })
+
+  it('setPalette recolours marker borders and guides in place, and new series use it', () => {
+    const { chart, manager } = setup([cfg('rsi', 'r'), cfg('ema', 'e')], candles)
+    const before = chart.all().length
+    manager.setPalette({ background: '#ffffff', mutedText: '#6a6d78' })
+    // Nothing is rebuilt.
+    expect(chart.all()).toHaveLength(before)
+    expect(chart.removed).toHaveLength(0)
+    const [rsiSeries] = chart.panesList[1].series
+    expect(rsiSeries.options.crosshairMarkerBorderColor).toBe('#ffffff')
+    expect(rsiSeries.priceLines).toEqual([
+      expect.objectContaining({ price: 70, color: '#6a6d78' }),
+      expect.objectContaining({ price: 30, color: '#6a6d78' }),
+    ])
+    // User line colours stay as chosen.
+    expect(rsiSeries.options.color).toBe('#7e57c2')
+    // A series added later picks up the palette.
+    manager.sync([cfg('rsi', 'r'), cfg('ema', 'e'), cfg('macd', 'm')], candles)
+    const macd = chart.panesList[2].series
+    expect(macd[0].priceLines[0]).toMatchObject({ price: 0, color: '#6a6d78' })
+    expect(macd[1].options.crosshairMarkerBorderColor).toBe('#ffffff')
   })
 })

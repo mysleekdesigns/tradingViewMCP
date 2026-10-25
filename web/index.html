@@ -6,6 +6,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0f121a" />
     <title>BTCUSDT · tradingView</title>
+    <script>
+      // Apply the saved theme before the stylesheet paints, so a light-theme user never sees a
+      // dark frame. main.tsx re-applies it from state/settings.ts (the source of truth).
+      // 'tv.settings.v1' is SETTINGS_KEY and the colours are THEME_CHROME_COLORS (the --chrome
+      // token of each theme), both in src/state/settings.ts: keep them in step.
+      try {
+        var t = JSON.parse(localStorage.getItem('tv.settings.v1') || '{}').theme
+        if (t === 'light' || t === 'dark') {
+          document.documentElement.dataset.theme = t
+          document.documentElement.style.colorScheme = t
+          var meta = document.querySelector('meta[name="theme-color"]')
+          if (meta) meta.setAttribute('content', t === 'light' ? '#f0f3fa' : '#0f121a')
+        }
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

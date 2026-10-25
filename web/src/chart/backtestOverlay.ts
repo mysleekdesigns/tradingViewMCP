@@ -45,6 +45,17 @@ export const backtestColors = {
   volTarget: '#f7a600',
 } as const
 
+/** Exit marker colours: a winning / losing trade (the app passes the user's candle colours). */
+export interface TradeColors {
+  win: string
+  loss: string
+}
+
+export const DEFAULT_TRADE_COLORS: Readonly<TradeColors> = Object.freeze({
+  win: backtestColors.win,
+  loss: backtestColors.loss,
+})
+
 export const EXIT_LABELS: Record<ExitReason, string> = {
   signal: 'Exit',
   stop_loss: 'SL',
@@ -65,7 +76,10 @@ export function signedPct(fraction: number, dp = 1): string {
  * has no exit marker). Exit colour = win/loss; exit text = reason and return, e.g. "SL −2.0%".
  * Sorted by time (LWC requires it); at equal times the exit comes first.
  */
-export function buildTradeMarkers(trades: readonly LabTrade[]): SeriesMarker<UTCTimestamp>[] {
+export function buildTradeMarkers(
+  trades: readonly LabTrade[],
+  colors: TradeColors = DEFAULT_TRADE_COLORS,
+): SeriesMarker<UTCTimestamp>[] {
   const out: { marker: SeriesMarker<UTCTimestamp>; order: number }[] = []
   trades.forEach((t, i) => {
     out.push({
@@ -87,7 +101,7 @@ export function buildTradeMarkers(trades: readonly LabTrade[]): SeriesMarker<UTC
         time: t.exit_time as UTCTimestamp,
         position: 'aboveBar',
         shape: 'arrowDown',
-        color: t.pnl >= 0 ? backtestColors.win : backtestColors.loss,
+        color: t.pnl >= 0 ? colors.win : colors.loss,
         text: `${EXIT_LABELS[t.exit_reason]} ${signedPct(t.return_pct)}`,
       },
     })
@@ -97,7 +111,10 @@ export function buildTradeMarkers(trades: readonly LabTrade[]): SeriesMarker<UTC
 }
 
 /** Markers + equity lines for a report. The vol-target line is drawn only when present. */
-export function buildChartData(report: BacktestReport): BacktestChartData {
+export function buildChartData(
+  report: BacktestReport,
+  colors: TradeColors = DEFAULT_TRADE_COLORS,
+): BacktestChartData {
   const equity: EquityLine[] = [
     {
       id: 'strategy',
@@ -128,7 +145,7 @@ export function buildChartData(report: BacktestReport): BacktestChartData {
   }
   return {
     key: `${report.run_id}#${report.trial_id}#${report.plan_hash}`,
-    markers: buildTradeMarkers(report.trades),
+    markers: buildTradeMarkers(report.trades, colors),
     equity,
   }
 }
@@ -258,6 +275,25 @@ export function planFocus(
   return { kind: 'apply', from: a, to: Math.max(Math.min(hi, last), a) }
 }
 
+/**
+ * Same report and the same equity lines (fields and point arrays by identity), so the drawn
+ * equity pane is still correct. buildChartData reuses the report's point arrays.
+ */
+export function sameEquity(a: BacktestChartData, b: BacktestChartData): boolean {
+  if (a.key !== b.key || a.equity.length !== b.equity.length) return false
+  return a.equity.every((l, i) => {
+    const m = b.equity[i]
+    return (
+      l.id === m.id &&
+      l.title === m.title &&
+      l.color === m.color &&
+      l.dashed === m.dashed &&
+      l.width === m.width &&
+      l.points === m.points
+    )
+  })
+}
+
 // ---------------------------------------------------------------------------------------------
 // Overlay manager
 // ---------------------------------------------------------------------------------------------
@@ -380,11 +416,20 @@ export class BacktestOverlay<S> {
     this.markerSig = ''
   }
 
-  /** null clears the markers and removes the equity pane. */
+  /**
+   * null clears the markers and removes the equity pane. New data for the same report whose
+   * equity lines are unchanged (e.g. only the trade-marker colours changed, while the user drags
+   * a colour picker) re-sets the markers only: the equity series stay as they are.
+   */
   setData(data: BacktestChartData | null): void {
     if (data === this.data) return
+    const prev = this.data
     this.data = data
     this.markerSig = ''
+    if (prev !== null && data !== null && sameEquity(prev, data)) {
+      this.applyMarkers()
+      return
+    }
     this.removeLines()
     this.recompute()
     this.applyMarkers()

@@ -1,0 +1,688 @@
+/* Seasonals dialog: monthly heat map + weekday table. Colours come only from theme variables
+   (index.css), so light/dark switching needs no changes here. */
+
+/* ---------- Shell ---------- */
+
+.seasonals__backdrop {
+  align-items: center;
+  padding: 16px;
+}
+
+.seasonals {
+  display: flex;
+  flex-direction: column;
+  width: min(1040px, 100%);
+  max-height: min(760px, 94vh);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-family: var(--font-ui);
+  box-shadow: 0 24px 64px color-mix(in srgb, var(--chrome) 70%, transparent);
+  overflow: hidden;
+  animation: dialog-in 140ms ease-out;
+}
+
+.seasonals:focus {
+  outline: none;
+}
+
+.seasonals__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 12px 10px 18px;
+}
+
+.seasonals__head-icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.seasonals__titles {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.seasonals__title {
+  margin: 0;
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seasonals__caption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.seasonals__sep {
+  color: var(--text-faint);
+}
+
+.seasonals__num {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Tabs bar ---------- */
+
+.seasonals__bar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.seasonals__tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.seasonals__tab {
+  position: relative;
+  height: 34px;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.seasonals__tab:hover {
+  color: var(--text);
+}
+
+.seasonals__tab[aria-selected='true'] {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.seasonals__tab[aria-selected='true']::after {
+  position: absolute;
+  right: 8px;
+  bottom: -1px;
+  left: 8px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
+  content: '';
+}
+
+.seasonals__tab:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.seasonals__meta {
+  padding-bottom: 9px;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seasonals__meta .seasonals__num {
+  color: var(--text-muted);
+}
+
+/* ---------- Body + states ---------- */
+
+.seasonals__body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 260px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.seasonals-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.seasonals-scroll:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.seasonals-state {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px 24px;
+  text-align: center;
+}
+
+.seasonals-state__icon {
+  color: var(--text-faint);
+}
+
+.seasonals-state__icon--error {
+  color: var(--down);
+}
+
+.seasonals-state__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.seasonals-state__message {
+  max-width: 420px;
+  margin: 0 0 6px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.seasonals-skeleton {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 3px;
+  width: min(560px, 90%);
+}
+
+.seasonals-skeleton__cell {
+  height: 20px;
+  border-radius: 2px;
+  background: var(--panel-hover);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+/* ---------- Monthly grid ---------- */
+
+.seasonals-grid {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+  table-layout: fixed;
+}
+
+.seasonals-grid th,
+.seasonals-grid td {
+  height: 28px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border-soft);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.seasonals-grid thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 30px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.seasonals-grid th[scope='row'] {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  width: 72px;
+  padding: 0 12px 0 18px;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-muted);
+  font-weight: 500;
+  text-align: left;
+}
+
+.seasonals-grid thead .seasonals-grid__corner {
+  left: 0;
+  z-index: 3;
+  width: 72px;
+  padding: 0 12px 0 18px;
+  border-right: 1px solid var(--border);
+  text-align: left;
+}
+
+.seasonals-cell {
+  position: relative;
+  color: var(--text);
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  transition: box-shadow 80ms ease;
+}
+
+.seasonals-grid tbody .seasonals-cell:hover,
+.seasonals-grid tfoot .seasonals-cell:hover {
+  box-shadow: inset 0 0 0 1px var(--text-muted);
+}
+
+.seasonals-grid tbody tr:hover th[scope='row'] {
+  color: var(--text);
+}
+
+/* Diverging heat tint; --heat is set inline from the capped magnitude. */
+.seasonals-cell.is-up {
+  background: color-mix(in srgb, var(--up) var(--heat, 0%), transparent);
+}
+
+.seasonals-cell.is-down {
+  background: color-mix(in srgb, var(--down) var(--heat, 0%), transparent);
+}
+
+.seasonals-cell--none {
+  background: transparent;
+}
+
+/* Incomplete months: muted and hatched, never tinted, excluded from the summary rows. */
+.seasonals-cell--incomplete,
+.seasonals-cell--incomplete.is-up,
+.seasonals-cell--incomplete.is-down {
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--text-faint) 16%, transparent) 0 2px,
+    transparent 2px 7px
+  );
+  color: var(--text-faint);
+  cursor: help;
+}
+
+/* Summary rows */
+.seasonals-grid tfoot th,
+.seasonals-grid tfoot td {
+  background-color: var(--panel);
+  height: 26px;
+}
+
+.seasonals-grid tfoot .seasonals-cell.is-up {
+  background: color-mix(in srgb, var(--up) var(--heat, 0%), var(--panel));
+}
+
+.seasonals-grid tfoot .seasonals-cell.is-down {
+  background: color-mix(in srgb, var(--down) var(--heat, 0%), var(--panel));
+}
+
+.seasonals-grid__stat--first th,
+.seasonals-grid__stat--first td {
+  border-top: 1px solid var(--border);
+}
+
+.seasonals-grid__stat th[scope='row'] {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: help;
+}
+
+.seasonals-grid tfoot tr:not(.seasonals-grid__stat--first) .is-up {
+  background: var(--panel);
+  color: var(--up);
+}
+
+.seasonals-grid tfoot tr:not(.seasonals-grid__stat--first) .is-down {
+  background: var(--panel);
+  color: var(--down);
+}
+
+.seasonals-grid__stat--n th,
+.seasonals-grid__stat--n td {
+  border-bottom: 0;
+}
+
+/* A mean inside its 95% t band around the all-month average, or a small sample: no tint,
+   muted, so noise does not read like a signal. */
+.seasonals-grid tfoot .seasonals-cell--noise {
+  background: var(--panel);
+  color: var(--text-muted);
+}
+
+.seasonals-grid tfoot .seasonals-cell--se {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.seasonals-n {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.seasonals-n--small {
+  color: var(--warn);
+}
+
+/* ---------- Weekday table ---------- */
+
+.seasonals-week {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.seasonals-week th,
+.seasonals-week td {
+  height: 36px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border-soft);
+  white-space: nowrap;
+}
+
+.seasonals-week thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 30px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-align: left;
+}
+
+.seasonals-week tbody th {
+  width: 96px;
+  padding-left: 18px;
+  color: var(--text);
+  font-weight: 600;
+  text-align: left;
+}
+
+.seasonals-week tbody tr:hover {
+  background: var(--panel-hover);
+}
+
+.seasonals-week .seasonals-week__num {
+  width: 96px;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.seasonals-week td.is-up {
+  color: var(--up);
+}
+
+.seasonals-week td.is-down {
+  color: var(--down);
+}
+
+.seasonals-week td.seasonals-week__num--noise {
+  color: var(--text-muted);
+}
+
+.seasonals-week .seasonals-week__num--se {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.seasonals-week__bar-head {
+  padding-right: 18px;
+}
+
+.seasonals-week__bar-head span {
+  display: block;
+  text-align: center;
+}
+
+.seasonals-week__bar-cell {
+  width: 40%;
+  padding-right: 18px;
+}
+
+.seasonals-bar {
+  position: relative;
+  display: block;
+  height: 14px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text-faint) 8%, transparent);
+}
+
+.seasonals-bar__band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-right: 1px solid var(--text-faint);
+  border-left: 1px solid var(--text-faint);
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--text-faint) 22%, transparent) 0 2px,
+    transparent 2px 5px
+  );
+}
+
+.seasonals-bar__axis {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  left: 50%;
+  width: 1px;
+  background: var(--border);
+}
+
+/* The pooled all-day mean that each band is centred on. */
+.seasonals-bar__ref {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 0;
+  border-left: 1px dashed var(--text-faint);
+}
+
+.seasonals-bar__fill {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+}
+
+/* is-up / is-down only place the bar on its side of zero (the raw mean). */
+.seasonals-bar__fill.is-up {
+  left: 50%;
+  border-radius: 0 2px 2px 0;
+}
+
+.seasonals-bar__fill.is-down {
+  right: 50%;
+  border-radius: 2px 0 0 2px;
+}
+
+/* The colour is the deviation from the all-day average: green above it, red below it. */
+.seasonals-bar__fill--above {
+  background: color-mix(in srgb, var(--up) 75%, transparent);
+}
+
+.seasonals-bar__fill--below {
+  background: color-mix(in srgb, var(--down) 75%, transparent);
+}
+
+/* Inside the 95% band (or a small sample): neutral grey, so only means that stand out from
+   the average carry colour. */
+.seasonals-bar__fill--noise {
+  background: color-mix(in srgb, var(--text-faint) 45%, transparent);
+}
+
+/* ---------- Footer ---------- */
+
+.seasonals__foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 9px 18px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.seasonals__notes {
+  display: flex;
+  flex: 1 1 360px;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.seasonals__note {
+  margin: 0;
+  padding-left: 19px;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.seasonals__disclaimer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.seasonals__disclaimer svg {
+  flex: none;
+  color: var(--warn);
+}
+
+.seasonals-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.seasonals-legend__scale {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.seasonals-legend__ramp {
+  width: 120px;
+  height: 8px;
+  border-radius: 2px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--down) 70%, transparent),
+    transparent 50%,
+    color-mix(in srgb, var(--up) 70%, transparent)
+  );
+  box-shadow: inset 0 0 0 1px var(--border-soft);
+}
+
+.seasonals-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+}
+
+.seasonals-legend__swatch {
+  width: 14px;
+  height: 10px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--text-faint) 30%, transparent) 0 2px,
+    transparent 2px 5px
+  );
+}
+
+.seasonals-legend__swatch--noise {
+  background: var(--panel);
+}
+
+.seasonals-legend__label {
+  color: var(--text-muted);
+}
+
+.seasonals-legend__pair {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.seasonals-legend__dot {
+  width: 7px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.seasonals-legend__dot--up {
+  background: color-mix(in srgb, var(--up) 60%, transparent);
+}
+
+.seasonals-legend__dot--down {
+  background: color-mix(in srgb, var(--down) 60%, transparent);
+}
+
+/* Shown above a table when no cell has enough data to be compared (nothing is tinted). */
+.seasonals-notice {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 18px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--panel);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.seasonals-notice svg {
+  flex: none;
+  color: var(--warn);
+}
+
+.seasonals-legend__band {
+  width: 22px;
+  height: 10px;
+  border-right: 1px solid var(--text-faint);
+  border-left: 1px solid var(--text-faint);
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--text-faint) 30%, transparent) 0 2px,
+    transparent 2px 5px
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .seasonals,
+  .seasonals-skeleton__cell {
+    animation: none;
+  }
+}

@@ -56,7 +56,7 @@
   border: 2px solid var(--chrome);
   border-radius: 8px;
   background: var(--down);
-  color: #fff;
+  color: var(--on-accent);
   font-family: var(--font-num);
   font-size: 9px;
   font-weight: 600;

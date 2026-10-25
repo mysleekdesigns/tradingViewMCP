@@ -1271,6 +1271,21 @@ describe('rollover without a closed tick on the previous bar', () => {
     expect(provider.requests).toHaveLength(2)
   })
 
+  it('a closed tick identical to the bar on screen keeps the array but still counts as closed', async () => {
+    const { provider, candles, snapshots } = await liveNow()
+    provider.tick(bar(2 * H, 150))
+    const before = candles()
+    const n = snapshots.length
+    // Same values, now final: applyLiveCandle returns the same array (no snapshot)...
+    provider.tick(bar(2 * H, 150), true)
+    expect(snapshots).toHaveLength(n)
+    expect(candles()).toBe(before)
+    // ...but the close was recorded, so the rollover needs no repair.
+    provider.tick(bar(3 * H, 160))
+    expect(provider.requests).toHaveLength(1)
+    expect(candles().map((c) => c.time)).toEqual([0, H, 2 * H, 3 * H])
+  })
+
   it('a late tick for an older bar neither fires nor hides a later missed close', async () => {
     const { provider } = await liveNow()
     provider.tick(bar(2 * H, 150), true)

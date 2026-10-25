@@ -118,7 +118,7 @@
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--panel);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 50%);
+  box-shadow: 0 12px 32px var(--shadow-strong);
   animation: dialog-in 120ms ease-out;
   user-select: text;
 }
@@ -156,11 +156,11 @@
 
 .draw-confirm__btn--danger {
   background: var(--down);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .draw-confirm__btn--danger:hover {
-  background: color-mix(in srgb, var(--down) 85%, #000);
+  background: color-mix(in srgb, var(--down) 85%, var(--shade));
 }
 
 /* ---------- Floating style bar (selected drawing) ---------- */
@@ -181,7 +181,7 @@
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--panel);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+  box-shadow: 0 8px 24px var(--shadow);
   color: var(--text);
   transform: translateX(-50%);
   animation: fade-in 120ms ease-out;
@@ -255,7 +255,7 @@
   width: 16px;
   height: 16px;
   border-radius: 3px;
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 14%);
+  box-shadow: inset 0 0 0 1px var(--swatch-ring);
 }
 
 .draw-stylebar__value {
@@ -285,7 +285,7 @@
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--panel);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 55%);
+  box-shadow: 0 12px 32px var(--shadow-strong);
   transform: translateX(-50%);
   animation: fade-in 100ms ease-out;
 }
@@ -342,7 +342,7 @@
   width: 18px;
   height: 18px;
   border-radius: 3px;
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 14%);
+  box-shadow: inset 0 0 0 1px var(--swatch-ring);
 }
 
 .draw-pop__list--grid .draw-pop__option--active {
@@ -410,7 +410,7 @@
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--panel);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 55%);
+  box-shadow: 0 12px 32px var(--shadow-strong);
   color: var(--text);
   outline: none;
   animation: fade-in 90ms ease-out;

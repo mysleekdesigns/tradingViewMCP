@@ -16,6 +16,7 @@ import {
   filterToBars,
   formatEquityAxis,
   planFocus,
+  sameEquity,
   signedPct,
   tradesOnChart,
   type BacktestChartData,
@@ -412,5 +413,61 @@ describe('BacktestOverlay on plotted bars (bars without trades left out)', () =>
     overlay.setBars(candles([100, 200, 400]))
     expect(created[0].markers.map((m) => m.time)).toEqual([100, 400])
     expect(overlay.markerCount()).toBe(2)
+  })
+})
+
+describe('BacktestOverlay: recolouring trade markers', () => {
+  it('re-sets only the markers when the colours change, keeping the equity series', () => {
+    const { overlay, chart, created } = setup()
+    const r = report()
+    overlay.setBars(candles([100, 200, 300, 400]))
+    overlay.setData(buildChartData(r, { win: '#089981', loss: '#f23645' }))
+    const lines = [...chart.lines]
+    const stretch = chart.panes[1].stretch
+    let removed = 0
+    let added = 0
+    const removeSeries = chart.removeSeries.bind(chart)
+    const addLine = chart.addLine.bind(chart)
+    chart.removeSeries = (l) => {
+      removed++
+      removeSeries(l)
+    }
+    chart.addLine = (o, p) => {
+      added++
+      return addLine(o, p)
+    }
+
+    // A colour-picker drag: many rebuilds of the same report with new colours.
+    for (const win of ['#111111', '#222222', '#2962ff']) {
+      overlay.setData(buildChartData(r, { win, loss: '#ff9800' }))
+    }
+
+    expect(removed).toBe(0)
+    expect(added).toBe(0)
+    expect(chart.lines).toEqual(lines)
+    expect(chart.lines.every((l, i) => l === lines[i])).toBe(true)
+    expect(chart.panes[1].stretch).toBe(stretch)
+    expect(created).toHaveLength(1)
+    const exit = created[0].markers.find((m) => m.shape === 'arrowDown')
+    expect(exit?.color).toBe('#2962ff') // the trade won (pnl 1)
+    expect(overlay.markerCount()).toBe(2)
+  })
+
+  it('still replaces the equity series for a different report', () => {
+    const { overlay, chart } = setup()
+    overlay.setBars(candles([100, 200, 300]))
+    overlay.setData(buildChartData(report()))
+    const first = chart.lines[0]
+    overlay.setData(buildChartData({ ...report(), run_id: 'other' }))
+    expect(chart.lines).toHaveLength(3)
+    expect(chart.lines[0]).not.toBe(first)
+  })
+
+  it('compares equity by report key and point arrays', () => {
+    const r = report()
+    const a = buildChartData(r)
+    expect(sameEquity(a, buildChartData(r, { win: '#000000', loss: '#ffffff' }))).toBe(true)
+    expect(sameEquity(a, buildChartData({ ...r, equity: [...r.equity] }))).toBe(false)
+    expect(sameEquity(a, buildChartData(report(false)))).toBe(false)
   })
 })

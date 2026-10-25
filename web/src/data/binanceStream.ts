@@ -87,12 +87,27 @@ export function backoffDelay(attempt: number, rand: () => number = Math.random):
   return Math.round(base / 2 + (base / 2) * r)
 }
 
+/**
+ * Handle on the socket that delivered a message (second `onMessage` argument). Callers that
+ * ignore it get the default behaviour. Calls after that socket was replaced are no-ops.
+ */
+export interface SocketControl {
+  /**
+   * Treat this socket as a failed attempt (e.g. the server rejected the subscription): close
+   * it, report 'reconnecting' (or 'offline' after repeated failures) and reconnect with
+   * backoff. The failure counts even though the socket delivered a message.
+   */
+  fail(): void
+  /** Send on this socket; false when it is no longer the current, open socket. */
+  send(data: string): boolean
+}
+
 export interface ReconnectingSocketOptions {
   WebSocketImpl: typeof WebSocket
   url: string
   staleTimeoutMs: number
   /** Raw `MessageEvent.data` of every message on the current socket. */
-  onMessage: (data: unknown) => void
+  onMessage: (data: unknown, control: SocketControl) => void
   onStatus?: (status: ConnectionStatus) => void
   /**
    * Close codes that mean "never going to work" (e.g. the local server's 1008 for a bad
@@ -107,6 +122,13 @@ export interface ReconnectingSocketOptions {
    * accepted and then closed before any message never reads 'live'.
    */
   liveOnFirstMessage?: boolean
+  /**
+   * Treat a stale timeout as a failure even on a socket that had opened: report
+   * 'reconnecting', back off, then 'live' again, so the consumer gap-fills. For feeds that
+   * send heartbeats far more often than `staleTimeoutMs` (Coinbase: 1/s), where silence is
+   * always a real stall, never an idle pair. Default false: an idle stale reconnects silently.
+   */
+  staleIsFailure?: boolean
 }
 
 /**
@@ -116,13 +138,15 @@ export interface ReconnectingSocketOptions {
  * (`connecting` -> `live` -> `reconnecting` / `offline`). After 5 consecutive failures the
  * status reads 'offline' while retries continue at the capped backoff. A stale timeout on
  * a socket that had opened (an idle stream) reconnects silently at attempt 0: status
- * stays 'live' and it is not counted as a failure. A close with one of `fatalCloseCodes` stops
+ * stays 'live' and it is not counted as a failure (unless `staleIsFailure`). `onMessage` gets a
+ * `SocketControl` to fail the socket or send on it. A close with one of `fatalCloseCodes` stops
  * for good: 'offline', then torn down. Returns an idempotent teardown; no callback runs after it.
  */
 export function openReconnectingSocket(opts: ReconnectingSocketOptions): () => void {
   const { WebSocketImpl: WS, url, staleTimeoutMs, onMessage, onStatus } = opts
   const fatalCodes: readonly number[] = opts.fatalCloseCodes ?? []
   const liveOnFirstMessage = opts.liveOnFirstMessage === true
+  const staleIsFailure = opts.staleIsFailure === true
 
   let disposed = false
   let ws: WebSocket | null = null
@@ -177,7 +201,8 @@ export function openReconnectingSocket(opts: ReconnectingSocketOptions): () => v
       staleTimer = undefined
       // A socket that opened and then went quiet is healthy but idle (illiquid pair):
       // reconnect promptly without counting it as a failure, so it never reads 'offline'.
-      drop(sock, openedSocket)
+      // With `staleIsFailure` silence is a stall: the normal failure path.
+      drop(sock, openedSocket && !staleIsFailure)
     }, staleTimeoutMs)
   }
 
@@ -234,6 +259,24 @@ export function openReconnectingSocket(opts: ReconnectingSocketOptions): () => v
     ws = sock
     receivedOnSocket = false
     openedSocket = false
+    const failuresBefore = failures
+    const control: SocketControl = {
+      fail: () => {
+        if (disposed || sock !== ws) return
+        // The first message reset the count; a rejected socket still escalates the backoff.
+        failures = Math.max(failures, failuresBefore)
+        drop(sock)
+      },
+      send: (data) => {
+        if (disposed || sock !== ws || sock.readyState !== WS_OPEN) return false
+        try {
+          sock.send(data)
+          return true
+        } catch {
+          return false
+        }
+      },
+    }
     sock.onopen = () => {
       if (disposed || sock !== ws) return
       openedSocket = true
@@ -249,7 +292,7 @@ export function openReconnectingSocket(opts: ReconnectingSocketOptions): () => v
         failures = 0
       }
       try {
-        onMessage(ev.data)
+        onMessage(ev.data, control)
       } finally {
         if (first && liveOnFirstMessage && sock === ws) emit('live')
       }

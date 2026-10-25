@@ -1,7 +1,7 @@
 import type { CandlestickData, LineData, UTCTimestamp } from 'lightweight-charts'
 import type { Candle, ChartType } from '../types'
 import { heikinAshi, heikinAshiFrom, type HeikinAshiBar } from './heikinAshi'
-import { colors } from './theme'
+import { colors, type ChartPalette } from './theme'
 import { toCandlestickPoint } from './seriesSync'
 
 /** Which Lightweight Charts series definition draws each chart type. */
@@ -90,13 +90,19 @@ export interface RealPriceLine {
   visible: boolean
 }
 
-/** Price line at the last real close, coloured by the last real bar's direction (doji = up). */
-export function realPriceLine(candles: readonly Candle[]): RealPriceLine {
+/**
+ * Price line at the last real close, coloured by the last real bar's direction (doji = up), in
+ * the palette's candle colours (dark defaults when omitted).
+ */
+export function realPriceLine(
+  candles: readonly Candle[],
+  palette: Pick<ChartPalette, 'up' | 'down'> = colors,
+): RealPriceLine {
   const last = candles[candles.length - 1]
-  if (!last) return { price: 0, color: colors.up, visible: false }
+  if (!last) return { price: 0, color: palette.up, visible: false }
   return {
     price: last.close,
-    color: last.close >= last.open ? colors.up : colors.down,
+    color: last.close >= last.open ? palette.up : palette.down,
     visible: true,
   }
 }

@@ -10,7 +10,7 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel);
-  box-shadow: 0 24px 64px rgb(0 0 0 / 55%);
+  box-shadow: 0 24px 64px var(--shadow-strong);
   overflow: hidden;
   animation: dialog-in 140ms ease-out;
 }
@@ -143,7 +143,7 @@
 }
 
 .alert-input:hover {
-  border-color: #363a45;
+  border-color: var(--border-strong);
 }
 
 .alert-input:focus {
@@ -217,7 +217,7 @@
 }
 
 .alert-price__last:hover {
-  border-color: #363a45;
+  border-color: var(--border-strong);
   background: var(--panel-hover);
   color: var(--text);
 }
@@ -371,7 +371,7 @@
 .alerts__count {
   padding: 1px 6px;
   border-radius: 3px;
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text-muted);
   font-family: var(--font-num);
   font-size: 10px;
@@ -467,7 +467,7 @@
   min-width: 14px;
   padding: 0 4px;
   border-radius: 7px;
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text-muted);
   font-family: var(--font-num);
   font-size: 10px;
@@ -508,7 +508,7 @@
   border: 0;
   border-radius: 3px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font: inherit;
   font-weight: 500;
   cursor: pointer;
@@ -586,7 +586,7 @@
 
 .alert-row:hover,
 .alert-row:focus-within {
-  background: var(--panel);
+  background: var(--fill);
 }
 
 .alert-row--current {
@@ -795,11 +795,11 @@
 .inline-confirm__btn--danger {
   border-color: transparent;
   background: var(--down);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .inline-confirm__btn--danger:hover {
-  background: color-mix(in srgb, var(--down) 85%, #000);
+  background: color-mix(in srgb, var(--down) 85%, var(--shade));
 }
 
 .inline-confirm__btn:focus-visible {
@@ -816,7 +816,7 @@
 }
 
 .alerts__event:hover {
-  background: var(--panel);
+  background: var(--fill);
 }
 
 .alerts__event-icon {
@@ -884,7 +884,7 @@
 }
 
 .alerts__text-btn:hover {
-  background: var(--panel);
+  background: var(--fill);
   color: var(--down);
 }
 
@@ -910,7 +910,7 @@
   height: 48px;
   margin-bottom: 4px;
   border-radius: 50%;
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text-muted);
 }
 
@@ -934,7 +934,7 @@
 .alerts__empty-text code {
   padding: 1px 4px;
   border-radius: 3px;
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text);
   font-family: var(--font-num);
   font-size: 11px;
@@ -961,7 +961,7 @@
 .alerts__skeleton-line {
   height: 9px;
   border-radius: 3px;
-  background: var(--panel);
+  background: var(--fill);
   animation: pulse 1.4s ease-in-out infinite;
 }
 
@@ -1006,7 +1006,7 @@
   border-left: 3px solid var(--warn);
   border-radius: 6px;
   background: var(--panel);
-  box-shadow: 0 14px 36px rgb(0 0 0 / 55%);
+  box-shadow: 0 14px 36px var(--shadow-strong);
   color: var(--text);
   overflow: hidden;
   pointer-events: auto;

@@ -60,6 +60,20 @@ describe('applyLiveCandle', () => {
     expect(applyLiveCandle(input, c(120))).toBe(input)
     expect(applyLiveCandle(input, c(0))).toBe(input)
   })
+
+  it('returns the same reference when the same-time bar already has identical fields', () => {
+    const input = frozen([c(60), c(120), c(180)])
+    // A fresh object with equal fields (a repeated read-back or a matching gap row).
+    expect(applyLiveCandle(input, { ...c(180) })).toBe(input)
+    expect(applyLiveCandle(input, { ...c(120) })).toBe(input)
+    // Any differing field still copies and replaces.
+    for (const field of ['open', 'high', 'low', 'close', 'volume'] as const) {
+      const changed = { ...c(120), [field]: 999 }
+      const out = applyLiveCandle(input, changed)
+      expect(out).not.toBe(input)
+      expect(out[1]).toBe(changed)
+    }
+  })
 })
 
 describe('mergeCandles', () => {

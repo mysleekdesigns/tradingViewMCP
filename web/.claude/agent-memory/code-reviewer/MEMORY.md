@@ -1,2 +1,3 @@
 - [Review watchlist](review-watchlist.md) — open risks after Phase 4 (O(n) ticks, indicator recolor/pane-height nits) + confirmed LWC/indicator conventions
+- [Phase 9 review notes](phase9-review-notes.md) — wave 1 rounds 1-4: gap hold (fixed), O(k*n) backfill, modal key nesting, conventions
 - [Server review notes](server-review-notes.md) — Phase 6 alerts engine/hub/notifier conventions + open risks (restart re-fire, status, webhook)

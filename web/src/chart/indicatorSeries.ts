@@ -25,6 +25,7 @@ import type { Candle } from '../types'
 import { formatPrice, formatVolume, selectLegendIndex } from './legend'
 import type { SeriesSyncPlan } from './seriesSync'
 import {
+  colors,
   guideLineOptions,
   histogramColors,
   indicatorHistogramBase,
@@ -32,7 +33,11 @@ import {
   indicatorPaneScaleMargins,
   indicatorPaneStretch,
   mainPaneStretch,
+  type ChartPalette,
 } from './theme'
+
+/** The theme colours indicator series use (their line colours are the user's and stay). */
+export type IndicatorPalette = Pick<ChartPalette, 'background' | 'mutedText'>
 
 type Defs = ReadonlyMap<IndicatorId, IndicatorDef>
 
@@ -341,6 +346,7 @@ export class IndicatorSeriesManager {
   private candles: readonly Candle[] | null = null
   private snapshot: IndicatorSnapshot = { version: 0, paneVersion: 0 }
   private readonly listeners = new Set<() => void>()
+  private palette: IndicatorPalette = colors
 
   constructor(defs: Defs = INDICATOR_BY_ID) {
     this.defs = defs
@@ -443,6 +449,27 @@ export class IndicatorSeriesManager {
     this.emit(diff.rebuildPanes || diff.remove.length > 0 || addedPane)
   }
 
+  /**
+   * Theme change: crosshair-marker borders and guide lines follow the palette; user-chosen line
+   * colours are untouched. Applies to existing series at once and to every series built later.
+   */
+  setPalette(palette: IndicatorPalette): void {
+    if (
+      palette.background === this.palette.background &&
+      palette.mutedText === this.palette.mutedText
+    )
+      return
+    this.palette = { background: palette.background, mutedText: palette.mutedText }
+    if (!this.chart) return
+    for (const entry of this.entries.values()) {
+      for (const { line, series } of entry.slots) {
+        if (line.kind === 'line')
+          series.applyOptions({ crosshairMarkerBorderColor: palette.background })
+      }
+      for (const guide of entry.guides) guide.applyOptions({ color: palette.mutedText })
+    }
+  }
+
   /** Apply the main series' sync plan to every indicator. Live ticks only call series.update(). */
   applyPlan(plan: SeriesSyncPlan, candles: readonly Candle[]): void {
     if (!this.chart) return
@@ -537,6 +564,7 @@ export class IndicatorSeriesManager {
               LineSeries,
               {
                 ...indicatorLineBase,
+                crosshairMarkerBorderColor: this.palette.background,
                 ...common,
                 lineWidth: line.lineWidth,
                 crosshairMarkerBackgroundColor: lineColor(config, line),
@@ -551,7 +579,7 @@ export class IndicatorSeriesManager {
     const host = entry.slots[0]?.series
     if (host) {
       for (const value of paneGuideValues(def)) {
-        entry.guides.push(host.createPriceLine(guideLineOptions(value)))
+        entry.guides.push(host.createPriceLine(guideLineOptions(value, this.palette)))
       }
     }
   }

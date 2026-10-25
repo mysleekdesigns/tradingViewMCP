@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ConnectionStatus } from '../types'
-import { backoffDelay, openReconnectingSocket, parseKlineMessage } from './binanceStream'
+import {
+  backoffDelay,
+  openReconnectingSocket,
+  parseKlineMessage,
+  type SocketControl,
+} from './binanceStream'
 
 function klineMsg(overrides: Record<string, unknown> = {}, top: Record<string, unknown> = {}) {
   return {
@@ -124,9 +129,13 @@ class MiniWs {
   onerror: ((ev: Event) => void) | null = null
   onclose: ((ev: CloseEvent) => void) | null = null
   readonly url: string
+  sent: string[] = []
   constructor(url: string) {
     this.url = url
     MiniWs.instances.push(this)
+  }
+  send(data: string): void {
+    this.sent.push(data)
   }
   close(): void {
     this.readyState = 3
@@ -151,21 +160,30 @@ describe('openReconnectingSocket options', () => {
     MiniWs.instances = []
   })
 
-  function open(extra: { fatalCloseCodes?: readonly number[]; liveOnFirstMessage?: boolean }) {
+  function open(extra: {
+    fatalCloseCodes?: readonly number[]
+    liveOnFirstMessage?: boolean
+    staleIsFailure?: boolean
+    onControl?: (data: unknown, control: SocketControl) => void
+  }) {
     vi.useFakeTimers()
     vi.spyOn(Math, 'random').mockReturnValue(1)
     const statuses: ConnectionStatus[] = []
     const order: string[] = []
+    const { onControl, ...rest } = extra
     const teardown = openReconnectingSocket({
       WebSocketImpl: MiniWs as unknown as typeof WebSocket,
       url: 'ws://x',
       staleTimeoutMs: 60_000,
-      onMessage: (d) => order.push(`msg:${String(d)}`),
+      onMessage: (d, control) => {
+        order.push(`msg:${String(d)}`)
+        onControl?.(d, control)
+      },
       onStatus: (s) => {
         statuses.push(s)
         order.push(`status:${s}`)
       },
-      ...extra,
+      ...rest,
     })
     return { statuses, order, teardown, last: () => MiniWs.instances[MiniWs.instances.length - 1] }
   }
@@ -200,6 +218,80 @@ describe('openReconnectingSocket options', () => {
     h.last().message('a')
     h.last().message('b')
     expect(h.order).toEqual(['status:connecting', 'msg:a', 'status:live', 'msg:b'])
+    h.teardown()
+  })
+
+  it('default: a stale timeout on an opened socket reconnects silently (status stays live)', () => {
+    const h = open({})
+    h.last().open()
+    h.last().message('a')
+    vi.advanceTimersByTime(60_000)
+    vi.advanceTimersByTime(1_000)
+    expect(MiniWs.instances).toHaveLength(2)
+    h.last().open()
+    expect(h.statuses).toEqual(['connecting', 'live'])
+    h.teardown()
+  })
+
+  it('staleIsFailure: a stall reads reconnecting, then live again after the reconnect', () => {
+    const h = open({ staleIsFailure: true })
+    h.last().open()
+    h.last().message('a')
+    vi.advanceTimersByTime(60_000)
+    expect(h.statuses).toEqual(['connecting', 'live', 'reconnecting'])
+    vi.advanceTimersByTime(999)
+    expect(MiniWs.instances).toHaveLength(1)
+    vi.advanceTimersByTime(1)
+    expect(MiniWs.instances).toHaveLength(2)
+    h.last().open()
+    expect(h.statuses).toEqual(['connecting', 'live', 'reconnecting', 'live'])
+    h.teardown()
+  })
+
+  it('control.fail() drops the socket as a failed attempt with escalating backoff', () => {
+    const h = open({
+      liveOnFirstMessage: true,
+      onControl: (d, control) => {
+        if (d === 'reject') control.fail()
+      },
+    })
+    h.last().open()
+    h.last().message('reject')
+    // The rejected first message never reads live.
+    expect(h.statuses).toEqual(['connecting', 'reconnecting'])
+    vi.advanceTimersByTime(1_000)
+    expect(MiniWs.instances).toHaveLength(2)
+    h.last().open()
+    h.last().message('reject')
+    // Second consecutive failure: attempt 1 -> 2 s, not reset by the message.
+    vi.advanceTimersByTime(1_999)
+    expect(MiniWs.instances).toHaveLength(2)
+    vi.advanceTimersByTime(1)
+    expect(MiniWs.instances).toHaveLength(3)
+    h.last().open()
+    h.last().message('ok')
+    expect(h.statuses).toEqual(['connecting', 'reconnecting', 'live'])
+    h.teardown()
+  })
+
+  it('control.send() writes to the open socket only, and a stale control is a no-op', () => {
+    let saved: SocketControl | null = null
+    const h = open({
+      onControl: (_d, control) => {
+        saved = control
+      },
+    })
+    h.last().open()
+    h.last().message('a')
+    const first = h.last()
+    const ctl = saved as unknown as SocketControl
+    expect(ctl.send('hello')).toBe(true)
+    expect(first.sent).toEqual(['hello'])
+    first.serverClose(1006)
+    expect(ctl.send('late')).toBe(false)
+    ctl.fail()
+    expect(h.statuses).toEqual(['connecting', 'live', 'reconnecting'])
+    expect(first.sent).toEqual(['hello'])
     h.teardown()
   })
 })

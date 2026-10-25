@@ -129,7 +129,7 @@ body.tester-resizing * {
   height: 20px;
   padding: 0 8px;
   border-radius: 3px;
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text-muted);
   font-size: 11px;
   white-space: nowrap;
@@ -144,7 +144,7 @@ body.tester-resizing * {
 
 .tester__lab--online .tester__lab-dot {
   background: var(--up);
-  box-shadow: 0 0 0 3px rgb(8 153 129 / 18%);
+  box-shadow: 0 0 0 3px var(--tint-up);
 }
 
 .tester__lab--offline {
@@ -214,7 +214,7 @@ body.tester-resizing * {
   min-width: 14px;
   padding: 0 4px;
   border-radius: 7px;
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text-muted);
   font-family: var(--font-num);
   font-size: 10px;
@@ -271,8 +271,8 @@ body.tester-resizing * {
 }
 
 .tester__btn:hover:not(:disabled) {
-  border-color: #363a45;
-  background: var(--panel);
+  border-color: var(--border-strong);
+  background: var(--fill);
 }
 
 .tester__btn:disabled {
@@ -282,7 +282,7 @@ body.tester-resizing * {
 
 .tester__btn--accent {
   border-color: color-mix(in srgb, var(--accent) 60%, transparent);
-  color: #8fb0ff;
+  color: var(--accent-text-soft);
 }
 
 .tester__btn--accent:hover:not(:disabled) {
@@ -303,7 +303,7 @@ body.tester-resizing * {
 }
 
 .tester__text-btn:hover:not(:disabled) {
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text);
 }
 
@@ -358,7 +358,7 @@ body.tester-resizing * {
 .tester__chip {
   padding: 1px 6px;
   border-radius: 3px;
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text-muted);
   font-size: 10.5px;
   font-weight: 500;
@@ -371,7 +371,7 @@ body.tester-resizing * {
 
 .tester__chip--bad {
   background: color-mix(in srgb, var(--down) 14%, transparent);
-  color: #ff6b77;
+  color: var(--down-text);
 }
 
 .tester__chip--warn {
@@ -401,7 +401,7 @@ body.tester-resizing * {
 }
 
 .tester__plan:hover {
-  border-color: #363a45;
+  border-color: var(--border-strong);
 }
 
 .tester__plan:focus {
@@ -435,7 +435,7 @@ body.tester-resizing * {
 }
 
 .tester__error-path {
-  color: #ff6b77;
+  color: var(--down-text);
   font-family: var(--font-num);
   font-size: 11px;
 }
@@ -455,7 +455,7 @@ body.tester-resizing * {
 .tester__hint code {
   padding: 0 3px;
   border-radius: 2px;
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text);
   font-family: var(--font-num);
   font-size: 0.95em;
@@ -598,7 +598,7 @@ body.tester-resizing * {
   border: 0;
   border-radius: 4px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font: inherit;
   font-size: 12.5px;
   font-weight: 600;
@@ -612,7 +612,7 @@ body.tester-resizing * {
 
 .tester__run:disabled {
   background: color-mix(in srgb, var(--accent) 38%, var(--panel));
-  color: rgb(255 255 255 / 70%);
+  color: var(--on-accent-muted);
   cursor: not-allowed;
 }
 
@@ -638,8 +638,8 @@ body.tester-resizing * {
   width: 12px;
   height: 12px;
   box-sizing: border-box;
-  border: 2px solid rgb(255 255 255 / 35%);
-  border-top-color: #fff;
+  border: 2px solid var(--on-accent-faint);
+  border-top-color: var(--on-accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -797,7 +797,7 @@ body.tester-resizing * {
 }
 
 .tester__banner-btn:hover {
-  background: #363a45;
+  background: var(--panel-active);
 }
 
 /* Empty state */
@@ -820,7 +820,7 @@ body.tester-resizing * {
   height: 48px;
   margin-bottom: 4px;
   border-radius: 12px;
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text-muted);
 }
 
@@ -1050,7 +1050,7 @@ body.tester-resizing * {
   display: inline-block;
   padding: 0 5px;
   border-radius: 3px;
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text-muted);
   font-size: 10.5px;
   font-weight: 600;
@@ -1059,7 +1059,7 @@ body.tester-resizing * {
 
 .tester__reason--stop_loss {
   background: color-mix(in srgb, var(--down) 15%, transparent);
-  color: #ff6b77;
+  color: var(--down-text);
 }
 
 .tester__reason--take_profit {

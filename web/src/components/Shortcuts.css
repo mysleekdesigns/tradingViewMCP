@@ -1,0 +1,237 @@
+/* Keyboard shortcuts dialog. Colours come only from theme variables so the light/dark toggle
+   restyles it; the only literal is a neutral black drop shadow. */
+
+.modal-backdrop.shortcuts-dialog__backdrop {
+  align-items: center;
+  padding: 16px;
+}
+
+.shortcuts-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(760px, 100%);
+  max-height: min(640px, 92vh);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-family: var(--font-ui);
+  box-shadow:
+    0 1px 0 color-mix(in srgb, var(--text) 4%, transparent) inset,
+    0 24px 64px rgb(0 0 0 / 45%);
+  overflow: hidden;
+  animation: shortcuts-dialog-in 140ms ease-out;
+}
+
+.shortcuts-dialog:focus {
+  outline: none;
+}
+
+/* ---------- Head ---------- */
+
+.shortcuts-dialog__head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 12px 10px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.shortcuts-dialog__head-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.shortcuts-dialog__title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.shortcuts-dialog__head .icon-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ---------- Body: two balanced columns of groups ---------- */
+
+.shortcuts-dialog__body {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 18px 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  column-count: 2;
+  column-gap: 32px;
+  column-rule: 1px solid var(--border-soft);
+}
+
+.shortcuts-dialog__body:focus {
+  outline: none;
+}
+
+.shortcuts-dialog__body:focus-visible {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.shortcuts-group {
+  break-inside: avoid;
+  padding-top: 12px;
+}
+
+.shortcuts-group__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.shortcuts-group__title::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border-soft);
+}
+
+.shortcuts-group__list {
+  margin: 0;
+}
+
+.shortcuts-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 30px;
+  margin: 0 -8px;
+  padding: 3px 8px;
+  border-radius: 4px;
+}
+
+.shortcuts-row:hover {
+  background: var(--panel-hover);
+}
+
+.shortcuts-row__label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shortcuts-row__keys {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+
+.shortcuts-row__or {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+/* ---------- Key caps ---------- */
+
+.kbd-seq {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.kbd-seq__plus {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-num);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.kbd--small {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  font-size: 10.5px;
+}
+
+/* ---------- Foot ---------- */
+
+.shortcuts-dialog__foot {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 16px;
+  padding: 10px 18px;
+  border-top: 1px solid var(--border);
+  background: var(--chrome);
+}
+
+.shortcuts-dialog__hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.shortcuts-dialog__hint--end {
+  color: var(--text-faint);
+}
+
+@media (width <= 620px) {
+  .shortcuts-dialog__body {
+    column-count: 1;
+  }
+}
+
+@keyframes shortcuts-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shortcuts-dialog {
+    animation: none;
+  }
+}

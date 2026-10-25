@@ -14,7 +14,6 @@
 
 .research {
   --r-pad: 14px;
-  --calm: #8fa3bf;
   --live: var(--accent);
 
   display: flex;
@@ -27,7 +26,7 @@
   color: var(--text);
   font-size: 12px;
   overflow: hidden;
-  box-shadow: 0 10px 30px rgb(0 0 0 / 35%);
+  box-shadow: 0 10px 30px var(--shadow);
   animation: research-in 140ms ease-out;
 }
 
@@ -88,7 +87,7 @@
   height: 20px;
   padding: 0 8px;
   border-radius: 3px;
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text-muted);
   font-size: 11px;
   white-space: nowrap;
@@ -102,7 +101,7 @@
 }
 
 .research__live--live {
-  color: #8fb0ff;
+  color: var(--accent-text-soft);
 }
 
 .research__live--live .research__live-dot {
@@ -172,7 +171,7 @@
   min-width: 14px;
   padding: 0 4px;
   border-radius: 7px;
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text-muted);
   font-family: var(--font-num);
   font-size: 10px;
@@ -197,8 +196,8 @@
 }
 
 .research__back:hover {
-  border-color: #363a45;
-  background: var(--panel);
+  border-color: var(--border-strong);
+  background: var(--fill);
 }
 
 /* ---------- Body ---------- */
@@ -254,7 +253,7 @@
 }
 
 .research__list-item:hover {
-  background: var(--panel);
+  background: var(--fill);
 }
 
 .research__list-item[aria-current='true'] {
@@ -327,7 +326,7 @@
   padding: 0 6px;
   border: 1px solid var(--border);
   border-radius: 4px;
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text);
   font: inherit;
 }
@@ -352,8 +351,8 @@
 }
 
 .research__btn:hover:not(:disabled) {
-  border-color: #363a45;
-  background: var(--panel);
+  border-color: var(--border-strong);
+  background: var(--fill);
 }
 
 .research__btn:disabled {
@@ -363,7 +362,7 @@
 
 .research__btn--accent {
   border-color: color-mix(in srgb, var(--accent) 60%, transparent);
-  color: #8fb0ff;
+  color: var(--accent-text-soft);
 }
 
 .research__btn--accent:hover:not(:disabled) {
@@ -374,7 +373,7 @@
 .research__btn--primary {
   border-color: var(--accent);
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .research__btn--primary:hover:not(:disabled) {
@@ -444,7 +443,7 @@
 .research__badge--live {
   border-color: color-mix(in srgb, var(--live) 50%, transparent);
   background: color-mix(in srgb, var(--live) 12%, transparent);
-  color: #8fb0ff;
+  color: var(--accent-text-soft);
 }
 
 .research__badge-dot {
@@ -458,48 +457,48 @@
 .research__badge--good {
   border-color: color-mix(in srgb, var(--up) 50%, transparent);
   background: color-mix(in srgb, var(--up) 12%, transparent);
-  color: #3ec9ad;
+  color: var(--up-text);
 }
 
 /* "No edge found": a finished, correct result. Quiet and confident, not an alarm. */
 .research__badge--calm {
   border-color: color-mix(in srgb, var(--calm) 45%, transparent);
   background: color-mix(in srgb, var(--calm) 10%, transparent);
-  color: #c3cfdf;
+  color: var(--calm-text);
 }
 
 .research__badge--neutral {
   border-color: var(--border);
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text-muted);
 }
 
 .research__badge--warn {
   border-color: color-mix(in srgb, var(--warn) 45%, transparent);
   background: color-mix(in srgb, var(--warn) 10%, transparent);
-  color: #f5c35a;
+  color: var(--warn-text);
 }
 
 .research__badge--bad {
   border-color: color-mix(in srgb, var(--down) 45%, transparent);
   background: color-mix(in srgb, var(--down) 10%, transparent);
-  color: #ff6b77;
+  color: var(--down-text);
 }
 
 .research__tone--good {
-  color: #3ec9ad;
+  color: var(--up-text);
 }
 
 .research__tone--bad {
-  color: #ff6b77;
+  color: var(--down-text);
 }
 
 .research__tone--warn {
-  color: #f5c35a;
+  color: var(--warn-text);
 }
 
 .research__tone--live {
-  color: #8fb0ff;
+  color: var(--accent-text-soft);
 }
 
 .research__tone--calm {
@@ -542,7 +541,7 @@
 .research code {
   padding: 0 4px;
   border-radius: 3px;
-  background: var(--panel);
+  background: var(--fill);
   font-family: var(--font-num);
   font-size: 11px;
 }
@@ -603,7 +602,7 @@
   height: 48px;
   margin-bottom: 4px;
   border-radius: 12px;
-  background: var(--panel);
+  background: var(--fill);
   color: var(--text-muted);
 }
 
@@ -690,7 +689,7 @@
   padding: 9px 12px;
   border-left: 3px solid var(--border);
   border-radius: 0 4px 4px 0;
-  background: var(--panel);
+  background: var(--fill);
   line-height: 1.5;
 }
 
@@ -1038,7 +1037,7 @@
 }
 
 .research a {
-  color: #8fb0ff;
+  color: var(--accent-text-soft);
   text-decoration: none;
   overflow-wrap: anywhere;
 }
@@ -1056,7 +1055,7 @@
   padding: 0 5px;
   border: 1px dashed color-mix(in srgb, var(--warn) 55%, transparent);
   border-radius: 3px;
-  color: #f5c35a;
+  color: var(--warn-text);
   font-size: 10px;
   line-height: 15px;
   letter-spacing: 0.02em;
@@ -1316,7 +1315,7 @@
   margin: 0 0 14px;
   padding: 8px 10px;
   border-radius: 4px;
-  background: var(--panel);
+  background: var(--fill);
   font-size: 11px;
 }
 
