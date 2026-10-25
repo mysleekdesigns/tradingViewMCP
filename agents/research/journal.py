@@ -45,6 +45,7 @@ from lab.research.contract import (
 )
 
 __all__ = [
+    "HOLDOUT_WORD",
     "CandidateReport",
     "HoldoutLeakError",
     "IdeaOutcome",
@@ -116,6 +117,7 @@ _METRIC = (
     r"[-+]?\d*\.\d+|[-+]?\d+(?:\.\d+)?\s*%)"
 )
 _WINDOW = 80
+HOLDOUT_WORD = re.compile(_HOLDOUT, re.IGNORECASE)  # the guard's spelling of the holdout
 _LEAK = re.compile(
     rf"{_HOLDOUT}.{{0,{_WINDOW}}}?{_METRIC}|{_METRIC}.{{0,{_WINDOW}}}?{_HOLDOUT}",
     re.IGNORECASE | re.DOTALL,

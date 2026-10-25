@@ -63,6 +63,7 @@ from lab.research.contract import (
 from lab.research.holdout import HoldoutRefusedError
 from lab.research.runs import frozen_budget, holdout_budget, run_usage, start_research_run
 from research.budget import BudgetExceededError, BudgetTracker
+from research.journal import HOLDOUT_WORD
 from research.screening import sanitize_untrusted
 from research.state import (
     IdeaProgress,
@@ -74,7 +75,9 @@ from research.state import (
 )
 
 logger = logging.getLogger(__name__)
-_WITHHELD = "[withheld: mentioned the holdout next to a number]"
+# The placeholder must not itself name the holdout, or rejoining it next to a metric sentence
+# trips the guard again and the whole entry is lost.
+_WITHHELD = "[sentence withheld by the journal's leak guard]"
 
 Role = Literal["scout", "designer", "critic"]
 ROLES: tuple[Role, ...] = ("scout", "designer", "critic")
@@ -914,8 +917,10 @@ class Orchestrator:
             self._jlog(
                 ctx,
                 "criteria",
-                f"design-window criteria (all but the holdout and cross-check) {design_txt}; "
-                f"pre-holdout gate (incl. the event-driven cross-check) {pre_txt}; "
+                # No "incl." (the sentence split would cut there) and no h-word before the
+                # metric names in "missing", or the leak guard withholds these clauses.
+                f"design-window criteria (all but the locked-data and cross-checks) {design_txt}; "
+                f"gate before the locked-data check, event-driven cross-check included, {pre_txt}; "
                 f"missing: {', '.join(map(str, report.get('missing', []))) or 'none'}",
                 idea_ids=[prog.idea_id],
                 plan_hashes=[h],
@@ -1145,8 +1150,10 @@ class Orchestrator:
                 ctx,
                 prog,
                 h,
-                f"event-driven cross-check {cross_why}; no holdout check spent. Not a candidate; "
-                "the idea stays promising and is not re-tuned.",
+                # "locked-data check", not the h-word: next to criterion names or numbers it
+                # trips the journal's leak guard and the note would be withheld.
+                f"event-driven cross-check {cross_why}; the locked-data check was not spent. "
+                "Not a candidate; the idea stays promising and is not re-tuned.",
             )
             return
 
@@ -1169,8 +1176,9 @@ class Orchestrator:
                 ctx,
                 prog,
                 h,
-                "event-driven cross-check matched, but the pre-holdout criteria are not all met"
-                f"{detail}; no holdout check spent. The idea stays promising and is not re-tuned.",
+                "event-driven cross-check matched, but the criteria required before the "
+                f"locked-data check are not all met{detail}; that check was not spent. The idea "
+                "stays promising and is not re-tuned.",
             )
             return
 
@@ -1441,6 +1449,12 @@ class Orchestrator:
         pieces = re.split(r"(?<=[.;])\s+", text)
         kept = [p if self._passes_guard(p) else _WITHHELD for p in pieces]
         joined = " ".join(kept)
+        if self._passes_guard(joined):
+            return joined
+        # A kept sentence names the holdout and a neighbour has a number: drop every sentence
+        # that names the holdout, then fail closed if that is still not enough.
+        kept = [_WITHHELD if HOLDOUT_WORD.search(p) else p for p in kept]
+        joined = " ".join(kept)
         return joined if self._passes_guard(joined) else _WITHHELD
 
     def _jlog(self, ctx: _Ctx, kind: str, text: str, **links: Any) -> None:
@@ -1466,9 +1480,9 @@ class Orchestrator:
             )
         notes.append(
             "Results are historical backtests on the design window and are not forward-looking. "
-            "A candidate passed every frozen criterion, the locked holdout, and the event-driven "
-            "cross-check; it becomes successful only after 4-8 weeks of forward paper trading "
-            "consistent with its backtest."
+            "A candidate is a plan that passed every frozen criterion, the locked holdout, and "
+            "the event-driven cross-check; it becomes successful only after 4-8 weeks of "
+            "forward paper trading consistent with its backtest."
         )
         ideas_out = [
             self.deps.idea_outcome(

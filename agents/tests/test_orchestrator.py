@@ -23,6 +23,7 @@ from lab.config import LabConfig, load_config
 from lab.ledger import Ledger
 from lab.research.contract import RunState, load_research_config
 from lab.types import TrialRecord
+from research.journal import guard_holdout
 from research.orchestrator import (
     CRITIC_SCHEMA,
     Collaborators,
@@ -147,8 +148,8 @@ def fake_screen(docs: Sequence[Any], jev: Any) -> list[Any]:
 
 
 def fake_guard(text: str) -> None:
-    if re.search(r"hold[\s_-]?out.{0,80}?\d*\.\d+", text, re.IGNORECASE):
-        raise ValueError("holdout leak")
+    # The real journal guard: a looser fake hid a whole-entry withholding bug in a live run.
+    guard_holdout(text)
 
 
 def _trial(run_id: str, h: str, source: str = "api", window: str = "design") -> TrialRecord:
@@ -831,6 +832,48 @@ async def test_critic_text_mentioning_holdout_numbers_is_withheld_from_journal(
     assert "withheld" in critic_log
 
 
+async def test_harmless_holdout_mention_withholds_only_that_sentence(
+    tmp_path: Path, cfg: LabConfig
+) -> None:
+    # The live run lost whole critic entries like this one: the withheld placeholder used to
+    # name the holdout, so next to the metric sentence the guard rejected everything.
+    w = World(tmp_path, cfg)
+    # Sentence 2 passes the guard alone but not next to sentence 1; sentence 3 never passes.
+    reason = (
+        "WF OOS Sharpe is 0.41 against a required 1.0. No holdout check was spent. "
+        "The holdout gate needs DSR above 0.95."
+    )
+    runner = ScriptedAgentRunner(
+        {"scout": scout_output("A"), "designer": w.designer, "critic": critic("abandon", reason)}
+    )
+    orch, _ = make(w, runner)
+    state = await orch.run(["BTCUSDT"], "4h")
+    j = journal_of(state, w)
+    critic_log = next(t for k, t in j.logs if k == "critic")
+    assert "WF OOS Sharpe is 0.41 against a required 1.0." in critic_log
+    assert critic_log.count("withheld") == 2 and "0.95" not in critic_log
+    assert "holdout" not in critic_log.lower()
+
+
+async def test_criteria_entry_survives_the_real_leak_guard(tmp_path: Path, cfg: LabConfig) -> None:
+    # "missing" without require_holdout_pass (the holdout row failed rather than missing):
+    # the old "(incl. the" wording split mid-clause and read as if the cross-check had failed.
+    w = World(tmp_path, cfg)
+    base = w.deps()
+
+    def evaluate(ledger: Ledger, run_id: str, h: str, cfg: LabConfig) -> Any:
+        return {**base.evaluate_plan(ledger, run_id, h, cfg), "missing": ["dsr", "pbo"]}
+
+    runner = ScriptedAgentRunner(
+        {"scout": scout_output("A"), "designer": w.designer, "critic": critic("abandon")}
+    )
+    orch, _ = make(w, runner, deps=replace(base, evaluate_plan=evaluate))
+    state = await orch.run(["BTCUSDT"], "4h")
+    entry = next(t for k, t in journal_of(state, w).logs if k == "criteria")
+    assert "withheld" not in entry
+    assert "event-driven cross-check included, not met; missing: dsr, pbo" in entry
+
+
 def test_validate_output_checks_required_types_and_items() -> None:
     from research.orchestrator import DESIGNER_SCHEMA, SCOUT_SCHEMA
 
@@ -953,7 +996,8 @@ async def test_crosscheck_not_matching_spends_no_holdout_check_and_stays_promisi
     assert j.holdout == []  # no holdout spent, not journaled as a candidate
     note = next(t for k, t in j.logs if k == "crosscheck")
     assert f"event-driven cross-check {word}" in note
-    assert "no holdout check spent" in note and "Not a candidate" in note
+    assert "locked-data check was not spent" in note and "Not a candidate" in note
+    assert "withheld" not in note
     idea1_note = next(n for i, st, n in ideas.statuses if i == 1 and st == "promising")
     assert f"cross-check {word}" in (idea1_note or "")
     assert j.summary.candidates == []
@@ -1001,8 +1045,8 @@ async def test_crosscheck_matched_but_pre_holdout_criteria_failing_spends_no_hol
     assert ideas.ideas[1]["status"] == "promising"
     assert w.designer_calls == [1]
     note = ideas.statuses[-1][2] or ""
-    assert "pre-holdout criteria are not all met (pbo is fail)" in note
-    assert "no holdout check spent" in note
+    assert "locked-data check are not all met (pbo is fail)" in note
+    assert "that check was not spent" in note and "withheld" not in note
     assert state["used"]["holdout_checks"] == 0 and state["candidates"] == []
 
 

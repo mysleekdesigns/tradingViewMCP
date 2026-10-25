@@ -306,13 +306,14 @@ def render_config(
     Always ``dry_run: true`` with ``exchange.key``/``secret`` empty strings. Raises
     ``ValueError`` if ``dry_run`` is False or any credential is supplied (also inside
     ``exchange_options``, which is merged into the ``exchange`` object). The api_server is
-    disabled; if the owner enables it, its credentials come from ``FREQTRADE__API_SERVER__*``
+    left out (off); if the owner enables it, its credentials come from ``FREQTRADE__API_SERVER__*``
     environment variables at launch time, never from this file.
 
-    ``public_api_host`` (e.g. ``"data-api.binance.vision"``) overrides ccxt's public REST URL
-    and turns off freqtrade's websocket candles. UNVERIFIED workaround for ``api.binance.com``
-    returning HTTP 451 in the owner's region (the app itself reads data-api.binance.vision): the
-    owner must check that a dry-run actually receives candles before relying on it.
+    ``public_api_host`` (e.g. ``"data-api.binance.vision"``) overrides binance's public REST URL,
+    turns off freqtrade's websocket candles, and loads spot markets only. Workaround for
+    ``api.binance.com`` returning HTTP 451 in the owner's region (the app itself reads
+    data-api.binance.vision); verified 2026-10-25 with freqtrade 2026.9 / ccxt 4.5.90 (markets
+    and 1h candles load, signals compute). Re-check the bot log after upgrading either.
     """
     if dry_run is not True:
         raise ValueError("render_config only builds dry-run configs (dry_run must be True)")
@@ -337,9 +338,19 @@ def render_config(
         "pair_blacklist": [],
     }
     if public_api_host is not None:
+        if exchange != "binance":
+            raise ValueError(
+                f"public_api_host only applies to exchange 'binance' (its /api/v3 layout), "
+                f"got exchange {exchange!r}"
+            )
         if not re.fullmatch(r"[A-Za-z0-9.-]+", public_api_host):
             raise ValueError(f"public_api_host {public_api_host!r} must be a bare host name")
-        urls = {"urls": {"api": {"public": f"https://{public_api_host}/api/v3"}}}
+        # Spot markets only: ccxt's binance also loads fapi/dapi futures markets, which the
+        # public override does not cover and which return 451 where api.binance.com does.
+        urls = {
+            "urls": {"api": {"public": f"https://{public_api_host}/api/v3"}},
+            "options": {"fetchMarkets": {"types": ["spot"]}},
+        }
         ex["ccxt_config"] = json.loads(json.dumps(urls))
         ex["ccxt_async_config"] = json.loads(json.dumps(urls))
         ex["enable_ws"] = False
@@ -349,6 +360,8 @@ def render_config(
                 f"refusing credentials in exchange_options: {path!r} (never supply exchange keys)"
             )
         reserved = {"name", "key", "secret", "pair_whitelist"} & set(exchange_options)
+        if public_api_host is not None:  # a shallow merge would silently drop the override
+            reserved |= {"ccxt_config", "ccxt_async_config", "enable_ws"} & set(exchange_options)
         if reserved:
             raise ValueError(f"exchange_options may not set {sorted(reserved)}")
         ex.update(json.loads(json.dumps(dict(exchange_options))))
@@ -376,8 +389,8 @@ def render_config(
         "exchange": ex,
         "pairlists": [{"method": "StaticPairList"}],
         "db_url": f"sqlite:///{Path(db_path).resolve()}",
-        "api_server": {"enabled": False},
-        "telegram": {"enabled": False},
+        # No "api_server" or "telegram" block: both are off by default, and freqtrade >= 2026.9's
+        # schema requires their listen address / token whenever the block is present.
         "initial_state": "running",
         "force_entry_enable": False,
         "internals": {"process_throttle_secs": 5},

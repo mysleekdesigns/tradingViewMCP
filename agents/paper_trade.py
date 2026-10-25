@@ -84,8 +84,8 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     print("  " + " ".join(prepared.command))
     if args.public_api_host:
         print(
-            "NOTE: the public-API host override is an unverified workaround for api.binance.com "
-            "returning HTTP 451; check the bot log shows candles arriving."
+            "NOTE: the public-API host override works around api.binance.com returning HTTP 451 "
+            "(verified with freqtrade 2026.9); check the bot log shows candles arriving."
         )
     if args.launch:
         result = launch(prepared)

@@ -696,7 +696,7 @@ can't have memorized.
 - [x] Seed importer: Freqtrade strategies → plans, run through the honest pipeline as a calibration baseline
 - [x] Research journal + end-of-run report (including "no edge found"), written Obsidian-friendly: YAML frontmatter (run ID, idea IDs, date, outcome) and `[[links]]` to idea and ledger run IDs; never records holdout results, and scout-sourced text is marked untrusted
 - [ ] Research page in the UI
-- [ ] Paper-trading runner + forward-vs-backtest comparison
+- [x] Paper-trading runner + forward-vs-backtest comparison
 - [x] Prompt-injection screening for scraped content
 
 **Done when:** an autonomous run on BTCUSDT/ETHUSDT finishes within budget and produces either a candidate

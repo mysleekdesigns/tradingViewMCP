@@ -193,7 +193,8 @@ def test_config_is_forced_dry_run_without_credentials(tmp_path: Path) -> None:
     assert cfg["exchange"]["key"] == "" and cfg["exchange"]["secret"] == ""
     assert cfg["exchange"]["pair_whitelist"] == ["BTC/USDT"]
     assert cfg["pairlists"] == [{"method": "StaticPairList"}]
-    assert cfg["api_server"] == {"enabled": False}
+    # Both off by default; freqtrade's schema rejects either block without its address/token.
+    assert "api_server" not in cfg and "telegram" not in cfg
     assert cfg["db_url"] == f"sqlite:///{(tmp_path / 'db.sqlite').resolve()}"
     assert cfg["timeframe"] == "1h"
     assert cfg["entry_pricing"]["price_side"] == "other"
@@ -241,12 +242,35 @@ def test_public_api_host_override(tmp_path: Path) -> None:
     cfg = render_config(
         plan=PLAN, db_path=tmp_path / "db.sqlite", public_api_host="data-api.binance.vision"
     )
-    urls = {"urls": {"api": {"public": "https://data-api.binance.vision/api/v3"}}}
+    urls = {
+        "urls": {"api": {"public": "https://data-api.binance.vision/api/v3"}},
+        "options": {"fetchMarkets": {"types": ["spot"]}},
+    }
     assert cfg["exchange"]["ccxt_config"] == urls
     assert cfg["exchange"]["ccxt_async_config"] == urls
     assert cfg["exchange"]["enable_ws"] is False
     with pytest.raises(ValueError, match="bare host"):
         render_config(plan=PLAN, db_path=tmp_path / "db", public_api_host="evil.com/x?y=")
+
+
+def test_public_api_host_is_binance_only(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="only applies to exchange 'binance'"):
+        render_config(
+            plan=PLAN,
+            db_path=tmp_path / "db",
+            exchange="okx",
+            public_api_host="data-api.binance.vision",
+        )
+
+
+def test_exchange_options_cannot_replace_public_api_host_override(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="ccxt_config"):
+        render_config(
+            plan=PLAN,
+            db_path=tmp_path / "db",
+            public_api_host="data-api.binance.vision",
+            exchange_options={"ccxt_config": {"timeout": 30000}},
+        )
 
 
 @pytest.mark.parametrize(

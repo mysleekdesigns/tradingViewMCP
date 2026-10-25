@@ -1,6 +1,6 @@
 ---
 name: recurring-issues
-description: Statistical/accounting traps found in lab/ and agents/ reviews (Phase 7 stats traps; Phase 8 run/interval laundering, V[SR] scope, logic_hash/family evasion, WF lineage bypass incl. literals, PBO floor; round 4 price-literal time switch, no-op+retune) - re-check on every lab/agents review
+description: Statistical/accounting traps found in lab/ and agents/ reviews (Phase 7 stats traps; Phase 8 run/interval laundering, V[SR] scope, logic_hash/family evasion, WF lineage bypass incl. literals, PBO floor; round 4 price-literal time switch, no-op+retune); journal guard wording traps - re-check on every lab/agents review
 metadata:
   type: project
 ---
@@ -60,3 +60,8 @@ Still open:
 30. Pooled V is scoped by exact costs_json; an owner cost change resets V to new-cost trials while N stays global (min_variance_plans met by 2 two-param backtests' neighbourhoods).
 
 Related: [[lab-conventions]]
+
+## Journal leak guard (2026-10-25)
+
+31. **Guard placeholder/rewording traps.** `research.journal.guard_holdout` is a lexical regex (holdout|held out within 80 chars of a metric name or decimal, both directions). Any orchestrator text that names the holdout near criterion names (pbo, dsr, sharpe...) gets withheld, and a placeholder containing the word re-trips it (live run r-20261025-135224-41f19f lost 5 whole entries). Fixed by a neutral placeholder + second fail-closed pass. Pre-holdout notes now say "locked-data check" (a synonym the guard does not see): only safe because those branches run before `run_holdout_check` and print criterion names/statuses only. `_safe_text` splits on `[.;]\s+`, so "(incl. the" splits mid-sentence and can leave misleading fragments.
+    **How to apply:** whenever journal wording or the guard changes, run the text through the REAL guard (tests must not use a looser fake) and check the "locked-data" wording never appears after a holdout check.
