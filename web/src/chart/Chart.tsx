@@ -365,6 +365,8 @@ export function Chart({
    * until the first push has finished.
    */
   const pushingRef = useRef<readonly Candle[] | null>(null)
+  /** Re-shows the followed chart's time on this chart after a push (multi-chart sync). */
+  const syncRefreshRef = useRef<(() => void) | null>(null)
   /** HA bars for `appliedRef` (Heikin-Ashi mode only), reused for tail updates. */
   const haRef = useRef<HeikinAshiBar[] | null>(null)
   const chartTypeRef = useRef<ChartType>(chartType)
@@ -619,12 +621,17 @@ export function Chart({
   useEffect(() => {
     const chart = chartRef.current
     if (!chart || !crosshairSync || crosshairSyncId === undefined) return
-    return bindCrosshairSync(crosshairSync, crosshairSyncId, chart, {
+    const unbind = bindCrosshairSync(crosshairSync, crosshairSyncId, chart, {
       series: () => mainSeriesRef.current,
       bars: () => pushingRef.current ?? appliedRef.current,
       step: () => stepRef.current,
       onShow: setHoveredTime,
     })
+    syncRefreshRef.current = () => crosshairSync.refresh(crosshairSyncId)
+    return () => {
+      syncRefreshRef.current = null
+      unbind()
+    }
   }, [crosshairSync, crosshairSyncId])
 
   // Push data whenever the candles change. Runs after the creation effects on mount.
@@ -678,6 +685,9 @@ export function Chart({
     coords.index.setBars(candles)
     // Cheap per tick; re-filters markers/equity only when the bar set changed.
     backtestOverlay.setBars(candles)
+    // A follower cleared because it lacked the hovered bar gets no re-fire from LWC when the bar
+    // arrives, so re-show the followed time here (a no-op unless this chart follows another).
+    if (plan.kind !== 'none') syncRefreshRef.current?.()
   }, [candles, indicatorManager, coords, backtestOverlay])
 
   // Theme / candle colours / time zone. Everything is recoloured in place (applyOptions, one

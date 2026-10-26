@@ -460,6 +460,30 @@ describe('bindCrosshairSync', () => {
     expect(b.setCrosshairPosition).toHaveBeenCalledTimes(shown)
   })
 
+  it('a follower cleared for lack of the hovered bar shows it once a push brings that bar', () => {
+    // Mirrors Chart.tsx: after every push the chart calls sync.refresh(id), because a cleared
+    // crosshair is not re-fired by LWC when bars arrive.
+    const sync = createCrosshairSync()
+    const a = fakeChart()
+    const b = fakeChart()
+    const T = 10 * HOUR
+    let bBars = bars([T - HOUR])
+    bindCrosshairSync(sync, 'a', a, {
+      series: () => 'A',
+      bars: () => bars([T - HOUR, T]),
+      step: () => HOUR,
+    })
+    bindCrosshairSync(sync, 'b', b, { series: () => 'B', bars: () => bBars, step: () => HOUR })
+    a.hover(T as Time)
+    expect(b.clearCrosshairPosition).toHaveBeenCalledTimes(1)
+    bBars = bars([T - HOUR, T])
+    b.tick() // cleared: LWC fires nothing
+    expect(b.setCrosshairPosition).not.toHaveBeenCalled()
+    sync.refresh('b')
+    expect(b.setCrosshairPosition).toHaveBeenLastCalledWith(bBars[1].close, T, 'B')
+    expect(a.setCrosshairPosition).not.toHaveBeenCalled()
+  })
+
   it('a follower re-fired inside its own push reads the bars being pushed', () => {
     // Mirrors Chart.tsx: bars() = pushing ?? applied, where `pushing` is set around the
     // series update()/setData() that synchronously re-fires the crosshair.
