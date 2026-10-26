@@ -17,10 +17,22 @@ from lab.config import DEFAULT_CONFIG_PATH, load_config
 from lab.crosscheck.portfolio import EQUITY_TOLERANCE, compare_equity, replay_portfolio
 from lab.data.universe_build import manifest_sha256, write_universe
 from lab.engine.portfolio import run_portfolio
+from lab.evaluate.portfolio_benchmarks import (
+    mean_book_mix,
+    mean_path_stat,
+    random_selection_path,
+    sum_kept_match_fallbacks,
+    sum_match_fallbacks,
+)
 from lab.ledger import Ledger
 from lab.plan import portfolio as pf
 from lab.portfolio_runner import (
+    VOL_ONLY_SIDEBAR_LABEL,
     StaleUniverseError,
+    _random_selection,
+    _target_exposure,
+    _vol_only_sidebar,
+    book_mix_json,
     design_window,
     impact_model,
     load_universe_data,
@@ -55,6 +67,7 @@ def test_lab_toml_has_the_portfolio_settings() -> None:
     assert (p.impact_coef, p.impact_aum_usd, p.impact_cap) == (0.7, 1_000_000.0, 0.05)
     assert (p.impact_adv_days, p.impact_vol_days, p.alpha_rolling_days) == (30, 30, 60)
     assert p.null_paths == 500 and p.min_rebalance == 0.0
+    assert p.null_liquidity_window == 5
     assert p.neighbourhood_max_trials == 1 + 9 * 4
 
 
@@ -65,6 +78,21 @@ def test_lab_toml_has_the_portfolio_settings() -> None:
         ("impact_cap = 0.05", "impact_cap = 1.0", r"portfolio\.impact_cap"),
         ("impact_coef = 0.7", "impact_coef = -1", r"portfolio\.impact_coef"),
         ("null_paths = 500", "null_paths = 0", r"portfolio\.null_paths"),
+        (
+            "null_liquidity_window = 5",
+            "null_liquidity_window = 0",
+            r"portfolio\.null_liquidity_window must be >= 1",
+        ),
+        (
+            "null_liquidity_window = 5",
+            "null_liquidity_window = 4",
+            r"portfolio\.null_liquidity_window must be odd",
+        ),
+        (
+            "null_liquidity_window = 5",
+            "null_liquidity_window = 5.0",
+            r"portfolio\.null_liquidity_window must be an integer",
+        ),
         ("liquidity_cap_mult = 10.0", "liquidity_cap_mult = 0", r"universe\.liquidity_cap_mult"),
     ],
 )
@@ -84,6 +112,7 @@ def test_the_fingerprint_freezes_the_liquidity_cap_and_portfolio_settings(tmp_pa
     values = lab_fingerprint(cfg)["values"]
     assert values["universe"]["liquidity_cap_mult"] == 10.0
     assert values["universe"]["portfolio"]["impact_coef"] == 0.7
+    assert values["universe"]["portfolio"]["null_liquidity_window"] == 5
     with Ledger(tmp_path / "l.db") as led:
         rc = load_research_config(write_criteria(tmp_path / "c.toml"))
         run_id = start_research_run(led, rc, label="x", cfg=cfg)
@@ -91,6 +120,7 @@ def test_the_fingerprint_freezes_the_liquidity_cap_and_portfolio_settings(tmp_pa
             replace(cfg, universe=replace(cfg.universe, liquidity_cap_mult=5.0)),
             replace(cfg, portfolio=replace(cfg.portfolio, impact_coef=0.5)),
             replace(cfg, portfolio=replace(cfg.portfolio, null_paths=7)),
+            replace(cfg, portfolio=replace(cfg.portfolio, null_liquidity_window=3)),
         ):
             with pytest.raises(ValueError, match="changed: universe"):
                 check_lab_fingerprint(led, run_id, changed)
@@ -419,3 +449,140 @@ def test_signal_delay_keeps_the_decision_rows_and_starts_later(universe) -> None
     assert stale.first_decision is not None and base.first_decision is not None
     assert stale.first_decision > base.first_decision
     assert not stale.weights.loc[stale.decisions].equals(base.weights.loc[stale.decisions])
+
+
+def test_the_runner_null_matches_on_the_trailing_dollar_volume_rank(universe) -> None:  # type: ignore[no-untyped-def]
+    """The report's null is drawn with ``liquidity_panel`` = the run's trailing dollar volume
+    (the panel behind its liquidity shares), the vol panel, and the band width from
+    ``[portfolio] null_liquidity_window`` (here 3, not the default 5, so the config value is
+    what reaches the null); its fresh and kept match counts, book mix, overlap and rank gap
+    are the paths' own."""
+    cfg, _, load = universe
+    cfg = replace(cfg, portfolio=replace(cfg.portfolio, null_paths=3, null_liquidity_window=3))
+    data = load_universe_data(cfg, load, end=cfg.splits.holdout_start)
+    window = design_window(data, cfg)
+    plan = pf.validate_portfolio_plan(H1, interval="1d").plan
+    assert plan is not None
+    run = run_on_window(plan, data, window, cfg)
+    got = _random_selection(run, cfg, seed=5)
+    rng = np.random.default_rng(5)
+    expect = [
+        random_selection_path(
+            run.weights,
+            run.view.members,
+            rng,
+            inverse_vol=run.signals.inverse_vol,
+            max_weight=run.plan.max_weight,
+            vol_panel=run.signals.vol_panel,
+            liquidity_share=run.liquidity,
+            liquidity_cap_mult=cfg.universe.liquidity_cap_mult,
+            liquidity_panel=run.view.dollar_volume,
+            liquidity_window=3,
+        )
+        for _ in range(3)
+    ]
+    assert got.match_fallbacks == sum_match_fallbacks(e.match_fallbacks for e in expect)
+    assert got.kept_match_fallbacks == sum_kept_match_fallbacks(expect)
+    assert got.book_mix == mean_book_mix(expect)
+    np.testing.assert_array_equal(  # capped exposure depends on the names drawn
+        got.exposure, [_target_exposure(e.weights, run.first_decision) for e in expect]
+    )
+    assert got.overlap == mean_path_stat(e.overlap for e in expect)
+    assert got.overlap_chance == mean_path_stat(e.overlap_chance for e in expect)
+    assert got.rank_gap == mean_path_stat(e.rank_gap for e in expect)
+    assert got.match_fallbacks["rank"] > 0 and got.kept_match_fallbacks["rank"] > 0
+    # A band of 3 ranks: in-band gaps are 0 or 1; a widened draw (no free name in the band)
+    # can be further away, but they are rare enough here that the mean stays <= 1.
+    assert 0.0 <= got.rank_gap <= 1.0
+    assert 0.0 < got.overlap_chance < got.overlap <= 1.0
+    assert set(got.book_mix["strategy"]) == {
+        "liquidity_count",
+        "liquidity_weight",
+        "vol_count",
+        "vol_weight",
+    }
+    report = book_mix_json(got.book_mix)
+    assert all(
+        x is None or isinstance(x, float)
+        for side in report.values()
+        for v in side.values()
+        for x in v
+    )
+
+
+def test_the_vol_only_sidebar_is_the_same_null_without_liquidity_matching(universe) -> None:  # type: ignore[no-untyped-def]
+    """The report's descriptive volatility-only null: the same members, weighting inputs, vol
+    panel, caps, costs, ``n_paths`` and seed as the criterion's null, with
+    ``liquidity_panel=None`` (so its paths are the a5fa079 volatility-only null's); its
+    percentile and p use the criterion's NaN rule. Labelled descriptive, and a delayed run is
+    refused like the criterion's null."""
+    cfg, _, load = universe
+    cfg = replace(cfg, portfolio=replace(cfg.portfolio, null_paths=4))
+    data = load_universe_data(cfg, load, end=cfg.splits.holdout_start)
+    window = design_window(data, cfg)
+    plan = pf.validate_portfolio_plan(H1, interval="1d").plan
+    assert plan is not None
+    run = run_on_window(plan, data, window, cfg)
+    side = _vol_only_sidebar(run, cfg, 7, 0.4)
+    rng = np.random.default_rng(7)
+    expect = [
+        random_selection_path(
+            run.weights,
+            run.view.members,
+            rng,
+            inverse_vol=run.signals.inverse_vol,
+            max_weight=run.plan.max_weight,
+            vol_panel=run.signals.vol_panel,
+            liquidity_share=run.liquidity,
+            liquidity_cap_mult=cfg.universe.liquidity_cap_mult,
+        )
+        for _ in range(4)
+    ]
+    assert all(e.kept_match_fallbacks == {} for e in expect)  # volatility-only paths
+    assert side["overlap_null"] == pytest.approx(mean_path_stat(e.overlap for e in expect))
+    assert side["label"] == VOL_ONLY_SIDEBAR_LABEL
+    assert "not a criterion" in side["label"] and "more powerful" in side["label"]
+    assert side["n_paths"] == 4 and side["seed"] == 7
+    crit = _random_selection(run, cfg, seed=7)  # the criterion's null: different paths
+    assert side["overlap_null"] != pytest.approx(crit.overlap)
+    # percentile and p from the sidebar's own Sharpes, with the criterion's NaN rule
+    lo = _vol_only_sidebar(run, cfg, 7, -1e9)
+    hi = _vol_only_sidebar(run, cfg, 7, 1e9)
+    assert lo["percentile"] == 0.0 and hi["percentile"] == 100.0
+    assert hi["p_value"] == pytest.approx(1 / (hi["n_valid_paths"] + 1))
+    stale = run_on_window(plan, data, window, cfg, signal_delay=2)
+    with pytest.raises(ValueError, match="signal_delay=2"):
+        _vol_only_sidebar(stale, cfg, 7, 0.4)
+
+
+def test_the_random_selection_criterion_never_reads_the_vol_only_sidebar(tmp_path: Path) -> None:
+    """The criterion row reads the liquidity-matched null only: a sidebar that would pass (or
+    fail) does not change it."""
+    crit = load_research_config(write_criteria(tmp_path / "c.toml")).criteria
+    null = {"n_paths": 10, "n_valid_paths": 10, "percentile": 10.0}
+    base = _random_selection_row(crit, {"benchmarks": {"random_selection": dict(null)}})
+    for pct in (100.0, 0.0, None):
+        side = {"label": VOL_ONLY_SIDEBAR_LABEL, "percentile": pct, "p_value": 0.001}
+        bt = {"benchmarks": {"random_selection": {**null, "vol_only_sidebar": side}}}
+        assert _random_selection_row(crit, bt) == base
+    assert base["status"] == "fail"
+
+
+def test_the_runner_null_refuses_a_delayed_run(universe) -> None:  # type: ignore[no-untyped-def]
+    """The null reads every input (members, liquidity share, vol panel, inverse vol, dollar
+    volume) at the decision row; the report only nulls the undelayed plan run, so a
+    ``signal_delay`` run is refused instead of nulled with fresher inputs than it used."""
+    cfg, _, load = universe
+    cfg = replace(cfg, portfolio=replace(cfg.portfolio, null_paths=2))
+    data = load_universe_data(cfg, load, end=cfg.splits.holdout_start)
+    window = design_window(data, cfg)
+    plan = pf.validate_portfolio_plan(H1, interval="1d").plan
+    assert plan is not None
+    stale = run_on_window(plan, data, window, cfg, signal_delay=2)
+    with pytest.raises(ValueError, match="signal_delay=2"):
+        _random_selection(stale, cfg, seed=5)
+
+
+def test_book_mix_json_turns_nan_into_none() -> None:
+    mix = {"strategy": {"liquidity_count": [0.5, float("nan"), 0.5]}, "null": {}}
+    assert book_mix_json(mix) == {"strategy": {"liquidity_count": [0.5, None, 0.5]}, "null": {}}

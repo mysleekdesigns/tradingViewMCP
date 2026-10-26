@@ -229,6 +229,31 @@ def test_run_backtest_portfolio_report_fields_ledger_and_budget(lab: PLab) -> No
     assert rnd["n_paths"] == 5 and rnd["percentile"] is not None
     assert rnd["target_exposure_strategy"] is not None
     assert rnd["target_exposure_null_mean"] is not None
+    assert "liquidity rank" in rnd["matched_on"] and "volatility-tercile" in rnd["matched_on"]
+    assert rnd["liquidity_window"] == lab.cfg.portfolio.null_liquidity_window == 5
+    assert "the 5 ranks centred" in rnd["matched_on"]
+    keys = {"rank", "pool", "widened", "narrow", "vol_met", "vol_thin", "vol_missed"}
+    fb = rnd["match_fallbacks"]
+    assert set(fb) == keys and fb["rank"] > 0
+    assert "widened" in rnd["match_fallbacks_note"]
+    kept = rnd["kept_match_fallbacks"]
+    assert set(kept) == keys and kept["rank"] > 0
+    assert "kept" in rnd["kept_match_fallbacks_note"]
+    assert rnd["liquidity_rank_gap_mean"] is not None and rnd["liquidity_rank_gap_mean"] >= 0
+    assert "rank gap" in rnd["liquidity_rank_gap_note"]
+    assert 0 < rnd["overlap_chance"] <= 1 and 0 <= rnd["overlap_null"] <= 1
+    assert "power" in rnd["overlap_note"]
+    side = rnd["vol_only_sidebar"]  # descriptive only: same paths and seed, no liquidity match
+    assert "descriptive, not a criterion" in side["label"]
+    assert side["n_paths"] == rnd["n_paths"] and side["seed"] == rnd["seed"]
+    assert side["percentile"] is not None and 0 < side["p_value"] <= 1
+    mix = rnd["book_mix"]
+    assert set(mix) == {"strategy", "null"}
+    for side in mix.values():
+        assert set(side) == {"liquidity_count", "liquidity_weight", "vol_count", "vol_weight"}
+        for shares in side.values():
+            assert len(shares) == 3 and abs(sum(shares) - 1.0) < 1e-9
+    assert "tercile" in rnd["book_mix_note"]
     ab = out["alpha_beta"]
     assert {"alpha_annual", "beta", "alpha_p", "rolling_summary"} <= set(ab)
     assert ab["rolling_days"] == 60

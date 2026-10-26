@@ -90,6 +90,9 @@ class PortfolioConfig:
     min_rebalance: float  # engine rebalance band (absolute weight)
     alpha_rolling_days: int  # rolling alpha/beta window to BTC
     null_paths: int  # random-selection null paths
+    # odd band of liquidity ranks the null draws each replaced name from (centred on the
+    # strategy name's rank; lab.evaluate.portfolio_benchmarks, nearest-rank matching)
+    null_liquidity_window: int
     neighbourhood_max_trials: int  # base + every +/-pct neighbour of the portfolio tunables
 
 
@@ -219,6 +222,9 @@ def _portfolio(p: dict) -> PortfolioConfig:
         min_rebalance=_fraction_below_one(p["min_rebalance"], "portfolio.min_rebalance"),
         alpha_rolling_days=_min_int(p["alpha_rolling_days"], "portfolio.alpha_rolling_days", 2),
         null_paths=_min_int(p["null_paths"], "portfolio.null_paths", 1),
+        null_liquidity_window=_odd_int(
+            p["null_liquidity_window"], "portfolio.null_liquidity_window"
+        ),
         neighbourhood_max_trials=_min_int(
             p["neighbourhood_max_trials"], "portfolio.neighbourhood_max_trials", 1
         ),
@@ -293,6 +299,14 @@ def _above_one(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float) or not float(value) > 1.0:
         raise ValueError(f"{name} must be a number > 1, got {value!r}")
     return float(value)
+
+
+def _odd_int(value: object, name: str) -> int:
+    """``value`` as an odd int >= 1; ``ValueError`` naming ``name`` otherwise."""
+    out = _min_int(value, name, 1)
+    if out % 2 == 0:
+        raise ValueError(f"{name} must be odd (a band centred on one rank), got {out}")
+    return out
 
 
 def _min_int(value: object, name: str, low: int) -> int:

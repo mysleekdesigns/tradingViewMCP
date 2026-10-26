@@ -31,3 +31,8 @@ max_proposals = 15                  # distinct plans submitted for a backtest
 max_backtests = 3000                # ledger trials under the run, Optuna trials included
 max_holdout_checks = 1              # also capped by lab.toml holdout_budget (3)
 max_usd = 20.0                      # model spend cap for an autonomous run
+
+[portfolio]
+beat_equal_weight = true
+alpha_p_max = 0.05
+alpha_min_annual = 0.0

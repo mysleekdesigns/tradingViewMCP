@@ -91,4 +91,5 @@ impact_cap = 0.05                # never more than 5% impact per fill: beyond th
 min_rebalance = 0.0              # no rebalance band in the engine: the plan's rank banding is the turnover control under test
 alpha_rolling_days = 60          # PLAN.md Phase 10: alpha/beta to BTC full period and rolling 60-day
 null_paths = 500                 # random-selection null paths: a 95th-percentile bar resolves to 1/501
+null_liquidity_window = 5        # null draws each name from the 5 liquidity ranks centred on the strategy's (+/-2 of ~30, a sixth of the range): tight enough to match a tilt to the least liquid coins, loose enough to stay random
 neighbourhood_max_trials = 37    # base + 9 portfolio tunables (every safeguard on) x 4 non-base steps, so every +/-20% neighbour runs

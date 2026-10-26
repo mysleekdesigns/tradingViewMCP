@@ -82,9 +82,14 @@ from lab.evaluate.adversarial import cost_stress_verdict, delay_verdict
 from lab.evaluate.alpha_beta import alpha_beta, alpha_beta_json
 from lab.evaluate.benchmarks import buy_and_hold, vol_target_weights
 from lab.evaluate.portfolio_benchmarks import (
+    NullPath,
     annual_turnover,
     equal_weight_universe,
-    random_selection_weights,
+    mean_book_mix,
+    mean_path_stat,
+    random_selection_path,
+    sum_kept_match_fallbacks,
+    sum_match_fallbacks,
 )
 from lab.ledger import SELECTION_SOURCES, Ledger, metrics_to_json
 from lab.plan import portfolio as pf
@@ -832,6 +837,12 @@ class _NullResult:
     exposure: np.ndarray  # mean target exposure (sum of target weights) over decisions
     n_paths: int
     seed: int
+    match_fallbacks: dict[str, int]  # fresh null draws per match outcome, all paths
+    kept_match_fallbacks: dict[str, int]  # kept null names per match outcome, all paths
+    book_mix: dict[str, dict[str, list[float]]]  # strategy vs null tercile mix of the book
+    overlap: float  # mean share of the null's names the strategy also holds
+    overlap_chance: float  # the same share for a uniform draw from the pool
+    rank_gap: float  # mean |liquidity rank gap| between each null draw and its target
 
 
 def null_rank(real: float, null: np.ndarray) -> tuple[float, float, bool]:
@@ -864,25 +875,85 @@ def _target_exposure(w: pd.DataFrame, first: pd.Timestamp | None) -> float:
 def _random_selection(run: PortfolioRun, cfg: LabConfig, seed: int) -> _NullResult:
     """The random-selection null (:func:`lab.evaluate.portfolio_benchmarks.
     random_selection_weights`: same members, decision rows, breadth, kept names, total weight,
-    weighting rule, vol terciles and liquidity caps), each path run through the same engine and
-    costs and scored from the strategy's first decision row like the strategy."""
+    weighting rule, liquidity rank band with a volatility-tercile preference, and liquidity
+    caps), each path run through the same engine and costs and scored from the strategy's
+    first decision row like the strategy.
+
+    The liquidity ranks come from ``view.dollar_volume``: the causal trailing median dollar
+    volume (``lab.data.universe.trailing_dollar_volume``, row t reads bars <= t) behind the
+    strategy's liquidity shares and its top-N membership. Only its rank within each row's pool
+    is used. Every name the null replaces, fresh or kept, is drawn from the band of
+    ``[portfolio] null_liquidity_window`` ranks centred on the strategy name it stands in for
+    (``portfolio_benchmarks`` module docstring, **Nearest-rank liquidity matching**).
+
+    The null is only drawn for the undelayed run (the report's own plan run): every null input
+    here (members, liquidity share, vol panel, inverse vol, dollar volume) is read at the
+    decision row, so a ``signal_delay`` run is a ValueError rather than a null whose inputs are
+    fresher than the strategy's."""
     n_paths = cfg.portfolio.null_paths
-    rng = np.random.default_rng(seed)
     view = run.view
-    paths = []
-    for _ in range(n_paths):
-        paths.append(
-            random_selection_weights(
-                run.weights,
-                view.members,
-                rng,
-                inverse_vol=run.signals.inverse_vol,
-                max_weight=run.plan.max_weight,
-                vol_panel=run.signals.vol_panel,
-                liquidity_share=run.liquidity,
-                liquidity_cap_mult=cfg.universe.liquidity_cap_mult,
-            )
+    liquidity_panel = view.dollar_volume.reindex(
+        index=run.weights.index, columns=run.weights.columns
+    )
+    drawn = _null_paths(run, cfg, seed, n_paths, liquidity_panel)
+    sharpe, total, turn, expo = _score_null_paths(run, cfg, [d.weights for d in drawn])
+    return _NullResult(
+        sharpe=sharpe,
+        total_return=total,
+        turnover=turn,
+        exposure=expo,
+        n_paths=n_paths,
+        seed=seed,
+        match_fallbacks=sum_match_fallbacks(d.match_fallbacks for d in drawn),
+        kept_match_fallbacks=sum_kept_match_fallbacks(drawn),
+        book_mix=mean_book_mix(drawn),
+        overlap=mean_path_stat(d.overlap for d in drawn),
+        overlap_chance=mean_path_stat(d.overlap_chance for d in drawn),
+        rank_gap=mean_path_stat(d.rank_gap for d in drawn),
+    )
+
+
+def _null_paths(
+    run: PortfolioRun,
+    cfg: LabConfig,
+    seed: int,
+    n_paths: int,
+    liquidity_panel: pd.DataFrame | None,
+) -> list[NullPath]:
+    """``n_paths`` null paths from ``default_rng(seed)`` with the run's members, weighting
+    inputs, vol panel and liquidity caps; nearest-rank liquidity matching when
+    ``liquidity_panel`` is given, else the volatility-only null. Refuses a delayed run (see
+    :func:`_random_selection`)."""
+    delay = int(run.signals.signal_delay)
+    if delay != 0:
+        raise ValueError(
+            f"the random-selection null needs an undelayed run, got signal_delay={delay}"
         )
+    rng = np.random.default_rng(seed)
+    return [
+        random_selection_path(
+            run.weights,
+            run.view.members,
+            rng,
+            inverse_vol=run.signals.inverse_vol,
+            max_weight=run.plan.max_weight,
+            vol_panel=run.signals.vol_panel,
+            liquidity_share=run.liquidity,
+            liquidity_cap_mult=cfg.universe.liquidity_cap_mult,
+            liquidity_panel=liquidity_panel,
+            liquidity_window=cfg.portfolio.null_liquidity_window,
+        )
+        for _ in range(n_paths)
+    ]
+
+
+def _score_null_paths(
+    run: PortfolioRun, cfg: LabConfig, paths: list[pd.DataFrame]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """``(sharpe, total_return, annual turnover, mean target exposure)`` per path: each run
+    through the strategy's engine, costs and impact, scored from its first decision row on the
+    run's window like the strategy."""
+    view = run.view
     runs = net_returns_for(
         view.candles,
         paths,
@@ -908,14 +979,52 @@ def _random_selection(run: PortfolioRun, cfg: LabConfig, seed: int) -> _NullResu
         )
         turn.append(annual_turnover(t, interval))
         expo.append(_target_exposure(path, run.first_decision))
-    return _NullResult(
-        sharpe=np.asarray(sharpe, dtype=float),
-        total_return=np.asarray(total, dtype=float),
-        turnover=np.asarray(turn, dtype=float),
-        exposure=np.asarray(expo, dtype=float),
-        n_paths=n_paths,
-        seed=seed,
+    return (
+        np.asarray(sharpe, dtype=float),
+        np.asarray(total, dtype=float),
+        np.asarray(turn, dtype=float),
+        np.asarray(expo, dtype=float),
     )
+
+
+VOL_ONLY_SIDEBAR_LABEL = (
+    "descriptive, not a criterion; less strict on liquidity, more powerful against selection skill"
+)
+
+
+def _vol_only_sidebar(run: PortfolioRun, cfg: LabConfig, seed: int, real: float) -> dict[str, Any]:
+    """The report's descriptive volatility-only null (``liquidity_panel=None``; same members,
+    weighting inputs, vol panel, caps, costs, impact, ``n_paths`` and seed as the criterion's
+    null). It does not match liquidity, so a tilt toward illiquid coins can pass it as skill;
+    it copies the strategy's names less, so it sees a real selection skill more often (package
+    H4 probe). Never read by a criterion row: the criterion is the liquidity-matched null."""
+    n_paths = cfg.portfolio.null_paths
+    drawn = _null_paths(run, cfg, seed, n_paths, None)
+    sharpe, _, turn, _ = _score_null_paths(run, cfg, [d.weights for d in drawn])
+    finite = sharpe[np.isfinite(sharpe)]
+    pct, p_value, enough = null_rank(real, sharpe)
+    return {
+        "label": VOL_ONLY_SIDEBAR_LABEL,
+        "n_paths": int(n_paths),
+        "n_valid_paths": int(finite.size),
+        "enough_valid_paths": enough,
+        "seed": int(seed),
+        "sharpe_median": num(np.median(finite)) if finite.size else None,
+        "percentile": num(pct),
+        "p_value": num(p_value),
+        "annual_turnover_null_median": num(np.nanmedian(turn)) if turn.size else None,
+        "overlap_null": num(mean_path_stat(d.overlap for d in drawn)),
+        "matched_on": (
+            "as the criterion's null but without liquidity matching: fresh names from the "
+            "strategy's fresh names' volatility terciles, kept names uniform from the null's "
+            "own survivors"
+        ),
+    }
+
+
+def book_mix_json(mix: Mapping[str, Mapping[str, list[float]]]) -> dict[str, Any]:
+    """``book_mix`` for the report: every share a JSON number, NaN as None."""
+    return {side: {k: [num(x) for x in v] for k, v in d.items()} for side, d in mix.items()}
 
 
 def _equal_weight(run: PortfolioRun, cfg: LabConfig) -> tuple[pd.Series, pd.Series]:
@@ -1299,7 +1408,53 @@ def portfolio_backtest_report(
             "target_exposure_null_mean": num(np.nanmean(rnd.exposure)),
             "matched_on": (
                 "decision rows, members, breadth, kept names, total target weight, weighting "
-                "rule, volatility terciles, max_weight and liquidity caps; same engine and costs"
+                "rule, liquidity rank (trailing dollar volume; each fresh and kept name drawn "
+                f"from the {cfg.portfolio.null_liquidity_window} ranks centred on the "
+                "strategy name it replaces) with a volatility-tercile preference inside that "
+                "band when it holds at least two same-tercile names besides the strategy's "
+                "own, max_weight and liquidity caps; same engine and costs"
+            ),
+            "liquidity_window": cfg.portfolio.null_liquidity_window,
+            "match_fallbacks": dict(rnd.match_fallbacks),
+            "match_fallbacks_note": (
+                "fresh null draws, summed over decision rows and paths: rank = drawn from the "
+                "liquidity rank band around the strategy's fresh pick, pool = drawn from any "
+                "free eligible name (no rank to match, or extra draws the null needed); of "
+                "the rank draws, widened = no free name was in the band so the nearest free "
+                "rank was used, narrow = the band had fewer free names than its width, "
+                "vol_met = drawn from the strategy pick's volatility tercile (the band held "
+                "at least two such names besides the pick itself), vol_thin = it held fewer "
+                "so the whole band was used (restricting would mostly copy the strategy's own "
+                "name), vol_missed = the pick had no volatility tercile; fresh counts include "
+                "the strategy's kept names the null's survivors could not match; a high pool "
+                "or widened share means the liquidity matching held poorly"
+            ),
+            "kept_match_fallbacks": dict(rnd.kept_match_fallbacks),
+            "kept_match_fallbacks_note": (
+                "the null's kept names (as many of its own previous picks as the strategy "
+                "kept) matched to the strategy's kept names, same counts; with only a few "
+                "survivors to choose from, narrow is the norm and widened is common"
+            ),
+            "liquidity_rank_gap_mean": num(rnd.rank_gap),
+            "liquidity_rank_gap_note": (
+                "mean |liquidity rank gap| between each rank-matched null draw and the "
+                "strategy name it replaced (0 = same rank), over draws, then paths"
+            ),
+            "overlap_null": num(rnd.overlap),
+            "overlap_chance": num(rnd.overlap_chance),
+            "overlap_note": (
+                "mean share of the null's held names the strategy also holds on the row, "
+                "against the share a uniform draw from the pool would have; the null may "
+                "draw the strategy's own names, so a high overlap means the test has less "
+                "power to see a real selection skill, not that the strategy is more skilled"
+            ),
+            "vol_only_sidebar": _vol_only_sidebar(run, cfg, seed, net.sharpe),
+            "book_mix": book_mix_json(rnd.book_mix),
+            "book_mix_note": (
+                "share of held names in each tercile (index 0 = least liquid / least "
+                "volatile), count- and weight-weighted, averaged over the decision rows the "
+                "null draws on; strategy vs null (mean over paths). The null's book should "
+                "sit in the same terciles as the strategy's"
             ),
         }
         _record_benchmark(

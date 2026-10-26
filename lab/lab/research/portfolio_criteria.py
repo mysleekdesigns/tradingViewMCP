@@ -16,8 +16,9 @@ from the run's frozen optional ``[portfolio]`` criteria table:
 ``beat_buy_hold``               net Sharpe above BTC buy-and-hold (from the first decision)
 ``beat_vol_target``             net Sharpe above vol-targeted BTC (from the first decision)
 ``random_entry_percentile_min`` Sharpe percentile vs the random-selection null (same members,
-                                decision rows, breadth, turnover, weighting, vol terciles,
-                                liquidity caps, engine and costs); undefined paths are
+                                decision rows, breadth, turnover, weighting, nearest
+                                liquidity rank with a vol-tercile preference, liquidity
+                                caps, engine and costs); undefined paths are
                                 dropped, and with fewer than half valid the row is missing
 ``cost_stress_factor``          ``adversarial``: net total return > 0 with fees, slippage AND
                                 impact scaled by the factor
@@ -185,8 +186,10 @@ def _random_selection_row(c: SuccessCriteria, bt: Mapping[str, Any] | None) -> C
     pct = num(_get(bt, "benchmarks", "random_selection", "percentile"))
     basis = (
         f"Sharpe percentile vs {valid} of {paths} random-selection portfolios with a defined "
-        "Sharpe (same members, decision rows, breadth, kept names, weighting, vol terciles and "
-        "liquidity caps; same engine and costs; scored from the first decision)"
+        "Sharpe (same members, decision rows, breadth, kept names, weighting, nearest liquidity "
+        "rank with a vol-tercile preference where the band has room, and liquidity caps; same "
+        "engine and costs; scored from the first decision; the report's vol-only sidebar is "
+        "descriptive and not read here)"
     )
     if pct is None:
         return _row(name, "fail", None, thr, f"percentile undefined; {basis}")
