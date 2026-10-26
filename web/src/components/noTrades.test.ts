@@ -43,6 +43,11 @@ describe('noTradesCopy', () => {
     )
   })
 
+  it('quotes a custom or seconds timeframe as given', () => {
+    expect(noTradesCopy({ ...base, interval: '3m' }).message).toContain('on 3m between')
+    expect(noTradesCopy({ ...base, interval: '15s' }).message).toContain('on 15s between')
+  })
+
   it('offers older history while there is more', () => {
     expect(noTradesCopy(base)).toMatchObject({
       action: 'Load older history',

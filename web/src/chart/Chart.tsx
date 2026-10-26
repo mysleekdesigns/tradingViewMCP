@@ -25,11 +25,13 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts'
 import '../components/Backtest.css'
+import type { RegimePoint } from '../data/labTypes'
+import { isSecondsTimeframe, timeframeLabel, timeframeSeconds } from '../data/timeframes'
 import { getIndicatorDef } from '../indicators/registry'
 import { chartAcceptsEscape, chartOwnsKeyTarget } from '../state/chartTools'
 import { chartKey } from '../state/shortcuts'
 import type { IndicatorConfig } from '../state/indicators'
-import type { Candle, ChartType, Interval } from '../types'
+import type { Candle, ChartType, Timeframe } from '../types'
 import { mainSeriesData, mainSeriesTail, realPriceLine, usesRealPriceLine } from './chartTypes.ts'
 import type { HeikinAshiBar } from './heikinAshi.ts'
 import { IndicatorLegendRows, PaneLegends } from './IndicatorLegend'
@@ -53,6 +55,7 @@ import {
   mainSeriesOptionsFor,
   paletteFor,
   realPriceLineOptions,
+  timeScaleOptionsFor,
   volumeOptions,
   volumeScaleMargins,
   watermarkOptions,
@@ -60,11 +63,15 @@ import {
   type ChartAppearance,
   type ChartPalette,
 } from './theme'
+import { bindCrosshairSync, type CrosshairSync } from './crosshairSync'
+import { RegimeRibbon, regimeColorsFor } from './regimeRibbon'
 import { composeScreenshot } from './screenshot'
 import { formatDateTime, timezoneLabel } from './timeFormat'
 import {
+  clickedBarTime,
   isNearLeftEdge,
   isExpectedRange,
+  newestBarOffscreen,
   nextAutoOlder,
   planSeriesSync,
   shiftLogicalRange,
@@ -77,7 +84,6 @@ import { ChartCoordinateAdapter } from './drawings/chartAdapter'
 import { DrawingController, type PointerInput } from './drawings/controller'
 import { xToSnappedTime } from './drawings/geometry'
 import { DrawingsPrimitive } from './drawings/primitives'
-import { INTERVAL_SECONDS } from './drawings/timeIndex'
 import type {
   AlertLine,
   ChartContextMenuRequest,
@@ -173,7 +179,8 @@ interface ChartProps {
    */
   historyStart?: number | null
   symbol: string
-  interval: Interval
+  /** Native or aggregated timeframe; seconds timeframes show seconds on the time axis. */
+  interval: Timeframe
   /** Data source shown in the legend, e.g. "Binance · local server". */
   source: string
   /** How the main series draws. Switching replaces the main series; volume stays. */
@@ -249,6 +256,20 @@ interface ChartProps {
    * Escape/Delete/Backspace, even when focus has fallen to <body> under the modal.
    */
   keyboardBlocked?: boolean
+  /**
+   * Multi-chart crosshair sync group (null/undefined = not synced). Hovering this chart moves
+   * the other members' crosshairs to the same time, and theirs move this one's (the legend
+   * follows). Needs `crosshairSyncId`.
+   */
+  crosshairSync?: CrosshairSync | null
+  /** This chart's id inside `crosshairSync` (unique per chart). */
+  crosshairSyncId?: string
+  /** Regime labels for the plotted (closed) bars; null/undefined removes the ribbon. Colours follow `appearance`. */
+  regime?: readonly RegimePoint[] | null
+  /** Left click on the main pane with tool 'cursor' and no drawing hit: the open time (UNIX s) of the plotted bar under the cursor, or null when there is none. Used for picking the bar-replay start. */
+  onTimeClick?: (time: number | null) => void
+  /** True while bar replay drives `candles`: the chart must not auto-request older history (`onNearLeftEdge`/auto-older), and should keep the right edge in view as bars step forward. */
+  replayActive?: boolean
 }
 
 const NO_INDICATORS: readonly IndicatorConfig[] = []
@@ -312,6 +333,11 @@ export function Chart({
   appearance = DEFAULT_APPEARANCE,
   onApi,
   keyboardBlocked = false,
+  crosshairSync = null,
+  crosshairSyncId,
+  regime = null,
+  onTimeClick,
+  replayActive = false,
 }: ChartProps) {
   // Callers may pass a fresh object per render; only the fields matter.
   const { theme, upColor, downColor, timezone } = appearance
@@ -331,6 +357,14 @@ export function Chart({
   const realLineRef = useRef<IPriceLine | null>(null)
   /** Candles currently in the series; lets live ticks use update() instead of setData(). */
   const appliedRef = useRef<readonly Candle[] | null>(null)
+  /**
+   * Candles being pushed into the series by the data effect (null otherwise). LWC fires the
+   * re-applied crosshair move synchronously inside setData()/update(), before `appliedRef` is
+   * advanced, so crosshair sync reads this first. `appliedRef` itself keeps its old ordering:
+   * the range-change handler, which can also fire inside setData(), relies on it being null
+   * until the first push has finished.
+   */
+  const pushingRef = useRef<readonly Candle[] | null>(null)
   /** HA bars for `appliedRef` (Heikin-Ashi mode only), reused for tail updates. */
   const haRef = useRef<HeikinAshiBar[] | null>(null)
   const chartTypeRef = useRef<ChartType>(chartType)
@@ -368,6 +402,16 @@ export function Chart({
   const onFocusDoneRef = useRef(onFocusDone)
   /** Read by the window keydown listener, so a change does not re-bind it. */
   const keyboardBlockedRef = useRef(keyboardBlocked)
+  /** Bar length for crosshair sync, read at event time. */
+  const stepRef = useRef(timeframeSeconds(interval))
+  /** Read by the range listener, the data effect and auto-paging (see `replayActive`). */
+  const replayActiveRef = useRef(replayActive)
+  const onTimeClickRef = useRef(onTimeClick)
+  const toolRef = useRef<ToolMode>(tool)
+  /** The current press was taken by the drawing controller (a drawing hit, or a drawing tool). */
+  const pressConsumedRef = useRef(false)
+  /** Regime strip at the bottom of the main pane; exists while `regime` is non-null. */
+  const ribbonRef = useRef<RegimeRibbon | null>(null)
 
   // Latest drawing callbacks, without re-binding DOM listeners.
   useEffect(() => {
@@ -403,6 +447,14 @@ export function Chart({
   useEffect(() => {
     keyboardBlockedRef.current = keyboardBlocked
   }, [keyboardBlocked])
+  // Declared before the data effect, so a render that both starts replay and swaps the candles
+  // already sees replay on.
+  useEffect(() => {
+    replayActiveRef.current = replayActive
+  }, [replayActive])
+  useEffect(() => {
+    onTimeClickRef.current = onTimeClick
+  }, [onTimeClick])
 
   // Create the chart once per mount. StrictMode mounts twice; cleanup removes the first chart.
   useEffect(() => {
@@ -449,9 +501,27 @@ export function Chart({
       expectedRangeRef.current = null
       // The view moved (scroll, zoom, a new live bar, new data): a new auto-paging run.
       if (autoOlderRef.current) autoOlderRef.current = { ...autoOlderRef.current, pages: 0 }
-      if (isNearLeftEdge(range)) onNearLeftEdgeRef.current?.()
+      // Bar replay shows a fixed prefix of the loaded bars: no older history while it runs.
+      if (isNearLeftEdge(range) && !replayActiveRef.current) onNearLeftEdgeRef.current?.()
     }
     chart.timeScale().subscribeVisibleLogicalRangeChange(onRangeChange)
+
+    // A plain click on the main pane (cursor tool, no drawing under it) reports its bar's time.
+    const onClick = (param: MouseEventParams) => {
+      const handler = onTimeClickRef.current
+      if (!handler) return
+      const series = mainSeriesRef.current
+      const bar = param.time !== undefined && series ? param.seriesData.get(series) : undefined
+      const time = clickedBarTime({
+        tool: toolRef.current,
+        pressConsumed: pressConsumedRef.current,
+        hasPoint: param.point !== undefined,
+        paneIndex: param.paneIndex,
+        barTime: bar?.time,
+      })
+      if (time !== undefined) handler(time)
+    }
+    chart.subscribeClick(onClick)
 
     chartRef.current = chart
     volumeSeriesRef.current = volumeSeries
@@ -461,6 +531,7 @@ export function Chart({
     return () => {
       chart.unsubscribeCrosshairMove(onCrosshairMove)
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(onRangeChange)
+      chart.unsubscribeClick(onClick)
       disposed = true
       watermarkRef.current?.detach()
       indicatorManager.detach()
@@ -527,17 +598,34 @@ export function Chart({
   useEffect(() => {
     watermarkRef.current?.applyOptions(
       watermarkOptions(
-        `${symbol}, ${interval}`,
+        `${symbol}, ${timeframeLabel(interval)}`,
         fontsReady ? fontFamily : fallbackFontFamily,
         palette,
       ),
     )
   }, [symbol, interval, fontsReady, palette])
 
-  // Bar length for extrapolating drawing anchors past either end of the data.
+  // Bar length for extrapolating drawing anchors past either end of the data, and seconds on
+  // the time axis for seconds timeframes (applied in place; the chart is not recreated).
   useEffect(() => {
-    coords.index.setStep(INTERVAL_SECONDS[interval])
+    const step = timeframeSeconds(interval)
+    coords.index.setStep(step)
+    stepRef.current = step
+    chartRef.current?.applyOptions(timeScaleOptionsFor(interval))
   }, [coords, interval])
+
+  // Multi-chart crosshair sync. Declared after the creation effect, so the chart exists; the
+  // series and bars are read at event time (a chart-type switch replaces the series).
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart || !crosshairSync || crosshairSyncId === undefined) return
+    return bindCrosshairSync(crosshairSync, crosshairSyncId, chart, {
+      series: () => mainSeriesRef.current,
+      bars: () => pushingRef.current ?? appliedRef.current,
+      step: () => stepRef.current,
+      onShow: setHoveredTime,
+    })
+  }, [crosshairSync, crosshairSyncId])
 
   // Push data whenever the candles change. Runs after the creation effects on mount.
   // Live ticks only touch the tail, so they go through update(), which keeps the user's
@@ -550,29 +638,41 @@ export function Chart({
     if (!chart || !mainSeries || !volumeSeries) return
     const type = chartTypeRef.current
     const plan = planSeriesSync(appliedRef.current, candles)
-    if (plan.kind === 'set' || plan.kind === 'prepend') {
-      const timeScale = chart.timeScale()
-      const range = plan.kind === 'prepend' ? timeScale.getVisibleLogicalRange() : null
-      const { points, ha } = mainSeriesData(type, candles)
-      mainSeries.setData(points)
-      volumeSeries.setData(toVolumeData(candles, volumePaletteOf(paletteRef.current)))
-      haRef.current = ha
-      indicatorManager.applyPlan(plan, candles)
-      if (plan.kind === 'prepend' && range) {
-        const shifted = shiftLogicalRange(range, plan.count)
-        expectedRangeRef.current = shifted
-        timeScale.setVisibleLogicalRange(shifted)
+    pushingRef.current = candles
+    try {
+      if (plan.kind === 'set' || plan.kind === 'prepend') {
+        const timeScale = chart.timeScale()
+        const range = plan.kind === 'prepend' ? timeScale.getVisibleLogicalRange() : null
+        const { points, ha } = mainSeriesData(type, candles)
+        mainSeries.setData(points)
+        volumeSeries.setData(toVolumeData(candles, volumePaletteOf(paletteRef.current)))
+        haRef.current = ha
+        indicatorManager.applyPlan(plan, candles)
+        if (plan.kind === 'prepend' && range) {
+          const shifted = shiftLogicalRange(range, plan.count)
+          expectedRangeRef.current = shifted
+          timeScale.setVisibleLogicalRange(shifted)
+        }
+      } else if (plan.kind === 'update') {
+        const { points, ha } = mainSeriesTail(type, candles, plan.from, haRef.current)
+        for (const point of points) mainSeries.update(point)
+        for (let i = plan.from; i < candles.length; i++) {
+          volumeSeries.update(toVolumePoint(candles[i], volumePaletteOf(paletteRef.current)))
+        }
+        haRef.current = ha
+        indicatorManager.applyPlan(plan, candles)
       }
-    } else if (plan.kind === 'update') {
-      const { points, ha } = mainSeriesTail(type, candles, plan.from, haRef.current)
-      for (const point of points) mainSeries.update(point)
-      for (let i = plan.from; i < candles.length; i++) {
-        volumeSeries.update(toVolumePoint(candles[i], volumePaletteOf(paletteRef.current)))
+      if (plan.kind !== 'none') syncRealPriceLine(realLineRef.current, candles, paletteRef.current)
+      // Bar replay: a step forward that lands right of the view scrolls the newest bar back in.
+      // (A step back or the replay start is a setData, which keeps the view on the last bar.)
+      if (replayActiveRef.current && plan.kind !== 'none') {
+        const timeScale = chart.timeScale()
+        if (newestBarOffscreen(timeScale.getVisibleLogicalRange(), candles.length))
+          timeScale.scrollToRealTime()
       }
-      haRef.current = ha
-      indicatorManager.applyPlan(plan, candles)
+    } finally {
+      pushingRef.current = null
     }
-    if (plan.kind !== 'none') syncRealPriceLine(realLineRef.current, candles, paletteRef.current)
     appliedRef.current = candles
     // O(1): the index keeps a reference; drawings re-project on LWC's next redraw.
     coords.index.setBars(candles)
@@ -598,6 +698,7 @@ export function Chart({
       syncRealPriceLine(realLineRef.current, applied, palette)
     }
     drawingsPrimitiveRef.current?.setHandleColors(handleColorsFor(palette))
+    ribbonRef.current?.setColors(regimeColorsFor(palette))
     indicatorManager.setPalette(palette)
   }, [palette, theme, upColor, downColor, timezone, indicatorManager])
 
@@ -621,7 +722,7 @@ export function Chart({
         ? `O ${last.open}  H ${last.high}  L ${last.low}  C ${last.close}  ${last.change}  ·  Vol ${last.volume}  ·  ${captured}`
         : captured
       return composeScreenshot(canvas, {
-        title: `${sym} · ${iv} · ${src}`,
+        title: `${sym} · ${timeframeLabel(iv)} · ${src}`,
         subtitle,
         palette: paletteRef.current,
       })
@@ -641,7 +742,9 @@ export function Chart({
   useEffect(() => {
     const chart = chartRef.current
     if (!chart) return
-    const near = isNearLeftEdge(chart.timeScale().getVisibleLogicalRange())
+    // Never while bar replay runs: it shows a fixed prefix of the loaded bars.
+    const near =
+      !replayActiveRef.current && isNearLeftEdge(chart.timeScale().getVisibleLogicalRange())
     const { state, request } = nextAutoOlder(autoOlderRef.current, historyStart, near)
     autoOlderRef.current = state
     if (request) onNearLeftEdgeRef.current?.()
@@ -655,6 +758,7 @@ export function Chart({
     if (selectedDrawingId !== undefined) drawingController.setSelected(selectedDrawingId)
   }, [drawingController, selectedDrawingId])
   useEffect(() => {
+    toolRef.current = tool
     drawingController.setTool(tool)
     // A drawing tool owns touch gestures on the chart; cursor mode leaves them to LWC.
     const container = containerRef.current
@@ -703,9 +807,11 @@ export function Chart({
     const onPointerDown = (e: PointerEvent) => {
       // Ctrl-click is a right-click on macOS; leave it to the contextmenu handler.
       if (!e.isPrimary || e.ctrlKey) return
+      pressConsumedRef.current = false
       const p = local(e)
       if (!p || !p.inside) return
       if (!drawingController.pointerDown({ x: p.x, y: p.y, button: e.button })) return
+      pressConsumedRef.current = true
       e.stopPropagation()
       e.preventDefault()
       // preventDefault also stops the press from moving focus. Blur whatever had it (e.g. a
@@ -809,6 +915,34 @@ export function Chart({
     backtestOverlay.setData(backtest)
     return () => backtestOverlay.setData(null)
   }, [backtest, backtestOverlay])
+
+  // Regime ribbon: created while `regime` is non-null, removed when it becomes null.
+  const hasRegime = regime !== null
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart || !hasRegime) return
+    const ribbon = new RegimeRibbon(chart, regimeColorsFor(paletteRef.current))
+    ribbonRef.current = ribbon
+    return () => {
+      if (ribbonRef.current === ribbon) ribbonRef.current = null
+      // On unmount the chart is already removed, with the ribbon series.
+      if (chartRef.current === chart) ribbon.remove()
+    }
+  }, [hasRegime])
+
+  // Ribbon points, filtered to the plotted bars (a point at a time the main series lacks would
+  // add a bar to the time scale). Re-applied when the labels or the bar set change; live ticks
+  // on the forming bar keep the key, so they cost nothing.
+  const barsKey =
+    candles.length === 0
+      ? ''
+      : `${candles.length}:${candles[0].time}:${candles[candles.length - 1].time}`
+  useEffect(() => {
+    const ribbon = ribbonRef.current
+    if (!ribbon || regime === null) return
+    const plotted = new Set((appliedRef.current ?? []).map((c) => c.time))
+    ribbon.setPoints(regime, plotted)
+  }, [regime, hasRegime, barsKey])
 
   // One-shot scroll/zoom to a time range (e.g. the backtest window or one trade).
   const focusKey = focusRange?.key ?? null
@@ -944,7 +1078,7 @@ function candleColorVars(p: ChartPalette): CSSProperties {
 
 interface LegendProps {
   symbol: string
-  interval: Interval
+  interval: Timeframe
   source: string
   values: LegendValues | null
   /** Display zone for the bar time ('UTC' | 'local' | IANA). */
@@ -958,7 +1092,7 @@ function Legend({ symbol, interval, source, values, timezone, children }: Legend
     <div className="chart-legend" aria-live="off">
       <div className="chart-legend__row">
         <span className="chart-legend__title">
-          {symbol} · {interval} · {source}
+          {symbol} · {timeframeLabel(interval)} · {source}
         </span>
         {values && (
           <span className={`chart-legend__values chart-legend__values--${values.direction}`}>
@@ -974,7 +1108,8 @@ function Legend({ symbol, interval, source, values, timezone, children }: Legend
         <div className="chart-legend__row chart-legend__row--secondary">
           <Field label="Vol" value={values.volume} />
           <span className="chart-legend__time">
-            {formatDateTime(values.time, timezone)} {timezoneLabel(timezone, values.time)}
+            {formatDateTime(values.time, timezone, { seconds: isSecondsTimeframe(interval) })}{' '}
+            {timezoneLabel(timezone, values.time)}
           </span>
         </div>
       )}

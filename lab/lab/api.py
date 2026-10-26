@@ -15,6 +15,11 @@ Concurrency: endpoints are sync (FastAPI runs them in a threadpool). Each reques
 thread) and closes it afterwards; backtests are serialised by a lock so two reports in the same
 run cannot interleave their trial counts.
 
+``POST /lab/regime`` labels chart bars with hedgeFund's regime engine for the chart's regime
+ribbon. It is a display feature, not a trial: nothing is written to the ledger. Each label uses
+only closes at or before its bar (``lab.registry.regime.regime_labels``), so appending bars never
+changes an earlier label.
+
 Results are historical and not forward-looking.
 """
 
@@ -26,8 +31,9 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
+from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import numpy as np
 import pandas as pd
@@ -35,7 +41,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi import Path as PathParam
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from lab.config import LabConfig, load_config
 from lab.engine import run_signals, run_weights
@@ -43,6 +49,7 @@ from lab.ledger import Ledger
 from lab.plan import validate_plan
 from lab.plan.validator import PlanValidationError
 from lab.registry import REGISTRY
+from lab.registry.regime import REGIME_STATE, regime_labels
 from lab.report import ledger_detail, ledger_item
 from lab.research import readers
 from lab.research.contract import (
@@ -61,7 +68,15 @@ from lab.runner import (
 )
 from lab.types import ZERO_COSTS
 
-__all__ = ["ALLOWED_HOSTS", "app", "create_app", "host_allowed", "main"]
+__all__ = [
+    "ALLOWED_HOSTS",
+    "MAX_REGIME_BARS",
+    "app",
+    "create_app",
+    "host_allowed",
+    "main",
+    "regime_points",
+]
 
 ALLOWED_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]"})
 LOOPBACK_BIND = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -102,6 +117,69 @@ class PlanBody(BaseModel):
 
 class RunBody(PlanBody):
     run_id: str = Field(default="ui", pattern=RUN_ID_PATTERN)
+
+
+MAX_REGIME_BARS = 20_000
+REGIME_ENGINE = "hedgefund.regime.labels.label_regimes"
+# Same bounds and defaults as the registry's regime_state feature.
+_REGIME_PARAMS = {p.name: p for p in REGIME_STATE.params}
+_REGIME_WINDOW = _REGIME_PARAMS["window_bars"]
+_REGIME_THRESHOLD = _REGIME_PARAMS["threshold"]
+# hedgeFund state index (0 Bear, 1 Sideways, 2 Bull) -> ribbon state -1 / 0 / +1.
+_REGIME_STATE_VALUE = (-1, 0, 1)
+
+PositiveClose = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+
+
+class RegimeBody(BaseModel):
+    """Closed bars to label: ascending unique UNIX-second times and their closes."""
+
+    times: list[Annotated[int, Field(strict=True)]] = Field(max_length=MAX_REGIME_BARS)
+    closes: list[PositiveClose] = Field(max_length=MAX_REGIME_BARS)
+    window_bars: int = Field(
+        default=int(_REGIME_WINDOW.default),
+        ge=int(_REGIME_WINDOW.low),
+        le=int(_REGIME_WINDOW.high),
+        strict=True,
+    )
+    threshold: float = Field(
+        default=float(_REGIME_THRESHOLD.default),
+        ge=float(_REGIME_THRESHOLD.low),
+        le=float(_REGIME_THRESHOLD.high),
+        allow_inf_nan=False,
+    )
+
+    @field_validator("times")
+    @classmethod
+    def _ascending(cls, v: list[int]) -> list[int]:
+        if any(b <= a for a, b in pairwise(v)):
+            raise ValueError("times must be strictly ascending (unique UNIX seconds)")
+        return v
+
+    @field_validator("closes")
+    @classmethod
+    def _same_length(cls, v: list[float], info: ValidationInfo) -> list[float]:
+        times = info.data.get("times")
+        if times is not None and len(times) != len(v):
+            raise ValueError(f"closes has {len(v)} values but times has {len(times)}")
+        return v
+
+
+def regime_points(
+    times: list[int], closes: list[float], window_bars: int, threshold: float
+) -> list[dict[str, int | None]]:
+    """One ``{time, state}`` per bar; ``state`` is None during the ``window_bars`` warm-up."""
+    if not times:
+        return []
+    close = pd.Series(
+        np.asarray(closes, dtype=np.float64),
+        index=pd.to_datetime(np.asarray(times, dtype=np.int64), unit="s", utc=True),
+    )
+    labels = regime_labels(close, window_bars, threshold)
+    return [
+        {"time": t, "state": _REGIME_STATE_VALUE[lab] if lab >= 0 else None}
+        for t, lab in zip(times, labels.tolist(), strict=True)
+    ]
 
 
 def _warm_up() -> None:
@@ -227,6 +305,16 @@ def create_app(
     def validate(body: PlanBody) -> dict[str, Any]:
         _, errors = validate_plan(body.plan)
         return {"ok": not errors, "errors": _errors_json(errors)}
+
+    @app.post("/lab/regime")
+    def regime(body: RegimeBody) -> dict[str, Any]:
+        # Display only: no ledger write, no candle loading; labels only the bars the chart sent.
+        return {
+            "points": regime_points(body.times, body.closes, body.window_bars, body.threshold),
+            "window_bars": body.window_bars,
+            "threshold": body.threshold,
+            "engine": REGIME_ENGINE,
+        }
 
     def _run(fn: Any, body: RunBody) -> Any:
         try:

@@ -12,6 +12,7 @@ import {
   parseTicker24hr,
 } from './binanceTicker'
 import { MarketDataError, type MarketDataProvider, type SubscribeOptions } from './provider'
+import type { SecondsSource } from './timeframeProvider'
 import { BINANCE_REST, BINANCE_WS, DIRECT_VENUE, type VenueInfo } from './venue'
 
 /**
@@ -119,6 +120,20 @@ function withAbort<T>(p: Promise<T>, signal: AbortSignal | undefined, what: stri
   })
 }
 
+export interface BinanceProviderOptions {
+  baseUrl?: string
+  fetchFn?: typeof fetch
+  timeoutMs?: number
+  wsBaseUrl?: string
+  WebSocketImpl?: typeof WebSocket
+  staleTimeoutMs?: number
+  /** Venue reported by getVenue; pass `{ id: 'binance-us', ... }` with the Binance.US hosts. */
+  venue?: VenueInfo
+}
+
+/** A kline interval Binance serves: every app Interval plus `1s` (Binance-only, not Coinbase). */
+type KlineInterval = Interval | '1s'
+
 export class BinanceProvider implements MarketDataProvider {
   private readonly baseUrl: string
   private readonly fetchFn: typeof fetch
@@ -130,16 +145,7 @@ export class BinanceProvider implements MarketDataProvider {
   /** Memoized exchangeInfo; cleared when the fetch fails so the next call retries. */
   private symbolsPromise: Promise<SymbolInfo[]> | null = null
 
-  constructor(opts?: {
-    baseUrl?: string
-    fetchFn?: typeof fetch
-    timeoutMs?: number
-    wsBaseUrl?: string
-    WebSocketImpl?: typeof WebSocket
-    staleTimeoutMs?: number
-    /** Venue reported by getVenue; pass `{ id: 'binance-us', ... }` with the Binance.US hosts. */
-    venue?: VenueInfo
-  }) {
+  constructor(opts?: BinanceProviderOptions) {
     this.venue = opts?.venue ?? DIRECT_VENUE
     this.baseUrl = (opts?.baseUrl ?? BINANCE_REST).replace(/\/+$/, '')
     // Bind so the global fetch is not called with a foreign `this`.
@@ -210,12 +216,32 @@ export class BinanceProvider implements MarketDataProvider {
     }
   }
 
-  async getCandles(
+  getCandles(
     symbol: string,
     interval: Interval,
     limit = 500,
     endTime?: number,
     opts?: { signal?: AbortSignal },
+  ): Promise<Candle[]> {
+    return this.fetchKlines(symbol, interval, limit, endTime, opts)
+  }
+
+  /** `1s` klines from the same hosts, for seconds timeframes (see createTimeframeProvider). */
+  secondsSource(): SecondsSource {
+    return {
+      getCandles: (symbol, _interval, limit = 500, endTime, opts) =>
+        this.fetchKlines(symbol, '1s', limit, endTime, opts),
+      subscribeCandles: (symbol, _interval, onCandle, opts) =>
+        this.streamKlines(symbol, '1s', onCandle, opts),
+    }
+  }
+
+  private async fetchKlines(
+    symbol: string,
+    interval: KlineInterval,
+    limit: number,
+    endTime: number | undefined,
+    opts: { signal?: AbortSignal } | undefined,
   ): Promise<Candle[]> {
     const sym = symbol.trim().toUpperCase()
     const params = new URLSearchParams({
@@ -261,6 +287,15 @@ export class BinanceProvider implements MarketDataProvider {
     interval: Interval,
     onCandle: (c: Candle, closed: boolean) => void,
     opts?: SubscribeOptions,
+  ): () => void {
+    return this.streamKlines(symbol, interval, onCandle, opts)
+  }
+
+  private streamKlines(
+    symbol: string,
+    interval: KlineInterval,
+    onCandle: (c: Candle, closed: boolean) => void,
+    opts: SubscribeOptions | undefined,
   ): () => void {
     const WS = this.resolveWebSocket('subscribeCandles')
     const sym = symbol.trim().toUpperCase()
@@ -407,4 +442,13 @@ export class BinanceProvider implements MarketDataProvider {
       },
     })
   }
+}
+
+/**
+ * Binance `1s` klines (REST `/api/v3/klines?interval=1s`, WS `<symbol>@kline_1s`) on the
+ * given hosts (default: Binance's market-data-only hosts). Pass it to createTimeframeProvider
+ * to enable seconds timeframes.
+ */
+export function createBinanceSecondsSource(opts?: BinanceProviderOptions): SecondsSource {
+  return new BinanceProvider(opts).secondsSource()
 }

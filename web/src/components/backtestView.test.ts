@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { LabError, LAB_OFFLINE_MESSAGE } from '../data/labApi'
 import type { BacktestReport, LabMetrics } from '../data/labTypes'
 import {
+  BACKTEST_TIMEFRAME_MESSAGE,
+  backtestSupported,
   DOCK_DEFAULT_HEIGHT,
   DOCK_MIN_HEIGHT,
   EMPTY,
@@ -428,6 +430,51 @@ describe('runBlockedReason', () => {
     expect(runBlockedReason(invalid, text, ok)).toBe('Fix the plan errors first')
     const off = testerReducer(s, { type: 'lab-status', status: 'offline' })
     expect(runBlockedReason(off, text, ok)).toBe(LAB_OFFLINE_MESSAGE)
+  })
+})
+
+describe('non-native timeframes', () => {
+  it('backtestSupported accepts exactly the native intervals', () => {
+    for (const tf of ['1m', '5m', '15m', '1h', '4h', '1d', '1w'] as const) {
+      expect(backtestSupported(tf)).toBe(true)
+    }
+    for (const tf of ['1s', '5s', '30s', '3m', '30m', '2h', '12h', '3d', '2w'] as const) {
+      expect(backtestSupported(tf)).toBe(false)
+    }
+  })
+
+  it('blocks Run on a seconds or custom chart timeframe with the explanation', () => {
+    const s = fresh()
+    const text = planTextFor(s, 'BTCUSDT', '4h')
+    const ok = parsePlanText(text)
+    expect(runBlockedReason(s, text, ok, '4h')).toBeNull()
+    expect(runBlockedReason(s, text, ok, '1w')).toBeNull()
+    expect(runBlockedReason(s, text, ok, '3m')).toBe(BACKTEST_TIMEFRAME_MESSAGE)
+    expect(runBlockedReason(s, text, ok, '5s')).toBe(BACKTEST_TIMEFRAME_MESSAGE)
+    expect(BACKTEST_TIMEFRAME_MESSAGE).toBe(
+      'Backtests run on native intervals (1m–1W); switch timeframe',
+    )
+    // A running backtest still says so first.
+    const running = testerReducer(s, { type: 'run-start', startedAt: 0 })
+    expect(runBlockedReason(running, text, ok, '3m')).toBe('A backtest is running')
+  })
+
+  it('the plan chip says "Not checked" on an unsupported timeframe, without announcing', () => {
+    const s = fresh()
+    const text = planTextFor(s, 'BTCUSDT', '2h')
+    expect(planStatus(s, text, true, 0, '2h')).toEqual({
+      tone: 'warn',
+      text: 'Not checked',
+      announce: '',
+    })
+    expect(planStatus(s, text, true, 0, '4h').text).toBe('Checking…')
+    expect(planStatus(s, '{', false, 1, '2h').text).toBe('Invalid JSON')
+  })
+
+  it('plans history with the custom timeframe length', () => {
+    const w = { kind: 'design' as const, start: 0, end: 10 * 7200 }
+    expect(historyPlan(10 * 7200, w, '2h')).toMatchObject({ needed: true, bars: 10 })
+    expect(historyPlan(100, w, '5s')).toMatchObject({ needed: true, bars: 20 })
   })
 })
 

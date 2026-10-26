@@ -174,3 +174,34 @@ export interface LedgerQuery {
   limit?: number
   offset?: number
 }
+
+/** hedgeFund regime of a bar: -1 Bear, 0 Sideways, +1 Bull. */
+export type RegimeState = -1 | 0 | 1
+
+/** `state` is null during the warm-up (fewer than `window_bars` earlier bars sent). */
+export interface RegimePoint {
+  time: number
+  state: RegimeState | null
+}
+
+/**
+ * Closed bars to label (never the forming last bar): ascending unique UNIX-second times and
+ * their closes (> 0), at most 20 000. Each label uses only closes at or before its bar.
+ */
+export interface RegimeRequest {
+  times: number[]
+  closes: number[]
+  /** Bars in the trailing return, 1..5000 (lab default 20). */
+  window_bars?: number
+  /** Trailing-return threshold as a fraction, 0.001..1 (lab default 0.05). */
+  threshold?: number
+}
+
+export interface RegimeResponse {
+  /** One point per requested bar, same order. */
+  points: RegimePoint[]
+  window_bars: number
+  threshold: number
+  /** The hedgeFund function that labels the bars. */
+  engine: string
+}

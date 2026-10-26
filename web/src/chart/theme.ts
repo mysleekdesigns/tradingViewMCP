@@ -12,8 +12,9 @@ import {
   type TextWatermarkOptions,
   type TimeChartOptions,
 } from 'lightweight-charts'
+import { isSecondsTimeframe } from '../data/timeframes'
 import type { ThemeName } from '../state/settings'
-import type { ChartType } from '../types'
+import type { ChartType, Timeframe } from '../types'
 import { makeTickMarkFormatter, makeTimeFormatter } from './timeFormat'
 
 /** Every colour the chart draws with (series, scales, crosshair, watermark). */
@@ -191,6 +192,14 @@ export function chartOptionsFor(a: ChartAppearance): DeepPartial<TimeChartOption
     },
     localization: { timeFormatter: makeTimeFormatter(a.timezone) },
   }
+}
+
+/**
+ * Time-scale options that follow the timeframe: seconds on the axis (TickMarkType
+ * TimeWithSeconds) only for seconds timeframes. Applied in place on a timeframe change.
+ */
+export function timeScaleOptionsFor(tf: Timeframe): DeepPartial<TimeChartOptions> {
+  return { timeScale: { secondsVisible: isSecondsTimeframe(tf) } }
 }
 
 /** Dark, UTC defaults. */

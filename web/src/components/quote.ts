@@ -1,10 +1,8 @@
 import { changePercent, formatChange, formatPrice, type Direction } from '../chart/legend'
-import type { Candle, Interval } from '../types'
+import { timeframeSeconds } from '../data/timeframes'
+import type { Candle, Timeframe } from '../types'
 
 const DAY_SECONDS = 86_400
-
-/** Intervals shorter than a day compare against the price 24h earlier; longer ones against the previous bar. */
-const INTRADAY: ReadonlySet<Interval> = new Set(['1m', '5m', '15m', '1h', '4h'])
 
 export interface Quote {
   price: string
@@ -55,14 +53,15 @@ function roundDiff(diff: number, price: string): { value: number; text: string }
  * Header quote for the latest candle. The latest candle may still be forming, so this is
  * a display value only.
  *
- * Intraday intervals compare against the price 24h before the last bar's open time. When less
+ * Timeframes shorter than a day (seconds included) compare against the price 24h before the last bar's open time. When less
  * than 24h is loaded (e.g. 1m with 500 bars), they fall back to the previous close, and `basis`
  * says so.
  */
-export function summarizeQuote(candles: readonly Candle[], interval: Interval): Quote | null {
+export function summarizeQuote(candles: readonly Candle[], interval: Timeframe): Quote | null {
   const last = candles[candles.length - 1]
   if (last === undefined) return null
-  const dayBase = INTRADAY.has(interval) ? priceAt(candles, last.time - DAY_SECONDS) : undefined
+  const intraday = timeframeSeconds(interval) < DAY_SECONDS
+  const dayBase = intraday ? priceAt(candles, last.time - DAY_SECONDS) : undefined
   const base = dayBase ?? candles[candles.length - 2]?.close
   const pct = changePercent(last.close, base)
   const price = formatPrice(last.close)

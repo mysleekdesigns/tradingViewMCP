@@ -230,6 +230,12 @@ describe('sidebar panel pref', () => {
     expect(loadSidebarPanel(s)).toBe('watchlist')
   })
 
+  it('remembers the paper trading panel', () => {
+    const s = memoryStorage()
+    saveSidebarPanel('paper', s)
+    expect(loadSidebarPanel(s)).toBe('paper')
+  })
+
   it('defaults to the watchlist when unset, invalid, or unreadable', () => {
     expect(loadSidebarPanel(memoryStorage())).toBe('watchlist')
     expect(loadSidebarPanel(memoryStorage({ [SIDEBAR_PANEL_KEY]: '"news"' }))).toBe('watchlist')

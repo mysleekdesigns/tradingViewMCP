@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { MarketDataProvider } from '../data/provider'
-import type { Interval } from '../types'
+import type { CandleSource } from '../data/timeframeProvider'
+import type { Timeframe } from '../types'
 import { initialSnapshot, LiveCandlesController, type LiveCandlesSnapshot } from './liveCandles'
 
 interface Params {
-  provider: MarketDataProvider
+  provider: CandleSource
   symbol: string
-  interval: Interval
+  interval: Timeframe
   limit: number
   source: string
   maxBars: number | undefined
@@ -46,9 +46,10 @@ function sameParams(a: Params, b: Params): boolean {
  * stopped controller never emits, so its snapshots cannot leak into state.
  */
 export function useLiveCandles(
-  provider: MarketDataProvider,
+  /** A MarketDataProvider (native Intervals) or a TimeframeProvider (any Timeframe). */
+  provider: CandleSource,
   symbol: string,
-  interval: Interval,
+  interval: Timeframe,
   limit: number,
   source: string,
   /** Raw-bar limit for loadOlder (see LiveCandlesOptions.maxBars). */

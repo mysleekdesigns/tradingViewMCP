@@ -91,6 +91,18 @@ describe('summarizeQuote', () => {
     expect(q).toMatchObject({ change: '-10.00', changePct: '-5.00%', direction: 'down' })
     expect(q?.basis).toBe('vs prev close')
   })
+
+  it('treats custom and seconds timeframes under a day as intraday (24h basis)', () => {
+    const closes = Array.from({ length: 25 }, (_, i) => 100 + i)
+    for (const tf of ['2h', '12h', '30s'] as const) {
+      expect(summarizeQuote(hourly(closes), tf)?.basis).toBe('24h')
+    }
+  })
+
+  it('compares custom day-and-up timeframes against the previous close', () => {
+    expect(summarizeQuote(hourly([200, 190]), '3d')?.basis).toBe('vs prev close')
+    expect(summarizeQuote(hourly([200, 190]), '2w')?.basis).toBe('vs prev close')
+  })
 })
 
 describe('UTC formatting', () => {

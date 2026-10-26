@@ -3,6 +3,10 @@ export type Interval = '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'
 /** Every supported interval, shortest first (toolbar order). */
 export const INTERVALS: readonly Interval[] = ['1m', '5m', '15m', '1h', '4h', '1d', '1w']
 
+export type TimeframeUnit = 's' | 'm' | 'h' | 'd' | 'w'
+/** A chart timeframe: a native Interval or a custom/seconds one, e.g. '5s', '3m', '2h', '3d'. */
+export type Timeframe = `${number}${TimeframeUnit}`
+
 /** How the main series draws candles. */
 export type ChartType = 'candles' | 'hollow' | 'line' | 'area' | 'heikin-ashi'
 

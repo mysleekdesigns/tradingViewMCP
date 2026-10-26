@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { BinanceProvider, parseKline } from './binance'
+import { BinanceProvider, createBinanceSecondsSource, parseKline } from './binance'
 import { BINANCE_US_REST } from './venue'
 import { MarketDataError } from './provider'
 
@@ -274,5 +274,67 @@ describe('BinanceProvider error mapping is shared across endpoints', () => {
   it('getSymbols maps HTTP 451 to region-blocked', async () => {
     const fetchFn = fakeFetch(async () => new Response('', { status: 451 }))
     await expectKind(new BinanceProvider({ fetchFn }).getSymbols(), 'region-blocked', 451)
+  })
+})
+
+describe('1s klines (seconds source)', () => {
+  it('requests interval=1s with the same paging params and parsing', async () => {
+    const urls: string[] = []
+    const fetchFn = fakeFetch(async (url) => {
+      urls.push(url)
+      return jsonResponse([ROW_B, ROW_A])
+    })
+    const src = createBinanceSecondsSource({ fetchFn })
+    const out = await src.getCandles('btcusdt', '1s', 2000, 1_700_000_000)
+    expect(urls).toEqual([
+      'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1s&limit=1000&endTime=1700000000000',
+    ])
+    expect(out.map((c) => c.time)).toEqual([1_700_000_000, 1_700_003_600])
+  })
+
+  it('maps errors like the provider (bad symbol)', async () => {
+    const fetchFn = fakeFetch(async () =>
+      jsonResponse({ code: -1121, msg: 'Invalid symbol.' }, 400),
+    )
+    await expectKind(
+      new BinanceProvider({ fetchFn }).secondsSource().getCandles('NOPE', '1s'),
+      'bad-symbol',
+      400,
+    )
+  })
+
+  it('streams <symbol>@kline_1s and only accepts 1s klines', () => {
+    const sockets: { url: string; onmessage: ((ev: MessageEvent) => void) | null }[] = []
+    class FakeWS {
+      onopen = null
+      onmessage: ((ev: MessageEvent) => void) | null = null
+      onerror = null
+      onclose = null
+      readyState = 0
+      readonly url: string
+      constructor(url: string) {
+        this.url = url
+        sockets.push(this)
+      }
+      close() {}
+    }
+    const got: [number, number, boolean][] = []
+    const src = createBinanceSecondsSource({
+      WebSocketImpl: FakeWS as unknown as typeof WebSocket,
+    })
+    const un = src.subscribeCandles('BTCUSDT', '1s', (c, closed) =>
+      got.push([c.time, c.close, closed]),
+    )
+    expect(sockets[0].url).toBe('wss://data-stream.binance.vision/ws/btcusdt@kline_1s')
+    const msg = (i: string, x: boolean) =>
+      JSON.stringify({
+        e: 'kline',
+        s: 'BTCUSDT',
+        k: { t: 1_700_000_001_000, s: 'BTCUSDT', i, o: '1', h: '2', l: '0.5', c: '1.5', v: '3', x },
+      })
+    sockets[0].onmessage?.({ data: msg('1m', false) } as MessageEvent)
+    sockets[0].onmessage?.({ data: msg('1s', true) } as MessageEvent)
+    expect(got).toEqual([[1_700_000_001, 1.5, true]])
+    un()
   })
 })

@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import { shortcutCommand, type ShortcutKey } from '../components/drawingTools'
-import { INTERVALS } from '../types'
+import { PRESET_TIMEFRAMES } from '../data/timeframes'
+import { replayKeyAction } from './replay'
+import { INTERVALS, type Timeframe } from '../types'
 import {
   appShortcut,
   chartKey,
   isMacPlatform,
   shortcutGroups,
   shortcutRepeats,
+  stepTimeframe,
   type ChartKeyEvent,
 } from './shortcuts'
 
@@ -51,34 +54,34 @@ describe('appShortcut: Alt+digit picks an interval', () => {
   })
 })
 
-describe('appShortcut: [ and ] step the interval', () => {
-  it('steps to the previous and next interval', () => {
+describe('appShortcut: [ and ] step the timeframe', () => {
+  it('steps to the previous and next preset timeframe', () => {
     expect(appShortcut(key({ key: '[', code: 'BracketLeft' }), '1h')).toEqual({
       kind: 'interval',
-      interval: '15m',
+      interval: '30m',
     })
     expect(appShortcut(key({ key: ']', code: 'BracketRight' }), '1h')).toEqual({
       kind: 'interval',
-      interval: '4h',
+      interval: '2h',
     })
   })
 
   it('returns null at the ends of the range', () => {
     expect(appShortcut(key({ key: '[', code: 'BracketLeft' }), '1m')).toBeNull()
     expect(appShortcut(key({ key: ']', code: 'BracketRight' }), '1w')).toBeNull()
-    expect(appShortcut(key({ key: ']', code: 'BracketRight' }), '1d')).toEqual({
+    expect(appShortcut(key({ key: ']', code: 'BracketRight' }), '3d')).toEqual({
       kind: 'interval',
       interval: '1w',
     })
-    expect(appShortcut(key({ key: '[', code: 'BracketLeft' }), '5m')).toEqual({
+    expect(appShortcut(key({ key: '[', code: 'BracketLeft' }), '3m')).toEqual({
       kind: 'interval',
       interval: '1m',
     })
   })
 
-  it('walks the whole list one step at a time', () => {
-    let cur = INTERVALS[0]
-    const seen = [cur]
+  it('walks every non-seconds preset one step at a time', () => {
+    let cur: Timeframe = '1m'
+    const seen: Timeframe[] = [cur]
     for (;;) {
       const s = appShortcut(key({ key: ']', code: 'BracketRight' }), cur)
       if (s === null) break
@@ -86,7 +89,47 @@ describe('appShortcut: [ and ] step the interval', () => {
       if (s.kind === 'interval') cur = s.interval
       seen.push(cur)
     }
-    expect(seen).toEqual([...INTERVALS])
+    expect(seen).toEqual(PRESET_TIMEFRAMES.filter((tf) => !tf.endsWith('s')))
+  })
+
+  it('steps into seconds presets only when the provider supports them', () => {
+    const all = () => true
+    expect(appShortcut(key({ key: '[', code: 'BracketLeft' }), '1m', { supports: all })).toEqual({
+      kind: 'interval',
+      interval: '30s',
+    })
+    expect(appShortcut(key({ key: '[', code: 'BracketLeft' }), '1s', { supports: all })).toBeNull()
+    expect(appShortcut(key({ key: ']', code: 'BracketRight' }), '30s', { supports: all })).toEqual({
+      kind: 'interval',
+      interval: '1m',
+    })
+    // From a seconds timeframe without seconds support, ] still climbs to the minute presets.
+    expect(appShortcut(key({ key: ']', code: 'BracketRight' }), '5s')).toEqual({
+      kind: 'interval',
+      interval: '1m',
+    })
+    // supports also filters longer presets (e.g. a venue without 3d bars).
+    const no3d = (tf: Timeframe) => !tf.endsWith('s') && tf !== '3d'
+    expect(appShortcut(key({ key: ']', code: 'BracketRight' }), '1d', { supports: no3d })).toEqual({
+      kind: 'interval',
+      interval: '1w',
+    })
+  })
+
+  it('steps a custom timeframe from the nearest presets around it', () => {
+    expect(appShortcut(key({ key: ']', code: 'BracketRight' }), '7m')).toEqual({
+      kind: 'interval',
+      interval: '15m',
+    })
+    expect(appShortcut(key({ key: '[', code: 'BracketLeft' }), '7m')).toEqual({
+      kind: 'interval',
+      interval: '5m',
+    })
+    expect(appShortcut(key({ key: ']', code: 'BracketRight' }), '2w')).toBeNull()
+  })
+
+  it('returns null for a malformed current timeframe', () => {
+    expect(stepTimeframe('x' as Timeframe, 1)).toBeNull()
   })
 
   it('ignores Ctrl/Meta brackets and keys that do not type a bracket', () => {
@@ -101,11 +144,11 @@ describe('appShortcut: [ and ] step the interval', () => {
     // German macOS: Option+5 types '[' and Option+6 types ']' (e.code Digit5 / Digit6).
     expect(appShortcut(key({ key: '[', code: 'Digit5', altKey: true }), '1h')).toEqual({
       kind: 'interval',
-      interval: '15m',
+      interval: '30m',
     })
     expect(appShortcut(key({ key: ']', code: 'Digit6', altKey: true }), '1h')).toEqual({
       kind: 'interval',
-      interval: '4h',
+      interval: '2h',
     })
     // At the ends it is still not Alt+5 / Alt+6 ('4h' / '1d').
     expect(appShortcut(key({ key: '[', code: 'Digit5', altKey: true }), '1m')).toBeNull()
@@ -113,7 +156,7 @@ describe('appShortcut: [ and ] step the interval', () => {
     // Layouts that need Option+Shift for a bracket (e.g. French macOS).
     expect(
       appShortcut(key({ key: '[', code: 'Digit5', altKey: true, shiftKey: true }), '1h'),
-    ).toEqual({ kind: 'interval', interval: '15m' })
+    ).toEqual({ kind: 'interval', interval: '30m' })
     // A plain Option+5 that types something else is still Alt+5.
     expect(appShortcut(key({ key: '∞', code: 'Digit5', altKey: true }), '1h')).toEqual({
       kind: 'interval',
@@ -185,6 +228,55 @@ describe('appShortcut: modifier rejection', () => {
     for (const k of ['Escape', 'Delete', 'Backspace', 'a', 'k']) {
       expect(appShortcut(key({ key: k, code: k }), '1h')).toBeNull()
     }
+  })
+})
+
+describe('no collision with bar replay keys', () => {
+  const REPLAY_KEYS: ShortcutKey[] = [
+    key({ key: 'ArrowRight', code: 'ArrowRight', shiftKey: true }),
+    key({ key: 'ArrowLeft', code: 'ArrowLeft', shiftKey: true }),
+    key({ key: 'ArrowDown', code: 'ArrowDown', shiftKey: true }),
+    key({ key: 'Escape', code: 'Escape' }),
+  ]
+
+  it('appShortcut ignores Shift+arrows and Esc', () => {
+    for (const k of REPLAY_KEYS) {
+      // Sanity: replay owns every one of them while active.
+      expect(replayKeyAction(k, 'active')).not.toBeNull()
+      expect(appShortcut(k, '1h')).toBeNull()
+      expect(appShortcut(k, '1h', { supports: () => true })).toBeNull()
+    }
+  })
+
+  it('replayKeyAction ignores every app shortcut', () => {
+    const appKeys = [
+      key({ key: '[', code: 'BracketLeft' }),
+      key({ key: ']', code: 'BracketRight' }),
+      key({ key: '[', code: 'Digit5', altKey: true }),
+      key({ key: '1', code: 'Digit1', altKey: true }),
+      key({ key: 's', code: 'KeyS', altKey: true }),
+      key({ key: 'L', code: 'KeyL', altKey: true, shiftKey: true }),
+      key({ key: '?', code: 'Slash', shiftKey: true }),
+    ]
+    for (const k of appKeys) {
+      expect(appShortcut(k, '1h')).not.toBeNull()
+      expect(replayKeyAction(k, 'active')).toBeNull()
+    }
+  })
+
+  it('chartKey only shares Esc (replay lets the drawing tool claim it first)', () => {
+    const asChart = (k: ShortcutKey) => chartKey({ ...k, defaultPrevented: false }, false)
+    expect(REPLAY_KEYS.map(asChart)).toEqual([null, null, null, 'Escape'])
+  })
+
+  it('the help dialog lists the replay keys', () => {
+    const group = shortcutGroups(false).find((g) => g.title === 'Bar replay')
+    expect(group?.items.map((i) => i.keys[0].join(' '))).toEqual([
+      'Shift →',
+      'Shift ←',
+      'Shift ↓',
+      'Esc',
+    ])
   })
 })
 

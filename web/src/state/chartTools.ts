@@ -206,7 +206,7 @@ export function loadSidebarPanel(
   storage: UiStorage | null = defaultStorage(),
 ): SidebarPanel | null {
   const raw = readJson(storage, SIDEBAR_PANEL_KEY)
-  if (raw === 'watchlist' || raw === 'alerts') return raw
+  if (raw === 'watchlist' || raw === 'alerts' || raw === 'paper') return raw
   if (raw === 'none') return null
   return 'watchlist'
 }

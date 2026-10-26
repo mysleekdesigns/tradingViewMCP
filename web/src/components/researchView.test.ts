@@ -865,6 +865,7 @@ describe('ResearchPage first render', () => {
       backtest: never,
       ledger: never,
       ledgerItem: never,
+      regime: never,
     }
     const html = renderToStaticMarkup(
       createElement(ResearchPage, {

@@ -65,3 +65,23 @@ Related: [[lab-conventions]]
 
 31. **Guard placeholder/rewording traps.** `research.journal.guard_holdout` is a lexical regex (holdout|held out within 80 chars of a metric name or decimal, both directions). Any orchestrator text that names the holdout near criterion names (pbo, dsr, sharpe...) gets withheld, and a placeholder containing the word re-trips it (live run r-20261025-135224-41f19f lost 5 whole entries). Fixed by a neutral placeholder + second fail-closed pass. Pre-holdout notes now say "locked-data check" (a synonym the guard does not see): only safe because those branches run before `run_holdout_check` and print criterion names/statuses only. `_safe_text` splits on `[.;]\s+`, so "(incl. the" splits mid-sentence and can leave misleading fragments.
     **How to apply:** whenever journal wording or the guard changes, run the text through the REAL guard (tests must not use a looser fake) and check the "locked-data" wording never appears after a holdout check.
+
+## Phase 9 wave 2 (2026-10-26): web replay, manual paper trading, regime ribbon
+
+32. **Replay step-back = hindsight trading.** `replayFeedStep` returns NONE on a step back, and the replay paper account is reset only on start, re-pick elsewhere, or exit. Step forward 20 bars, step back 20, market buy at the old close, step forward, sell: +197.7 on a monotone-up probe series. TradingView has no step-back while trading. Fix: reset on any cursor decrease, or refuse orders while cursor < max cursor seen.
+33. **Resting limit gets price improvement.** `sweep` fills a buy at min(limit, price/open). That is right for a marketable limit or a bar gap, but wrong for a resting limit crossed between sampled live quotes or across a reconnect: limit 60000 placed at 60500, next quote 59000, fill at 59000. Fix: a resting order (non-marketable at placement) fills at its limit.
+34. **Live quote time = snapshot `lastUpdate`.** That value is bumped by loadOlder and refresh, not only by price changes, so a stale or offline panel's last close is re-fed as a fresh tick and can win `paperMarks`.
+    **How to apply:** on any paper or replay change, probe P&L with a throwaway vitest file that writes to the scratchpad with appendFileSync. Console output is suppressed in this vitest config.
+
+## Phase 9 wave 2 round 2 (2026-10-26)
+
+Closed (probed): #32 (ReplayBook highWater: orders refused while cursor < mark, bars <= mark never re-fed, jump across the mark fills once), #33 (marketability judged at placement; resting limits fill at exactly the limit incl. gaps), #34 (priceStamp = wall-clock time the last bar's time/close changed; history load/refresh keep it; only status 'live' panels feed/mark).
+Still open:
+35. **Pick -> cancel = hindsight in the same replay account.** While picking, replay.visible is null, so the chart shows the full live history (all bars past the cursor). `replayFeedStep` treats picking -> active at the same cursor as "resumed" (NONE): cancel (or Esc, or re-picking the cursor bar) keeps the account AND its highWater, so the user trades on bars they just saw. Probe: start 100 back, pick, cancel, buy, +50 bars, sell -> +1702 on the monotone probe series.
+    **How to apply:** any mode that shows the live chart mid-replay must end the replay account (reset) or keep the replay view; check every path back to 'active'.
+    **Closed in round 3 (2026-10-26, probed):** replayVisible keeps the prefix <= cursor whenever cursorTime is set (re-pick included), pickAt caps a re-pick at the cursor, cancel/re-pick-at-cursor resumes the same account (nothing new was shown), an earlier pick resets at that bar, reconcile exits (reset) on a disjoint reload or empty source, pickAt(NaN) exits. Header quote, backtest overlay, regime source, legend, indicators all follow `replay.visible` during a re-pick.
+36. Re-feed after reconnect/hide-show is benign: a quote whose stamp is unchanged is fed again when its panel returns to the live set, but a resting limit fills only at its limit, and only on prices the market really traded, so the fill is conservative (never better than the limit).
+
+## Phase 9 wave 2 round 3 (2026-10-26)
+
+No Critical/Warning left in replay/paper/aggregation. Accepted design (do not re-flag as Critical): outside the replay panel the app still shows live data (watchlist, other panels, Seasonals, Strategy Tester trades, alert dialog prefilled with the live last close, and the paper ticket flips to the LIVE account + live price during a re-pick because `activeReplaying` needs status 'active'). None of it feeds the replay account; TradingView parity. Note-level only.

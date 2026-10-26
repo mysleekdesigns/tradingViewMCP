@@ -150,6 +150,41 @@ export function shiftLogicalRange(
   return { from: range.from + count, to: range.to + count }
 }
 
+/**
+ * Bar replay: after new bars were applied, true when the newest bar (logical index
+ * barCount - 1) lies right of the visible range, so the chart should scroll it back into view.
+ */
+export function newestBarOffscreen(
+  range: { from: number; to: number } | null,
+  barCount: number,
+): boolean {
+  return range !== null && barCount > 0 && range.to < barCount - 1
+}
+
+/** What `onTimeClick` sees of one LWC click. */
+export interface TimeClickInput {
+  tool: string
+  /** The drawing controller took the press (a drawing hit, or a drawing tool). */
+  pressConsumed: boolean
+  /** The click has a pane point (false off the panes). */
+  hasPoint: boolean
+  /** Pane of the click; undefined when LWC does not say. */
+  paneIndex: number | undefined
+  /** Time of the main-series bar under the cursor, if any. */
+  barTime: unknown
+}
+
+/**
+ * The value `onTimeClick` reports for a click: the bar's open time, null on the main pane with
+ * no bar under the cursor (e.g. the empty space right of the last bar), or undefined when the
+ * click is not one to report (another tool, a drawing hit, an indicator pane, off the panes).
+ */
+export function clickedBarTime(c: TimeClickInput): number | null | undefined {
+  if (c.tool !== 'cursor' || c.pressConsumed || !c.hasPoint) return undefined
+  if (c.paneIndex !== undefined && c.paneIndex !== 0) return undefined
+  return typeof c.barTime === 'number' ? c.barTime : null
+}
+
 /** One candle as a Lightweight Charts candlestick point. */
 export function toCandlestickPoint(c: Candle): CandlestickData {
   return { time: c.time as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close }

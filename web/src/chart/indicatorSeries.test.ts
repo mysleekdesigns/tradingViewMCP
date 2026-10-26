@@ -295,7 +295,21 @@ class FakeChart {
   }
 }
 
-function setup(configs: IndicatorConfig[], candles: Candle[]) {
+/** The points a series shows after its setData/update calls (update replaces or appends). */
+function shownPoints(s: FakeSeries): unknown[] {
+  let shown: { time: number }[] = []
+  for (const c of s.calls) {
+    if (c.method === 'setData') shown = [...(c.arg as { time: number }[])]
+    else if (c.method === 'update') {
+      const p = c.arg as { time: number }
+      if (shown.length > 0 && shown[shown.length - 1].time === p.time) shown[shown.length - 1] = p
+      else shown.push(p)
+    }
+  }
+  return shown
+}
+
+function setup(configs: IndicatorConfig[], candles: readonly Candle[]) {
   const chart = new FakeChart()
   const manager = new IndicatorSeriesManager()
   manager.attach(chart as unknown as IChartApi)
@@ -376,6 +390,47 @@ describe('IndicatorSeriesManager', () => {
     for (const s of chart.all()) s.calls = []
     manager.applyPlan(planSeriesSync(ticked, appended), appended)
     for (const s of chart.all()) expect(s.count('setData')).toBe(0)
+  })
+
+  it('bar replay: shrink then regrow leaves every series equal to a from-scratch computation', () => {
+    const configs = [cfg('ema', 'e'), cfg('rsi', 'r'), cfg('macd', 'm')]
+    const { chart, manager } = setup(configs, candles)
+    let prev: readonly Candle[] = candles
+    // Replay starts at bar 50, steps back to 45, then forward bar by bar to 70.
+    const cursors = [50, 49, 48, 47, 46, 45, ...Array.from({ length: 25 }, (_, i) => 46 + i)]
+    for (const k of cursors) {
+      const next = candles.slice(0, k)
+      manager.applyPlan(planSeriesSync(prev, next), next)
+      prev = next
+    }
+    // Rebuild what each series shows from its setData/update calls and compare it with the
+    // series a fresh chart would show for the same 70 bars.
+    const fresh = setup(configs, prev).chart.all()
+    const replayed = chart.all()
+    expect(replayed).toHaveLength(fresh.length)
+    replayed.forEach((s, i) => {
+      expect(shownPoints(s)).toEqual(shownPoints(fresh[i]))
+      expect(shownPoints(s).length).toBeGreaterThan(0)
+    })
+  })
+
+  it('bar replay: a step back uses setData, a step forward only update', () => {
+    const { chart, manager } = setup([cfg('ema', 'e'), cfg('macd', 'm')], candles)
+    const at50 = candles.slice(0, 50)
+    manager.applyPlan(planSeriesSync(candles, at50), at50)
+    const at49 = candles.slice(0, 49)
+    for (const s of chart.all()) s.calls = []
+    manager.applyPlan(planSeriesSync(at50, at49), at49)
+    for (const s of chart.all()) {
+      expect(s.count('setData')).toBe(1)
+      expect(s.count('update')).toBe(0)
+    }
+    for (const s of chart.all()) s.calls = []
+    manager.applyPlan(planSeriesSync(at49, at50), at50)
+    for (const s of chart.all()) {
+      expect(s.count('setData')).toBe(0)
+      expect(s.count('update')).toBeGreaterThan(0)
+    }
   })
 
   it('history prepend recomputes with setData', () => {

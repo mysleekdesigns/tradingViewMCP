@@ -1,18 +1,22 @@
+import type { ReactNode } from 'react'
 import { shortcutHint } from '../state/appSettings'
 import type { ThemeName } from '../state/settings'
-import type { ChartType, ConnectionStatus, Interval } from '../types'
+import type { ChartType, ConnectionStatus, Timeframe } from '../types'
+import './AppShell.css'
 import { ChartTypeMenu } from './ChartTypeMenu'
 import { ConnectionIndicator } from './ConnectionStatus'
 import './Indicators.css'
 import type { Quote } from './quote'
-import { TimeframeToolbar } from './TimeframeToolbar'
+import { TimeframePicker } from './TimeframePicker'
 
 interface HeaderProps {
   symbol: string
   /** Pair description, e.g. "BTC / USDT"; empty until the symbol list loads. */
   description: string
-  interval: Interval
-  onIntervalChange: (interval: Interval) => void
+  interval: Timeframe
+  onIntervalChange: (interval: Timeframe) => void
+  /** False for timeframes the data source cannot serve (e.g. seconds on Coinbase). */
+  supportsTimeframe?: (tf: Timeframe) => boolean
   chartType: ChartType
   onChartTypeChange: (type: ChartType) => void
   /** Opens the "Indicators" picker. */
@@ -23,6 +27,15 @@ interface HeaderProps {
   onOpenAlert: () => void
   /** Why alerts cannot be created right now (shown as the tooltip), or null when they can. */
   alertDisabledReason: string | null
+  /** A bar replay session is open on the active chart. */
+  replayOn: boolean
+  /** Starts replay on the active chart (pick a start bar), or leaves it. */
+  onToggleReplay: () => void
+  /** Why replay cannot start right now (tooltip), or null when it can. */
+  replayDisabledReason: string | null
+  /** The hedgeFund regime ribbon is shown under the candles. */
+  regimeOn: boolean
+  onToggleRegime: () => void
   watchlistOpen: boolean
   onToggleWatchlist: () => void
   source: string
@@ -42,6 +55,8 @@ interface HeaderProps {
   onOpenSettings: () => void
   /** Shortcut hints in macOS notation (⌥S) or Alt+S. */
   isMac: boolean
+  /** The multi-chart layout picker, first in the chart tools cluster. */
+  layoutControl?: ReactNode
 }
 
 export function Header({
@@ -49,12 +64,18 @@ export function Header({
   description,
   interval,
   onIntervalChange,
+  supportsTimeframe,
   chartType,
   onChartTypeChange,
   onOpenIndicators,
   onOpenSearch,
   onOpenAlert,
   alertDisabledReason,
+  replayOn,
+  onToggleReplay,
+  replayDisabledReason,
+  regimeOn,
+  onToggleRegime,
   watchlistOpen,
   onToggleWatchlist,
   source,
@@ -70,6 +91,7 @@ export function Header({
   onOpenShortcuts,
   onOpenSettings,
   isMac,
+  layoutControl,
 }: HeaderProps) {
   const nextTheme = theme === 'dark' ? 'light' : 'dark'
   // "Binance · local server": the transport part can hide on narrow windows (the tooltip keeps it).
@@ -116,7 +138,7 @@ export function Header({
 
       <div className="topbar__divider" aria-hidden="true" />
 
-      <TimeframeToolbar value={interval} onChange={onIntervalChange} />
+      <TimeframePicker value={interval} onChange={onIntervalChange} supports={supportsTimeframe} />
 
       <div className="topbar__divider" aria-hidden="true" />
 
@@ -146,6 +168,41 @@ export function Header({
       >
         <BellIcon />
         <span className="ind-btn__label">Alert</span>
+      </button>
+
+      <button
+        type="button"
+        className="ind-btn ind-btn--replay"
+        // Off and unavailable: aria-disabled keeps the tooltip explaining why.
+        onClick={replayOn || replayDisabledReason === null ? onToggleReplay : undefined}
+        aria-disabled={!replayOn && replayDisabledReason !== null}
+        aria-pressed={replayOn}
+        aria-label="Bar replay"
+        title={
+          replayOn
+            ? 'Exit bar replay and return to live (Esc)'
+            : (replayDisabledReason ??
+              'Bar replay: click a bar to replay history from it, bar by bar (Shift+→ step, Shift+↓ play)')
+        }
+      >
+        <ReplayIcon />
+        <span className="ind-btn__label">Replay</span>
+      </button>
+
+      <button
+        type="button"
+        className="ind-btn ind-btn--secondary"
+        onClick={onToggleRegime}
+        aria-pressed={regimeOn}
+        aria-label="Regime ribbon"
+        title={
+          regimeOn
+            ? 'Hide the regime ribbon'
+            : 'Regime ribbon: hedgeFund bull / sideways / bear label of each closed bar (needs the lab)'
+        }
+      >
+        <RegimeIcon />
+        <span className="ind-btn__label">Regime</span>
       </button>
 
       <button
@@ -202,6 +259,7 @@ export function Header({
       <div className="topbar__divider" aria-hidden="true" />
 
       <div className="topbar__tools" role="group" aria-label="Chart tools">
+        {layoutControl}
         <button
           type="button"
           className="icon-btn"
@@ -327,6 +385,42 @@ function BellIcon() {
         strokeWidth="1.4"
         strokeLinecap="round"
       />
+    </svg>
+  )
+}
+
+function ReplayIcon() {
+  // Rewind to a bar, then play forward: TradingView's replay glyph.
+  return (
+    <svg className="ind-btn__icon" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+      <path
+        d="M3.5 4.5v11"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+      <path d="M10 5.2 5.6 10 10 14.8Z" fill="currentColor" />
+      <path d="M16.4 5.2 12 10l4.4 4.8Z" fill="currentColor" />
+    </svg>
+  )
+}
+
+function RegimeIcon() {
+  // A price line over a three-colour strip.
+  return (
+    <svg className="ind-btn__icon" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+      <path
+        d="M3 11.5 7 8l3 2.2 4.2-5 2.8 2.3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <rect x="3" y="14.2" width="4.4" height="2.4" rx=".5" fill="var(--down)" />
+      <rect x="7.8" y="14.2" width="4.4" height="2.4" rx=".5" fill="currentColor" opacity=".45" />
+      <rect x="12.6" y="14.2" width="4.4" height="2.4" rx=".5" fill="var(--up)" />
     </svg>
   )
 }

@@ -8,6 +8,7 @@ import {
   parseEquity,
   parseLedgerItem,
   parseMetrics,
+  parseRegimeResponse,
 } from './labApi'
 import type { FetchLike } from './persistence'
 
@@ -364,5 +365,96 @@ describe('createLabClient', () => {
     const h = await createLabClient({ fetchImpl, basePath: 'http://x/lab/' }).health()
     expect(calls[0].url).toBe('http://x/lab/health')
     expect(h).toEqual({ ok: true, version: '0.1' })
+  })
+})
+
+describe('regime', () => {
+  const answer = {
+    points: [
+      { time: 100, state: null },
+      { time: 200, state: 1 },
+      { time: 300, state: -1 },
+      { time: 400, state: 0 },
+    ],
+    window_bars: 20,
+    threshold: 0.05,
+    engine: 'hedgefund.regime.labels.label_regimes',
+  }
+
+  it('posts times, closes and parameters to /lab/regime and parses the labels', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => jsonResponse(200, answer))
+    const res = await createLabClient({ fetchImpl }).regime({
+      times: [100, 200, 300, 400],
+      closes: [1, 2, 3, 4],
+      window_bars: 20,
+      threshold: 0.05,
+    })
+    expect(calls[0]).toMatchObject({
+      url: '/lab/regime',
+      method: 'POST',
+      body: { times: [100, 200, 300, 400], closes: [1, 2, 3, 4], window_bars: 20, threshold: 0.05 },
+    })
+    expect(res).toEqual(answer)
+  })
+
+  it('omits parameters that are not given so the lab defaults apply', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => jsonResponse(200, answer))
+    await createLabClient({ fetchImpl }).regime({ times: [1], closes: [1] })
+    expect(calls[0].body).toEqual({ times: [1], closes: [1] })
+  })
+
+  it('reads unknown states as null, drops points without a time, and sorts by time', () => {
+    const res = parseRegimeResponse({
+      points: [
+        { time: 300, state: 2 },
+        { time: 100, state: -1 },
+        { state: 1 },
+        null,
+        { time: 100, state: 1 },
+        { time: 200, state: '1' },
+      ],
+    })
+    expect(res.points).toEqual([
+      { time: 100, state: -1 },
+      { time: 200, state: null },
+      { time: 300, state: null },
+    ])
+    expect(res).toMatchObject({ window_bars: 0, threshold: 0, engine: '' })
+  })
+
+  it('rejects an answer without a points list as a parse error', async () => {
+    const { fetchImpl } = fakeFetch(() => jsonResponse(200, { window_bars: 20 }))
+    const err = await createLabClient({ fetchImpl })
+      .regime({ times: [1], closes: [1] })
+      .catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(LabError)
+    expect((err as LabError).kind).toBe('parse')
+  })
+
+  it('turns a 422 into an invalid LabError with the field path', async () => {
+    const { fetchImpl } = fakeFetch(() =>
+      jsonResponse(422, {
+        errors: [
+          { path: 'times', message: 'times must be strictly ascending (unique UNIX seconds)' },
+        ],
+      }),
+    )
+    const err = await createLabClient({ fetchImpl })
+      .regime({ times: [2, 1], closes: [1, 1] })
+      .catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(LabError)
+    expect((err as LabError).kind).toBe('invalid')
+    expect((err as LabError).message).toBe(
+      'times: times must be strictly ascending (unique UNIX seconds)',
+    )
+  })
+
+  it('reports offline when the lab is not running', async () => {
+    const { fetchImpl } = fakeFetch(() => new Response('Bad Gateway', { status: 502 }))
+    const err = await createLabClient({ fetchImpl })
+      .regime({ times: [1], closes: [1] })
+      .catch((e: unknown) => e)
+    expect((err as LabError).kind).toBe('offline')
+    expect((err as LabError).message).toBe(LAB_OFFLINE_MESSAGE)
   })
 })

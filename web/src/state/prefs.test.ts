@@ -55,7 +55,7 @@ describe('prefs', () => {
   })
 
   it('replaces each invalid field with its own default', () => {
-    expect(parsePrefs({ symbol: 'SOLUSDT', interval: '2h', chartType: 'renko' })).toEqual({
+    expect(parsePrefs({ symbol: 'SOLUSDT', interval: '1M', chartType: 'renko' })).toEqual({
       symbol: 'SOLUSDT',
       interval: '1h',
       chartType: 'candles',
@@ -70,9 +70,18 @@ describe('prefs', () => {
     expect(parsePrefs({ symbol: ' ethusdt ' }).symbol).toBe('ETHUSDT')
   })
 
-  it('accepts the 1D/1W labels only as their Interval values', () => {
+  it('accepts any timeframe parseTimeframe accepts, stored in canonical form', () => {
     expect(parsePrefs({ interval: '1d' }).interval).toBe('1d')
-    expect(parsePrefs({ interval: '1D' }).interval).toBe('1h')
+    expect(parsePrefs({ interval: '5s' }).interval).toBe('5s')
+    expect(parsePrefs({ interval: '2h' }).interval).toBe('2h')
+    expect(parsePrefs({ interval: '1D' }).interval).toBe('1d')
+    expect(parsePrefs({ interval: '120m' }).interval).toBe('2h')
+  })
+
+  it('rejects strings that are not timeframes', () => {
+    for (const bad of ['7s', '1M', '0m', '1y', 'abc', '', '999w']) {
+      expect(parsePrefs({ interval: bad }).interval).toBe(DEFAULT_PREFS.interval)
+    }
   })
 
   it('never throws when storage throws or is unavailable', () => {

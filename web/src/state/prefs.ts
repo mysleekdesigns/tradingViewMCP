@@ -1,9 +1,10 @@
-import { CHART_TYPES, INTERVALS, type ChartType, type Interval } from '../types'
+import { parseTimeframe } from '../data/timeframes'
+import { CHART_TYPES, type ChartType, type Timeframe } from '../types'
 
 /** What the app remembers across reloads. */
 export interface Prefs {
   symbol: string
-  interval: Interval
+  interval: Timeframe
   chartType: ChartType
 }
 
@@ -29,8 +30,9 @@ function defaultStorage(): PrefsStorage | null {
 
 const SYMBOL_RE = /^[A-Z0-9]{2,30}$/
 
-function isInterval(v: unknown): v is Interval {
-  return typeof v === 'string' && (INTERVALS as readonly string[]).includes(v)
+/** A saved timeframe in canonical form ('60s' → '1m'), or null when it is not one. */
+function cleanTimeframe(v: unknown): Timeframe | null {
+  return typeof v === 'string' ? parseTimeframe(v) : null
 }
 
 function isChartType(v: unknown): v is ChartType {
@@ -50,7 +52,7 @@ export function parsePrefs(raw: unknown): Prefs {
       : DEFAULT_PREFS.symbol
   return {
     symbol,
-    interval: isInterval(r.interval) ? r.interval : DEFAULT_PREFS.interval,
+    interval: cleanTimeframe(r.interval) ?? DEFAULT_PREFS.interval,
     chartType: isChartType(r.chartType) ? r.chartType : DEFAULT_PREFS.chartType,
   }
 }

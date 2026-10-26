@@ -18,6 +18,7 @@ import {
   handleStroke,
   mainSeriesOptionsFor,
   paletteFor,
+  timeScaleOptionsFor,
   watermarkOptions,
   withHexAlpha,
   type ChartAppearance,
@@ -172,5 +173,20 @@ describe('selection handles', () => {
     // On dark, light grey is fine; a near-black line gets the light ring.
     expect(handleStroke('#d1d4dc', darkHandles)).toBe('#d1d4dc')
     expect(handleStroke('#131722', darkHandles)).toBe(colors.text)
+  })
+})
+
+describe('timeScaleOptionsFor', () => {
+  it('shows seconds on the time axis only for seconds timeframes', () => {
+    for (const tf of ['1s', '5s', '15s', '30s'] as const) {
+      expect(timeScaleOptionsFor(tf)).toEqual({ timeScale: { secondsVisible: true } })
+    }
+    for (const tf of ['1m', '3m', '1h', '2h', '1d', '3d', '1w'] as const) {
+      expect(timeScaleOptionsFor(tf)).toEqual({ timeScale: { secondsVisible: false } })
+    }
+  })
+
+  it('the creation default hides seconds', () => {
+    expect(chartOptions.timeScale?.secondsVisible).toBe(false)
   })
 })

@@ -1,0 +1,147 @@
+/* ---------- Toolbar toggles (Replay, Regime) ---------- */
+
+/* On: the accent tint TradingView uses for an active toolbar mode. */
+.ind-btn[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent-text);
+}
+
+.ind-btn[aria-pressed='true'] .ind-btn__icon {
+  color: var(--accent-text);
+}
+
+/* Replay is "not live": amber, like the replay bar's badge and the panel frame. */
+.ind-btn--replay[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  color: var(--warn-text);
+}
+
+.ind-btn--replay[aria-pressed='true'] .ind-btn__icon {
+  color: var(--warn-text);
+}
+
+.ind-btn[aria-disabled='true'] {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.ind-btn[aria-disabled='true'] .ind-btn__icon {
+  color: var(--text-faint);
+}
+
+.ind-btn[aria-disabled='true']:hover {
+  background: transparent;
+}
+
+/* ---------- Bar replay: panel frame ---------- */
+
+/*
+ * An amber frame around the replaying panel, in every layout (a single chart included), so
+ * replayed history is never mistaken for the live feed. Drawn over the cell; never takes the
+ * pointer. Two classes, so it wins over the active panel's blue frame.
+ */
+.chart-cell.chart-cell--replay::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 16;
+  border: 2px solid color-mix(in srgb, var(--warn) 75%, transparent);
+  pointer-events: none;
+}
+
+.chart-cell__replay-tag {
+  padding: 2px 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  color: var(--warn-text);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* ---------- Regime ribbon chip ---------- */
+
+/* Top-right of the chart area, clear of the legend (top-left) and the price scale. */
+.regime-chip {
+  position: absolute;
+  top: 8px;
+  right: 76px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 160px);
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--legend-bg);
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: default;
+}
+
+.regime-chip--error {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+
+/* Seconds charts: the ribbon is off; muted text, no swatches. */
+.regime-chip--off .regime-chip__label {
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+}
+
+.regime-chip__swatches {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+}
+
+.regime-chip__swatch {
+  width: 4px;
+  height: 10px;
+  border-radius: 1px;
+}
+
+.regime-chip__swatch--bull {
+  background: color-mix(in srgb, var(--up) 70%, transparent);
+}
+
+.regime-chip__swatch--side {
+  background: color-mix(in srgb, var(--text-muted) 50%, transparent);
+}
+
+.regime-chip__swatch--bear {
+  background: color-mix(in srgb, var(--down) 70%, transparent);
+}
+
+.regime-chip__label {
+  color: var(--text);
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+.regime-chip__state {
+  overflow: hidden;
+  color: var(--warn-text);
+  text-overflow: ellipsis;
+}
+
+.regime-chip__state code {
+  font-family: var(--font-num);
+  font-size: 10.5px;
+}
+
+.regime-chip__spinner {
+  flex: none;
+}
+
+/* ---------- Paper trading in the sidebar ---------- */
+
+.sidebar > .paper {
+  flex: 1;
+  height: auto;
+}

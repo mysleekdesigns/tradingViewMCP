@@ -3,13 +3,15 @@
 //
 // Drawing tools (Alt+H/J/T/F/R), Alt+A (alert), Esc and Delete/Backspace are matched elsewhere
 // (components/drawingTools.ts `shortcutCommand` and the chart's drawing controller). The codes
-// used here (Digit1-7, Numpad1-7, KeyS, Shift+KeyL, '[', ']', '?') never overlap with them.
+// used here (Digit1-7, Numpad1-7, KeyS, Shift+KeyL, '[', ']', '?') never overlap with them,
+// nor with bar replay's Shift+←/→/↓ and Esc (state/replay.ts `replayKeyAction`).
 
 import { DRAWING_TOOLS, type ShortcutKey } from '../components/drawingTools'
-import { INTERVALS, type Interval } from '../types'
+import { PRESET_TIMEFRAMES, isSecondsTimeframe, timeframeSeconds } from '../data/timeframes'
+import { INTERVALS, type Interval, type Timeframe } from '../types'
 
 export type AppShortcut =
-  | { kind: 'interval'; interval: Interval }
+  | { kind: 'interval'; interval: Timeframe }
   | { kind: 'screenshot' }
   | { kind: 'help' }
   | { kind: 'theme' }
@@ -26,24 +28,29 @@ function digitIndex(code: string): number | null {
  * Maps a key press to an app shortcut or null. The caller skips presses in text fields, while a
  * dialog is open, and when e.isComposing/defaultPrevented. Rules:
  * - Alt+1 … Alt+7 (by e.code Digit1..Digit7 or Numpad1..Numpad7, because macOS Option changes e.key) → INTERVALS[i]
- * - e.key '[' / ']' → the previous / next interval relative to `current`, null at the ends. Checked
- *   before the Alt rules, with Alt/Shift allowed: German-style macOS layouts type '[' as Option+5
- *   (e.code Digit5), which must step the interval, never act as Alt+5
+ * - e.key '[' / ']' → the previous / next PRESET_TIMEFRAMES entry relative to `current`, null at
+ *   the ends. A custom `current` (e.g. '7m') steps from where it would sit in the list. Seconds
+ *   presets are skipped unless `opts.supports` accepts them (the provider must serve 1s bars);
+ *   `opts.supports` also filters every other preset. Checked before the Alt rules, with Alt/Shift
+ *   allowed: German-style macOS layouts type '[' as Option+5 (e.code Digit5), which must step the
+ *   interval, never act as Alt+5
  * - Alt+S (e.code KeyS) → screenshot
  * - Alt+Shift+L (e.code KeyL) → theme toggle   (Alt+L alone stays free)
  * - '?' (Shift+/ , e.key '?') with no Ctrl/Meta/Alt → help
  * - Any Ctrl/Meta combination → null (leave browser/OS shortcuts and the existing Cmd/Ctrl+K alone)
  * Must not collide with the existing Alt+H/J/T/F/R/A drawing/alert shortcuts in drawingTools.ts.
  */
-export function appShortcut(e: ShortcutKey, current: Interval): AppShortcut | null {
+export function appShortcut(
+  e: ShortcutKey,
+  current: Timeframe,
+  opts?: { supports?: (tf: Timeframe) => boolean },
+): AppShortcut | null {
   if (e.ctrlKey || e.metaKey) return null
 
   // By the character typed, whatever modifiers the layout needs for it (see above).
   if (e.key === '[' || e.key === ']') {
-    const i = INTERVALS.indexOf(current)
-    if (i < 0) return null
-    const j = e.key === '[' ? i - 1 : i + 1
-    return j >= 0 && j < INTERVALS.length ? { kind: 'interval', interval: INTERVALS[j] } : null
+    const next = stepTimeframe(current, e.key === '[' ? -1 : 1, opts?.supports)
+    return next === null ? null : { kind: 'interval', interval: next }
   }
 
   if (e.altKey) {
@@ -56,6 +63,34 @@ export function appShortcut(e: ShortcutKey, current: Interval): AppShortcut | nu
   if (e.key === '?') return { kind: 'help' }
 
   return null
+}
+
+/**
+ * The preset one step shorter (dir -1) or longer (dir 1) than `current`, among the presets
+ * `supports` accepts (seconds presets only when it is given and accepts them). Null at the ends
+ * or for a malformed `current`.
+ */
+export function stepTimeframe(
+  current: Timeframe,
+  dir: -1 | 1,
+  supports?: (tf: Timeframe) => boolean,
+): Timeframe | null {
+  let len: number
+  try {
+    len = timeframeSeconds(current)
+  } catch {
+    return null
+  }
+  const usable = PRESET_TIMEFRAMES.filter((tf) =>
+    supports === undefined ? !isSecondsTimeframe(tf) : supports(tf),
+  )
+  if (dir < 0) {
+    for (let i = usable.length - 1; i >= 0; i--) {
+      if (timeframeSeconds(usable[i]) < len) return usable[i]
+    }
+    return null
+  }
+  return usable.find((tf) => timeframeSeconds(tf) > len) ?? null
 }
 
 /**
@@ -176,6 +211,17 @@ export function shortcutGroups(isMac: boolean): ShortcutGroup[] {
     ],
   }
 
+  // Matched by state/replay.ts `replayKeyAction` while bar replay is on.
+  const replay: ShortcutGroup = {
+    title: 'Bar replay',
+    items: [
+      { keys: [[g.shift, '→']], label: 'Step forward' },
+      { keys: [[g.shift, '←']], label: 'Step back' },
+      { keys: [[g.shift, '↓']], label: 'Play / pause' },
+      { keys: [['Esc']], label: 'Cancel start pick or exit replay' },
+    ],
+  }
+
   const general: ShortcutGroup = {
     title: 'General',
     items: [
@@ -185,7 +231,7 @@ export function shortcutGroups(isMac: boolean): ShortcutGroup[] {
     ],
   }
 
-  return [timeframe, chart, drawing, general]
+  return [timeframe, chart, drawing, replay, general]
 }
 
 /** Whether key labels should use macOS glyphs. Defaults to the global navigator. */

@@ -1,0 +1,299 @@
+/* Bar replay control bar. Colours come only from theme variables so the light/dark toggle
+   restyles it. Amber (--warn) marks "not live" everywhere: the badge, its dot, the frame, and
+   the progress line, so replayed history is never mistaken for the live feed. */
+
+.replay-bar {
+  position: absolute;
+  bottom: 40px;
+  left: 50%;
+  z-index: 16;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  max-width: calc(100% - 24px);
+  height: 40px;
+  padding: 0 4px 0 6px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--warn) 10%, transparent),
+    0 10px 28px var(--shadow);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  transform: translateX(-50%);
+  animation: replay-bar-in 140ms ease-out;
+  user-select: none;
+  overflow: hidden;
+}
+
+@keyframes replay-bar-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+}
+
+/* ---------- Badge ---------- */
+
+.replay-bar__badge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  margin-right: 4px;
+  padding: 0 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  color: var(--warn-text);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: default;
+}
+
+.replay-bar__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
+.replay-bar--playing .replay-bar__dot {
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.replay-bar__info {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 24px;
+  margin-right: 2px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: help;
+}
+
+.replay-bar__info:hover,
+.replay-bar__info:focus-visible {
+  color: var(--warn-text);
+}
+
+.replay-bar__info:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.replay-bar__sep {
+  flex: none;
+  width: 1px;
+  height: 20px;
+  margin: 0 4px;
+  background: var(--border);
+}
+
+/* ---------- Transport buttons ---------- */
+
+.replay-bar__btn {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.replay-bar__btn:hover:not(:disabled) {
+  background: var(--panel-hover);
+}
+
+.replay-bar__btn:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.replay-bar__btn--primary {
+  width: 34px;
+  margin: 0 2px;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.replay-bar__btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.replay-bar__btn--primary:disabled {
+  background: var(--fill);
+  color: var(--text-faint);
+}
+
+/* ---------- Speed ---------- */
+
+.replay-bar__speeds {
+  display: inline-flex;
+  flex: none;
+  padding: 2px;
+  border-radius: 5px;
+  background: var(--fill);
+}
+
+.replay-bar__speed {
+  min-width: 30px;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-num);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.replay-bar__speed:hover {
+  color: var(--text);
+}
+
+.replay-bar__speed[aria-pressed='true'] {
+  background: var(--panel);
+  box-shadow: 0 1px 2px var(--shadow-soft);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* ---------- Readout ---------- */
+
+.replay-bar__readout {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 136px;
+  padding: 0 6px;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.replay-bar__time {
+  color: var(--text);
+  font-family: var(--font-num);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.replay-bar__zone {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.replay-bar__ahead {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
+.replay-bar--active:not(.replay-bar--playing) .replay-bar__ahead {
+  color: var(--text-faint);
+}
+
+/* ---------- Text buttons (pick, cancel, exit) ---------- */
+
+.replay-bar__hint {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 4px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.replay-bar__hint-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.replay-bar__hint svg {
+  flex: none;
+  color: var(--warn-text);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.replay-bar__text-btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.replay-bar__text-btn:hover {
+  background: var(--panel-hover);
+}
+
+.replay-bar__text-btn--accent {
+  color: var(--accent-text);
+}
+
+.replay-bar__exit {
+  color: var(--text-muted);
+}
+
+.replay-bar__exit:hover {
+  background: var(--tint-down);
+  color: var(--down-text);
+}
+
+.replay-bar__btn:focus-visible,
+.replay-bar__speed:focus-visible,
+.replay-bar__text-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* ---------- Progress through the loaded history ---------- */
+
+.replay-bar__progress {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  background: var(--warn);
+  transform-origin: left center;
+  transition: transform 120ms linear;
+  pointer-events: none;
+}
+
+/* ---------- Narrow charts: drop labels, keep the controls ---------- */
+
+@media (max-width: 720px) {
+  .replay-bar__zone,
+  .replay-bar__ahead,
+  .replay-bar__exit-label {
+    display: none;
+  }
+
+  .replay-bar__readout {
+    min-width: 0;
+  }
+}

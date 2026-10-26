@@ -1,11 +1,11 @@
 import { useEffect, useRef } from 'react'
-import type { Candle, Interval } from '../types'
+import type { Candle, Timeframe } from '../types'
 import { canLoadOlder, noTradesCopy, shouldAutoLoadOlder, type OlderHistoryState } from './noTrades'
 import { EmptyView } from './StatusViews'
 
 interface NoTradesViewProps extends OlderHistoryState {
   symbol: string
-  interval: Interval
+  interval: Timeframe
   exchange: string
   /** Loaded bars, traded or not (none traded, or this view would not be shown). */
   raw: readonly Candle[]

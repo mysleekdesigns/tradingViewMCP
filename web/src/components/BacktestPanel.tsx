@@ -21,9 +21,11 @@ import type {
   LedgerItem,
   PlanError,
 } from '../data/labTypes'
-import type { Interval } from '../types'
+import type { Timeframe } from '../types'
 import { EXIT_LABELS } from '../chart/backtestOverlay'
 import {
+  BACKTEST_TIMEFRAME_MESSAGE,
+  backtestSupported,
   DOCK_MAX_SHARE,
   DOCK_MIN_HEIGHT,
   EMPTY,
@@ -94,7 +96,7 @@ export interface BacktestPanelProps {
   state: TesterState
   dispatch: Dispatch<TesterAction>
   chartSymbol: string
-  chartInterval: Interval
+  chartInterval: Timeframe
   link: BacktestChartLink
   /** Draw the report; switches the chart to its symbol/interval first when needed. */
   onShowOnChart(): void
@@ -147,8 +149,10 @@ export const BacktestPanel = memo(function BacktestPanel(props: BacktestPanelPro
   const planText = planTextFor(state, chartSymbol, chartInterval)
   const parsed = useMemo(() => parsePlanText(planText), [planText])
   const errors = editorErrors(state, planText, parsed)
-  const blocked = runBlockedReason(state, planText, parsed)
+  const blocked = runBlockedReason(state, planText, parsed, chartInterval)
   const running = state.run.kind === 'running'
+  /** The lab has no bars for seconds/custom timeframes: no validation, no runs. */
+  const supported = backtestSupported(chartInterval)
 
   // Health check on open and on "Retry".
   useEffect(() => {
@@ -172,7 +176,7 @@ export const BacktestPanel = memo(function BacktestPanel(props: BacktestPanelPro
   const settledText = v.kind === 'valid' || v.kind === 'invalid' ? v.text : null
   const plan = parsed.ok ? parsed.plan : null
   useEffect(() => {
-    if (plan === null || settledText === planText) return
+    if (!supported || plan === null || settledText === planText) return
     const controller = new AbortController()
     const timer = setTimeout(() => {
       dispatch({ type: 'validate-start', text: planText })
@@ -188,7 +192,7 @@ export const BacktestPanel = memo(function BacktestPanel(props: BacktestPanelPro
       clearTimeout(timer)
       controller.abort()
     }
-  }, [client, dispatch, plan, planText, settledText, healthNonce])
+  }, [client, dispatch, plan, planText, settledText, healthNonce, supported])
 
   // While the lab is down, look for it again every few seconds so Run unlocks by itself.
   const offline = state.lab === 'offline'
@@ -319,6 +323,7 @@ export const BacktestPanel = memo(function BacktestPanel(props: BacktestPanelPro
           aria-labelledby={tabId(tab)}
           aria-busy={running}
         >
+          {!supported && <TimeframeBanner />}
           {state.lab === 'offline' && <OfflineBanner onRetry={retryLab} />}
           {state.run.kind === 'error' && state.run.error.kind !== 'offline' && (
             <RunErrorBanner
@@ -433,7 +438,7 @@ interface PlanEditorProps {
   errors: PlanError[]
   parsedOk: boolean
   chartSymbol: string
-  chartInterval: Interval
+  chartInterval: Timeframe
   blocked: string | null
   onRun(): void
 }
@@ -452,8 +457,10 @@ function PlanEditor({
 }: PlanEditorProps) {
   const ids = useId()
   const running = state.run.kind === 'running'
-  const status = planStatus(state, planText, parsedOk, errors.length)
-  const intervalNote = templateIntervalNote(chartInterval)
+  const status = planStatus(state, planText, parsedOk, errors.length, chartInterval)
+  const intervalNote = backtestSupported(chartInterval)
+    ? templateIntervalNote(chartInterval)
+    : `${BACKTEST_TIMEFRAME_MESSAGE}.`
 
   const format = () => {
     try {
@@ -676,6 +683,19 @@ function LabStatusChip({
       <span className="tester__lab-dot" aria-hidden="true" />
       <span className="tester__lab-text">{label}</span>
     </span>
+  )
+}
+
+/** The chart is on a seconds or custom timeframe the lab has no bars for. */
+function TimeframeBanner() {
+  return (
+    <div className="tester__banner tester__banner--warn" role="status">
+      <WarnIcon />
+      <div className="tester__banner-main">
+        <p className="tester__banner-title">Timeframe not supported</p>
+        <p className="tester__banner-text">{BACKTEST_TIMEFRAME_MESSAGE}.</p>
+      </div>
+    </div>
   )
 }
 

@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest'
 import { prependOlder } from '../data/candleStore'
 import type { Candle } from '../types'
 import {
+  clickedBarTime,
   isNearLeftEdge,
+  newestBarOffscreen,
   LEFT_EDGE_THRESHOLD_BARS,
   MAX_APPENDED_BARS,
   planSeriesSync,
@@ -152,6 +154,84 @@ describe('planSeriesSync', () => {
     const a = base()
     expect(planSeriesSync(a, [...a, bar(4 * H, 1), bar(3 * H, 2)])).toEqual({ kind: 'set' })
     expect(planSeriesSync(a, [...a, bar(2 * H, 1)])).toEqual({ kind: 'set' })
+  })
+})
+
+describe('planSeriesSync under bar replay', () => {
+  /** Ten closed hourly bars; replay shows prefixes of this array (same Candle objects). */
+  const closed = Array.from({ length: 10 }, (_, i) => bar(i * H, 10 + i))
+
+  it('replay start (a shorter prefix replaces the history) sets data', () => {
+    expect(planSeriesSync(closed, closed.slice(0, 6))).toEqual({ kind: 'set' })
+  })
+
+  it('step back (prefix shrinks by one) sets data', () => {
+    expect(planSeriesSync(closed.slice(0, 6), closed.slice(0, 5))).toEqual({ kind: 'set' })
+  })
+
+  it('step forward (prefix grows by one) updates only the new bar', () => {
+    expect(planSeriesSync(closed.slice(0, 5), closed.slice(0, 6))).toEqual({
+      kind: 'update',
+      from: 5,
+    })
+  })
+
+  it('shrink then regrow plans set, then one update per bar', () => {
+    const plans = [8, 5, 6, 7, 8, 9, 10].reduce<{ prev: Candle[]; kinds: string[] }>(
+      (acc, k) => {
+        const next = closed.slice(0, k)
+        acc.kinds.push(planSeriesSync(acc.prev, next).kind)
+        return { prev: next, kinds: acc.kinds }
+      },
+      { prev: closed, kinds: [] },
+    ).kinds
+    expect(plans).toEqual(['set', 'set', 'update', 'update', 'update', 'update', 'update'])
+  })
+
+  it('a jump forward of more than MAX_APPENDED_BARS bars sets data', () => {
+    expect(planSeriesSync(closed.slice(0, 2), closed.slice(0, 3 + MAX_APPENDED_BARS))).toEqual({
+      kind: 'set',
+    })
+  })
+})
+
+describe('newestBarOffscreen (bar replay keeps the newest bar in view)', () => {
+  it('is true only when the newest bar is right of the visible range', () => {
+    expect(newestBarOffscreen({ from: 0, to: 8 }, 10)).toBe(true)
+    expect(newestBarOffscreen({ from: 0, to: 9 }, 10)).toBe(false)
+    // Right offset: empty space after the last bar.
+    expect(newestBarOffscreen({ from: 3, to: 15 }, 10)).toBe(false)
+  })
+
+  it('is false without a range or bars', () => {
+    expect(newestBarOffscreen(null, 10)).toBe(false)
+    expect(newestBarOffscreen({ from: -5, to: -1 }, 0)).toBe(false)
+  })
+})
+
+describe('clickedBarTime (onTimeClick)', () => {
+  const click = {
+    tool: 'cursor',
+    pressConsumed: false,
+    hasPoint: true,
+    paneIndex: 0,
+    barTime: 1_700_000_000 as unknown,
+  }
+
+  it('reports the open time of the bar under a cursor-tool click on the main pane', () => {
+    expect(clickedBarTime(click)).toBe(1_700_000_000)
+    expect(clickedBarTime({ ...click, paneIndex: undefined })).toBe(1_700_000_000)
+  })
+
+  it('reports null on the main pane when no bar is under the cursor', () => {
+    expect(clickedBarTime({ ...click, barTime: undefined })).toBeNull()
+  })
+
+  it('reports nothing for drawing tools, drawing hits, indicator panes, or off-pane clicks', () => {
+    expect(clickedBarTime({ ...click, tool: 'trendline' })).toBeUndefined()
+    expect(clickedBarTime({ ...click, pressConsumed: true })).toBeUndefined()
+    expect(clickedBarTime({ ...click, paneIndex: 1 })).toBeUndefined()
+    expect(clickedBarTime({ ...click, hasPoint: false })).toBeUndefined()
   })
 })
 

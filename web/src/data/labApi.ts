@@ -2,8 +2,8 @@
  * Client for the Python lab service (`lab/`, FastAPI on 127.0.0.1:8788). The browser calls
  * same-origin `/lab/...`; the Vite dev/preview proxy forwards it.
  *
- * Read-only research calls: health, feature registry, plan validation, design-window backtests
- * and the trial ledger. No keys, no exchange calls, no trading endpoints.
+ * Read-only research calls: health, feature registry, plan validation, design-window backtests,
+ * the trial ledger, and regime labels for the chart's regime ribbon. No keys, no exchange calls, no trading endpoints.
  */
 
 import type {
@@ -22,6 +22,10 @@ import type {
   LedgerPage,
   LedgerQuery,
   PlanError,
+  RegimePoint,
+  RegimeRequest,
+  RegimeResponse,
+  RegimeState,
   ValidationResult,
   WalkForwardFold,
 } from './labTypes'
@@ -69,7 +73,13 @@ export interface LabClientOptions {
   backtestTimeoutMs?: number
 }
 
-export interface LabClient {
+/** The chart's regime ribbon needs only this call (`useRegime` takes just this). */
+export interface LabRegimeClient {
+  /** hedgeFund regime labels for closed bars (display only; nothing is written to the ledger). */
+  regime(req: RegimeRequest, signal?: AbortSignal): Promise<RegimeResponse>
+}
+
+export interface LabClient extends LabRegimeClient {
   health(signal?: AbortSignal): Promise<LabHealth>
   registry(signal?: AbortSignal): Promise<LabRegistry>
   validate(plan: LabPlan, signal?: AbortSignal): Promise<ValidationResult>
@@ -334,6 +344,29 @@ function parseFeature(v: unknown): LabFeature | null {
   }
 }
 
+const REGIME_STATES: readonly RegimeState[] = [-1, 0, 1]
+
+function parseRegimePoint(v: unknown): RegimePoint | null {
+  if (!isRecord(v)) return null
+  const time = num(v.time)
+  if (time === null) return null
+  const state = REGIME_STATES.includes(v.state as RegimeState) ? (v.state as RegimeState) : null
+  return { time, state }
+}
+
+/** Points with a finite time, ascending with duplicates dropped; an unknown state reads as null. */
+export function parseRegimeResponse(v: unknown): RegimeResponse {
+  const r = record(v, 'regime answer')
+  const points = compact(list(r.points, 'regime points'), parseRegimePoint)
+  points.sort((a, b) => a.time - b.time)
+  return {
+    points: points.filter((p, i) => i === 0 || p.time !== points[i - 1].time),
+    window_bars: numOr(r.window_bars, 0),
+    threshold: numOr(r.threshold, 0),
+    engine: str(r.engine),
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Requests
 // ---------------------------------------------------------------------------------------------
@@ -481,6 +514,13 @@ export function createLabClient(opts: LabClientOptions = {}): LabClient {
         plan: isRecord(body.plan) ? body.plan : {},
         metrics: isRecord(body.metrics) ? parseMetrics(body.metrics) : null,
       }
+    },
+    async regime(req, signal) {
+      const payload: RegimeRequest = { times: req.times, closes: req.closes }
+      if (req.window_bars !== undefined) payload.window_bars = req.window_bars
+      if (req.threshold !== undefined) payload.threshold = req.threshold
+      const body = await request('/regime', { method: 'POST', body: payload, signal })
+      return parseRegimeResponse(body)
     },
   }
 }

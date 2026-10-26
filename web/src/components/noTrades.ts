@@ -1,5 +1,5 @@
 import { MAX_AUTO_OLDER_PAGES } from '../chart/seriesSync'
-import type { Candle, Interval } from '../types'
+import type { Candle, Timeframe } from '../types'
 import { formatUtc } from './quote'
 
 /** Copy for the "no trades in this period" state (loaded bars exist, none had a trade). */
@@ -61,7 +61,7 @@ export function shouldAutoLoadOlder(pagesSoFar: number, canLoad: boolean): boole
 export function noTradesCopy(
   opts: {
     symbol: string
-    interval: Interval
+    interval: Timeframe
     exchange: string
     raw: readonly Candle[]
     /** The chart's raw-bar limit, quoted when it is reached. */

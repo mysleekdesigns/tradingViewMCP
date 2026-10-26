@@ -355,3 +355,65 @@ describe.each(INDICATORS)('IndicatorRunner with real indicator $id', (def) => {
     }
   })
 })
+
+// Bar replay drives the chart with a prefix of the closed bars: step back shrinks it (the chart
+// plans 'set' and resets), step forward grows it by one bar (the chart plans 'update').
+// Replay is only a valid look-ahead check if the incremental result at every cursor equals a
+// computation that never saw the later bars.
+describe.each(INDICATORS)('IndicatorRunner under bar replay ($id)', (def) => {
+  const inputs = defaultInputs(def)
+  const source = def.source ?? 'close'
+
+  /** What the chart does with a new candles array: reset on a shrink, update on a grow. */
+  function apply(runner: IndicatorRunner, prev: readonly Candle[], next: readonly Candle[]) {
+    if (next.length < prev.length) runner.reset(next)
+    else runner.update(next, prev.length)
+  }
+
+  it('shrink-then-regrow equals a from-scratch computation on the same bars', () => {
+    const full = liveBars(120, prng(11))
+    const runner = new IndicatorRunner(def, inputs, source)
+    // The chart showed the whole history before replay started.
+    runner.reset(full)
+    let prev: readonly Candle[] = full
+    // Replay starts at bar 60, steps back 5, then forward bar by bar to bar 90.
+    const cursors = [60, 59, 58, 57, 56, 55, ...Array.from({ length: 35 }, (_, i) => 56 + i)]
+    for (const k of cursors) {
+      const next = full.slice(0, k)
+      apply(runner, prev, next)
+      expect(runner.output).toEqual(computeIndicator(def, next, inputs, source))
+      prev = next
+    }
+  })
+
+  it('random steps forward and back always equal a from-scratch computation', () => {
+    const rand = prng(23)
+    const full = liveBars(150, rand)
+    const runner = new IndicatorRunner(def, inputs, source)
+    runner.reset(full)
+    let prev: readonly Candle[] = full
+    let k = 75
+    for (let step = 0; step < 200; step++) {
+      const r = rand()
+      // Mostly single steps forward, sometimes back by 1-3 bars (as Shift+← held down).
+      k = r < 0.7 ? Math.min(full.length, k + 1) : Math.max(1, k - 1 - Math.floor(rand() * 3))
+      const next = full.slice(0, k)
+      apply(runner, prev, next)
+      expect(runner.output).toEqual(computeIndicator(def, next, inputs, source))
+      prev = next
+    }
+  })
+
+  it('no output reaches past the replay cursor', () => {
+    const full = liveBars(100, prng(5))
+    const runner = new IndicatorRunner(def, inputs, source)
+    runner.reset(full)
+    const prefix = full.slice(0, 40)
+    runner.reset(prefix)
+    runner.update(full.slice(0, 41), 40)
+    const cursor = full[40].time
+    for (const line of def.lines) {
+      for (const p of runner.output[line.key]) expect(p.time).toBeLessThanOrEqual(cursor)
+    }
+  })
+})

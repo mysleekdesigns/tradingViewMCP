@@ -1,7 +1,9 @@
 import { applyLiveCandle, mergeCandles, prependOlder } from '../data/candleStore'
 import { plottableCandles } from '../data/plottable'
-import { MarketDataError, type MarketDataProvider } from '../data/provider'
-import type { Candle, ConnectionStatus, Interval } from '../types'
+import { MarketDataError } from '../data/provider'
+import type { CandleSource } from '../data/timeframeProvider'
+import { bucketStart, timeframeSeconds } from '../data/timeframes'
+import type { Candle, ConnectionStatus, Timeframe } from '../types'
 
 /** What the chart area shows: a skeleton, an error card, or the candles. */
 export type LoadState =
@@ -44,9 +46,13 @@ export interface LiveCandlesSnapshot {
 }
 
 export interface LiveCandlesOptions {
-  provider: MarketDataProvider
+  /**
+   * Any MarketDataProvider works for native Intervals; seconds/custom timeframes need a
+   * TimeframeProvider (createTimeframeProvider).
+   */
+  provider: CandleSource
   symbol: string
-  interval: Interval
+  interval: Timeframe
   limit: number
   /** Data source name used in error messages, e.g. "Binance". */
   source: string
@@ -175,25 +181,6 @@ function retryAfterSeconds(err: unknown): number {
   return banned ? DEFAULT_BAN_BLOCK_S : DEFAULT_RATE_LIMIT_BLOCK_S
 }
 
-const INTERVAL_SECONDS: Record<Interval, number> = {
-  '1m': 60,
-  '5m': 300,
-  '15m': 900,
-  '1h': 3_600,
-  '4h': 14_400,
-  '1d': 86_400,
-  '1w': 604_800,
-}
-/** Binance weekly bars open on Monday 00:00 UTC; the UNIX epoch was a Thursday. */
-const WEEK_OFFSET_S = 4 * 86_400
-
-/** Open time (UNIX seconds) of the bar containing `nowSec`. */
-function barOpenTime(nowSec: number, interval: Interval): number {
-  const len = INTERVAL_SECONDS[interval]
-  const offset = interval === '1w' ? WEEK_OFFSET_S : 0
-  return Math.floor((nowSec - offset) / len) * len + offset
-}
-
 function browserOffline(): boolean {
   return typeof navigator !== 'undefined' && navigator.onLine === false
 }
@@ -237,6 +224,11 @@ export class LiveCandlesController {
   private retryTimer: ReturnType<typeof setTimeout> | null = null
   /** A gap fill was wanted during a Retry-After block; it runs when the block ends. */
   private pendingGapFill = false
+  /**
+   * The source asked for a repair while a request was in flight that may predate the bar's
+   * end: one gap fill runs after that request settles (any later request covers it).
+   */
+  private repairPending = false
   /** Automatic retries already used by the current gap fill. */
   private gapFillRetries = 0
   private gapRetryTimer: ReturnType<typeof setTimeout> | null = null
@@ -283,6 +275,7 @@ export class LiveCandlesController {
         (c, closed) => this.onCandle(c, closed),
         {
           onStatus: (status) => this.onStatus(status),
+          onRepair: () => this.onRepair(),
         },
       )
     } catch {
@@ -496,6 +489,21 @@ export class LiveCandlesController {
   }
 
   /**
+   * The source will never deliver an ended bar in full (an aggregated timeframe gave up
+   * seeding it), so repair it over REST. Before the first load the in-flight load covers it.
+   * A request already in flight is not aborted: one gap fill is queued behind it.
+   */
+  private onRepair(): void {
+    if (this.stopped || this.snapshot.load.kind !== 'ready') return
+    if (this.inflight !== null) {
+      this.repairPending = true
+      return
+    }
+    this.gapFillRetries = 0
+    this.requestGapFill()
+  }
+
+  /**
    * A tick opened a new bar while the previous live-ticked bar never got its closed tick:
    * its final values were missed (e.g. during a silent reconnect), so repair them over REST.
    * Fires once per rollover; the first tick after a REST apply never fires.
@@ -525,15 +533,17 @@ export class LiveCandlesController {
     if (this.lastTickAt === null || candles.length === 0) return false
     const nowMs = this.now()
     const { interval } = this.opts
-    if (nowMs - this.lastTickAt >= INTERVAL_SECONDS[interval] * 1000) return false
-    return barOpenTime(Math.floor(nowMs / 1000), interval) === candles[candles.length - 1].time
+    if (nowMs - this.lastTickAt >= timeframeSeconds(interval) * 1000) return false
+    return bucketStart(Math.floor(nowMs / 1000), interval) === candles[candles.length - 1].time
   }
 
   private fetch(reason: FetchReason, isRetry = false): void {
     this.inflight?.controller.abort()
-    // A newer request supersedes any scheduled or pending gap-fill retry.
+    // A newer request supersedes any scheduled or pending gap-fill retry, and starts after
+    // every repair asked for so far.
     this.clearGapRetry()
     this.pendingGapFill = false
+    this.repairPending = false
     if (!isRetry) this.gapFillRetries = 0
     // A reload or initial load may replace the window; a stale older page must not land on
     // it. A gap fill keeps the older page running (it only aborts it if it replaces).
@@ -610,6 +620,11 @@ export class LiveCandlesController {
       ...(replaced ? { historyExhausted: false } : {}),
     })
     this.refreshErrorFromOlder = false
+    if (this.repairPending) {
+      this.repairPending = false
+      this.gapFillRetries = 0
+      this.requestGapFill()
+    }
   }
 
   private onFetchFailed(token: number, err: unknown): void {
@@ -633,7 +648,17 @@ export class LiveCandlesController {
       })
     }
     if (blockFor > 0) this.startRetryBlock(blockFor)
-    if (reason === 'gap-fill' && load.kind === 'ready') this.scheduleGapRetry(blockFor > 0)
+    if (load.kind !== 'ready') {
+      this.repairPending = false
+      return
+    }
+    if (reason === 'gap-fill') this.scheduleGapRetry(blockFor > 0)
+    else if (this.repairPending) {
+      // A failed reload: the queued repair runs as a gap-fill retry (backoff, Retry-After).
+      this.gapFillRetries = 0
+      this.scheduleGapRetry(blockFor > 0)
+    }
+    // A failed gap fill's own retry covers a queued repair (fetch() clears it).
   }
 
   /**

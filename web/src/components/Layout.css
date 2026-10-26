@@ -1,0 +1,276 @@
+/* ---------- Multi-chart layout: grid, cells, layout menu ---------- */
+
+/*
+ * The grid fills the workspace. Panels are separated by a 1px hairline (the grid's own
+ * background showing through the gap); a single chart has no gap, so it looks exactly as the
+ * single-chart app did.
+ */
+.layout-grid {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.layout-grid--1 {
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+}
+
+.layout-grid--2 {
+  grid-template: minmax(0, 1fr) / repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--border);
+}
+
+.layout-grid--4 {
+  grid-template: repeat(2, minmax(0, 1fr)) / repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--border);
+}
+
+.chart-cell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+
+/* Overlays (legend, history chip, style bar, loading/error views) position against this. */
+.chart-cell__body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Active panel: a quiet accent frame over the cell, never intercepting the pointer. */
+.chart-cell--multi::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 16;
+  border: 1px solid transparent;
+  pointer-events: none;
+  transition: border-color 120ms ease;
+}
+
+.chart-cell--active::after {
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
+.chart-cell__strip {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--chrome);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
+  user-select: none;
+}
+
+.chart-cell__symbol {
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-num);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chart-cell__interval {
+  padding: 2px 5px;
+  border-radius: 3px;
+  background: var(--fill);
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-cell--active .chart-cell__interval {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent-text);
+}
+
+.chart-cell__badge {
+  margin-left: auto;
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* ---------- Layout menu ---------- */
+
+.layout-menu {
+  position: relative;
+  flex: none;
+}
+
+.layout-menu__button[aria-expanded='true'] {
+  background: var(--fill);
+  color: var(--text);
+}
+
+.layout-menu__panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  width: 264px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 10px 28px var(--shadow);
+}
+
+.layout-menu__heading {
+  padding: 2px 4px 6px;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.layout-menu__tiles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.layout-menu__tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.layout-menu__tile:hover {
+  border-color: var(--border-strong);
+  background: var(--panel-hover);
+  color: var(--text);
+}
+
+.layout-menu__tile[aria-checked='true'] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-text);
+}
+
+.layout-menu__tile-label {
+  font-family: var(--font-num);
+}
+
+.layout-menu__sep {
+  height: 1px;
+  margin: 10px 0 8px;
+  background: var(--border);
+}
+
+.layout-menu__toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 4px 6px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.layout-menu__toggle:hover {
+  background: var(--panel-hover);
+}
+
+.layout-menu__toggle-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.layout-menu__toggle-label {
+  font-size: 13px;
+}
+
+.layout-menu__toggle-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.layout-menu__note {
+  margin: 6px 6px 2px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.layout-menu__tile:focus-visible,
+.layout-menu__toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.layout-switch {
+  position: relative;
+  flex: none;
+  width: 28px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--panel-active);
+  transition: background-color 120ms ease;
+}
+
+.layout-switch__knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition:
+    transform 120ms ease,
+    background-color 120ms ease;
+}
+
+.layout-switch--on {
+  background: var(--accent);
+}
+
+.layout-switch--on .layout-switch__knob {
+  background: var(--on-accent);
+  transform: translateX(12px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chart-cell--multi::after,
+  .layout-switch,
+  .layout-switch__knob {
+    transition: none;
+  }
+}

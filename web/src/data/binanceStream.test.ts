@@ -295,3 +295,21 @@ describe('openReconnectingSocket options', () => {
     h.teardown()
   })
 })
+
+describe('parseKlineMessage (1s)', () => {
+  it('parses a closed 1s kline and filters it by interval', () => {
+    const msg = klineMsg({ t: 1700000041000, T: 1700000041999, i: '1s', x: true })
+    expect(parseKlineMessage(msg, { symbol: 'BTCUSDT', interval: '1s' })).toEqual({
+      candle: {
+        time: 1700000041,
+        open: 37000.1,
+        high: 37100.5,
+        low: 36950,
+        close: 37050.25,
+        volume: 12.5,
+      },
+      closed: true,
+    })
+    expect(parseKlineMessage(msg, { symbol: 'BTCUSDT', interval: '1m' })).toBeNull()
+  })
+})

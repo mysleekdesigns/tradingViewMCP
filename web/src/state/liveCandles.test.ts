@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { MarketDataError, type MarketDataProvider, type SubscribeOptions } from '../data/provider'
-import type { Candle, ConnectionStatus, Interval } from '../types'
+import { MarketDataError, type MarketDataProvider } from '../data/provider'
+import {
+  createTimeframeProvider,
+  type CandleSource,
+  type CandleSubscribeOptions,
+} from '../data/timeframeProvider'
+import type { Candle, ConnectionStatus, Interval, Timeframe } from '../types'
 import {
   DEFAULT_BAN_BLOCK_S,
   DEFAULT_RATE_LIMIT_BLOCK_S,
@@ -32,6 +37,7 @@ class FakeProvider implements MarketDataProvider {
   unsubscribes = 0
   private onCandle: ((c: Candle, closed: boolean) => void) | null = null
   private onStatus: ((s: ConnectionStatus) => void) | null = null
+  private onRepair: ((time: number) => void) | null = null
 
   getCandles(
     _symbol: string,
@@ -49,15 +55,17 @@ class FakeProvider implements MarketDataProvider {
     _symbol: string,
     _interval: Interval,
     onCandle: (c: Candle, closed: boolean) => void,
-    opts?: SubscribeOptions,
+    opts?: CandleSubscribeOptions,
   ): () => void {
     this.subscriptions++
     this.onCandle = onCandle
     this.onStatus = opts?.onStatus ?? null
+    this.onRepair = opts?.onRepair ?? null
     return () => {
       this.unsubscribes++
       this.onCandle = null
       this.onStatus = null
+      this.onRepair = null
     }
   }
 
@@ -79,6 +87,16 @@ class FakeProvider implements MarketDataProvider {
 
   status(s: ConnectionStatus): void {
     this.onStatus?.(s)
+  }
+
+  /** An aggregated source giving up on bar `time` (CandleSubscribeOptions.onRepair). */
+  repair(time: number): void {
+    this.onRepair?.(time)
+  }
+
+  /** The controller passed an onRepair hook. */
+  hasRepairHook(): boolean {
+    return this.onRepair !== null
   }
 
   last(): Deferred {
@@ -1319,6 +1337,226 @@ describe('rollover without a closed tick on the previous bar', () => {
   })
 })
 
+describe('onRepair from an aggregated source', () => {
+  async function liveNow() {
+    const ctx = setup()
+    ctx.controller.start()
+    ctx.provider.last().resolve(rest) // last REST bar: 2H, forming at load time
+    await flush()
+    return ctx
+  }
+
+  it('subscribes with an onRepair hook', () => {
+    const { provider, controller } = setup()
+    controller.start()
+    expect(provider.hasRepairHook()).toBe(true)
+  })
+
+  it('a repair after the load runs one gap fill and the bar takes the REST value', async () => {
+    const { provider, candles } = await liveNow()
+    // The source withheld 2H (given up); its first emission is the next bar.
+    provider.tick(bar(3 * H, 160))
+    expect(provider.requests).toHaveLength(1)
+    provider.repair(2 * H)
+    expect(provider.requests).toHaveLength(2)
+    expect(provider.last().endTime).toBeUndefined()
+    provider.tick(bar(3 * H, 161)) // during the request: applied on top of its rows
+    provider.last().resolve([bar(H, 101), bar(2 * H, 155), bar(3 * H, 158)])
+    await flush()
+    expect(candles().map((c) => [c.time, c.close])).toEqual([
+      [0, 100],
+      [H, 101],
+      [2 * H, 155],
+      [3 * H, 161],
+    ])
+  })
+
+  it('a repair during a Retry-After block is deferred and runs once when it ends', async () => {
+    vi.useFakeTimers()
+    try {
+      const { provider, controller, latest } = setup()
+      controller.start()
+      provider.last().resolve(rest)
+      await vi.advanceTimersByTimeAsync(0)
+      controller.reload()
+      provider.last().reject(new MarketDataError('rate-limited', '429', 429, 5))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(latest().retryBlocked).toBe(true)
+      provider.repair(2 * H)
+      provider.repair(2 * H)
+      expect(provider.requests).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(5_000 - 1)
+      expect(provider.requests).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(provider.requests).toHaveLength(3)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(provider.requests).toHaveLength(3)
+      controller.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a repair before the initial load is ready does nothing (the load covers it)', async () => {
+    const { provider, controller, candles } = setup()
+    controller.start()
+    provider.repair(2 * H)
+    expect(provider.requests).toHaveLength(1)
+    provider.last().resolve(rest)
+    await flush()
+    expect(provider.requests).toHaveLength(1)
+    expect(candles()).toHaveLength(3)
+  })
+
+  it('a repair after stop() makes no request', async () => {
+    const { provider, controller } = await liveNow()
+    // Grab the hook as a source would hold it, then stop: a late call is ignored.
+    const hook = (provider as unknown as { onRepair: (t: number) => void }).onRepair
+    controller.stop()
+    hook(2 * H)
+    expect(provider.requests).toHaveLength(1)
+  })
+
+  it('one gap fill per repair call: the result itself triggers nothing more', async () => {
+    const { provider } = await liveNow()
+    provider.tick(bar(3 * H, 160))
+    provider.repair(2 * H)
+    provider.last().resolve([bar(2 * H, 155), bar(3 * H, 160)])
+    await flush()
+    expect(provider.requests).toHaveLength(2)
+    // Ticks after the result (same bar, then the next one after an x:true) add nothing.
+    provider.tick(bar(3 * H, 161))
+    provider.tick(bar(3 * H, 162), true)
+    provider.tick(bar(4 * H, 170))
+    expect(provider.requests).toHaveLength(2)
+    // A later repair (the source reports each bar once) gets exactly one more.
+    provider.repair(3 * H)
+    expect(provider.requests).toHaveLength(3)
+  })
+})
+
+describe('onRepair while a request is in flight', () => {
+  async function liveNow() {
+    const ctx = setup()
+    ctx.controller.start()
+    ctx.provider.last().resolve(rest)
+    await flush()
+    return ctx
+  }
+
+  it('does not abort an in-flight gap fill; one gap fill runs after it lands', async () => {
+    const { provider } = await liveNow()
+    provider.tick(bar(2 * H, 150))
+    provider.tick(bar(3 * H, 160)) // missed close: gap fill #1
+    expect(provider.requests).toHaveLength(2)
+    const first = provider.last()
+    provider.repair(2 * H)
+    provider.repair(2 * H)
+    expect(first.signal?.aborted).toBe(false)
+    expect(provider.requests).toHaveLength(2)
+    first.resolve([bar(2 * H, 155), bar(3 * H, 160)])
+    await flush()
+    expect(provider.requests).toHaveLength(3)
+    expect(provider.last().endTime).toBeUndefined()
+    provider.last().resolve([bar(2 * H, 156), bar(3 * H, 160)])
+    await flush()
+    expect(provider.requests).toHaveLength(3)
+  })
+
+  it('a request started after the repair covers it (no extra gap fill)', async () => {
+    const { provider, controller } = await liveNow()
+    provider.tick(bar(2 * H, 150))
+    provider.tick(bar(3 * H, 160))
+    provider.repair(2 * H)
+    controller.reload() // starts after the repair: aborts the gap fill and covers the repair
+    expect(provider.requests).toHaveLength(3)
+    provider.last().resolve([bar(2 * H, 155), bar(3 * H, 160)])
+    await flush()
+    expect(provider.requests).toHaveLength(3)
+  })
+
+  it('a queued repair behind a failed gap fill rides on its retry', async () => {
+    vi.useFakeTimers()
+    try {
+      const { provider, controller } = setup()
+      controller.start()
+      provider.last().resolve(rest)
+      await vi.advanceTimersByTimeAsync(0)
+      provider.tick(bar(2 * H, 150))
+      provider.tick(bar(3 * H, 160))
+      provider.repair(2 * H)
+      provider.last().reject(new MarketDataError('network', 'down'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(provider.requests).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(GAP_FILL_RETRY_DELAYS_MS[0])
+      expect(provider.requests).toHaveLength(3)
+      provider.last().resolve([bar(2 * H, 155), bar(3 * H, 160)])
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(provider.requests).toHaveLength(3)
+      controller.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a queued repair behind a failed reload runs as a gap-fill retry', async () => {
+    vi.useFakeTimers()
+    try {
+      const { provider, controller } = setup()
+      controller.start()
+      provider.last().resolve(rest)
+      await vi.advanceTimersByTimeAsync(0)
+      controller.reload()
+      provider.repair(2 * H)
+      provider.last().reject(new MarketDataError('network', 'down'))
+      await vi.advanceTimersByTimeAsync(GAP_FILL_RETRY_DELAYS_MS[0] - 1)
+      expect(provider.requests).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(provider.requests).toHaveLength(3)
+      controller.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('shared rate-limit gate (createTimeframeProvider)', () => {
+  it("another chart's 429 blocks this controller's reload and gap fill without a request", async () => {
+    vi.useFakeTimers()
+    try {
+      const base = new FakeProvider()
+      const shared = createTimeframeProvider(base)
+      const snapshots: LiveCandlesSnapshot[] = []
+      const controller = new LiveCandlesController(
+        { provider: shared, symbol: 'BTCUSDT', interval: '1h', limit: 3, source: 'Binance' },
+        (snap) => snapshots.push(snap),
+      )
+      controller.start()
+      base.last().resolve(rest)
+      await vi.advanceTimersByTimeAsync(0)
+      // Another panel on the same provider gets a 429.
+      const other = shared.getCandles('ETHUSDT', '4h', 500).catch(() => null)
+      base.last().reject(new MarketDataError('rate-limited', 'slow down', 429, 30))
+      await other
+      const calls = base.requests.length
+      controller.reload()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(base.requests).toHaveLength(calls)
+      expect(snapshots[snapshots.length - 1].retryBlocked).toBe(true)
+      // A reconnect gap fill during the hold is deferred, not sent.
+      base.status('reconnecting')
+      base.status('live')
+      await vi.advanceTimersByTimeAsync(29_000)
+      expect(base.requests).toHaveLength(calls)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(base.requests).toHaveLength(calls + 1)
+      controller.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('describeError', () => {
   const cases: [MarketDataError | Error, string][] = [
     [new MarketDataError('network', 'x'), 'Network error — check connection'],
@@ -1336,5 +1574,82 @@ describe('describeError', () => {
     expect(describeError(new MarketDataError('http', 'x', 503), 'X', 'S').message).toContain(
       'HTTP 503',
     )
+  })
+})
+
+describe('custom timeframes (CandleSource)', () => {
+  /** A CandleSource (not a full MarketDataProvider) that records the timeframe it is asked for. */
+  function sourceSetup(interval: Timeframe, nowMs: number) {
+    const provider = new FakeProvider()
+    const seen: Timeframe[] = []
+    const source: CandleSource = {
+      getCandles: (symbol, tf, limit, endTime, opts) => {
+        seen.push(tf)
+        return provider.getCandles(symbol, '1m', limit, endTime, opts)
+      },
+      subscribeCandles: (symbol, tf, onCandle, opts) => {
+        seen.push(tf)
+        return provider.subscribeCandles(symbol, '1m', onCandle, opts)
+      },
+    }
+    const controller = new LiveCandlesController(
+      {
+        provider: source,
+        symbol: 'BTCUSDT',
+        interval,
+        limit: 3,
+        source: 'Binance',
+        now: () => nowMs,
+      },
+      () => {},
+    )
+    return { provider, controller, seen }
+  }
+
+  it('passes the timeframe through to the source', () => {
+    const { controller, seen } = sourceSetup('5s', 1_000)
+    controller.start()
+    expect(seen).toEqual(['5s', '5s'])
+    controller.stop()
+  })
+
+  it('a quiet reconnect inside the same Binance-aligned 3d bucket skips the gap fill', async () => {
+    const D3 = 1_792_713_600 // a live BTCUSDT 3d open (Monday-anchored, not epoch-aligned)
+    const nowMs = (D3 + 2 * 86_400) * 1000
+    const { provider, controller } = sourceSetup('3d', nowMs)
+    controller.start()
+    provider.last().resolve([bar(D3 - 259_200, 100), bar(D3, 101)])
+    await flush()
+    provider.tick(bar(D3, 150))
+    provider.status('reconnecting')
+    provider.status('live')
+    expect(provider.requests).toHaveLength(1)
+    controller.stop()
+  })
+
+  it('a reconnect after a 5s bucket boundary gap fills', async () => {
+    const S = 1_700_000_000
+    let nowMs = (S + 2) * 1000
+    const provider = new FakeProvider()
+    const controller = new LiveCandlesController(
+      {
+        provider,
+        symbol: 'BTCUSDT',
+        interval: '5s',
+        limit: 3,
+        source: 'Binance',
+        now: () => nowMs,
+      },
+      () => {},
+    )
+    controller.start()
+    provider.last().resolve([bar(S - 5, 100), bar(S, 101)])
+    await flush()
+    provider.tick(bar(S, 150))
+    nowMs = (S + 6) * 1000
+    provider.status('reconnecting')
+    provider.status('live')
+    expect(provider.requests).toHaveLength(2)
+    controller.stop()
   })
 })

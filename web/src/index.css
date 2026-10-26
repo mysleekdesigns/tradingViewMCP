@@ -269,44 +269,8 @@ body,
   color: var(--text-muted);
 }
 
-/* ---------- Timeframe toolbar ---------- */
+/* ---------- Header control focus ---------- */
 
-.tf-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 1px;
-  flex: none;
-}
-
-.tf-toolbar__btn {
-  min-width: 30px;
-  height: 28px;
-  padding: 0 7px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-muted);
-  font: inherit;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-  cursor: pointer;
-  transition:
-    background-color 120ms ease,
-    color 120ms ease;
-}
-
-.tf-toolbar__btn:hover {
-  background: var(--fill);
-  color: var(--text);
-}
-
-.tf-toolbar__btn[aria-pressed='true'] {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent-text);
-  font-weight: 600;
-}
-
-.tf-toolbar__btn:focus-visible,
 .ct-menu__button:focus-visible,
 .icon-btn:focus-visible,
 .chip:focus-visible {

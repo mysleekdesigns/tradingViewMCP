@@ -1,7 +1,6 @@
 // Pure logic of the Strategy Tester panel: the plan template, formatting of lab metrics and
 // statistics, the panel state reducer, history-load planning, and ledger paging.
 
-import { INTERVAL_SECONDS } from '../chart/drawings/timeIndex'
 import { LAB_OFFLINE_MESSAGE, LabError } from '../data/labApi'
 import { ARCHIVE_VENUE_ID } from '../data/venue'
 import type {
@@ -13,13 +12,26 @@ import type {
   PlanError,
   WalkForwardFold,
 } from '../data/labTypes'
-import { INTERVALS, type Interval } from '../types'
+import { isNativeInterval, timeframeSeconds } from '../data/timeframes'
+import { INTERVALS, type Interval, type Timeframe } from '../types'
 
 export const EMPTY = '—'
 
 // ---------------------------------------------------------------------------------------------
 // Plan text
 // ---------------------------------------------------------------------------------------------
+
+/**
+ * The lab serves the native intervals only (1m … 1w; 1w via the 1d template). Seconds and custom
+ * timeframes are chart-side aggregations, so the Strategy Tester is disabled on them.
+ */
+export function backtestSupported(tf: Timeframe): boolean {
+  return isNativeInterval(tf)
+}
+
+/** Why the Strategy Tester cannot run on the chart's timeframe. */
+export const BACKTEST_TIMEFRAME_MESSAGE =
+  'Backtests run on native intervals (1m–1W); switch timeframe'
 
 /** Chart intervals the lab has no bars for, and the lab interval the template uses instead. */
 const LAB_INTERVAL_FALLBACK: Readonly<Record<string, string>> = { '1w': '1d' }
@@ -724,10 +736,15 @@ export function planStatus(
   text: string,
   parsedOk: boolean,
   errorCount: number,
+  chartInterval?: Timeframe,
 ): PlanStatus {
   const v = state.validation
   const forText = 'text' in v && v.text === text
   if (!parsedOk) return { tone: 'bad', text: 'Invalid JSON', announce: '' }
+  // Nothing is sent to the lab on a non-native timeframe, so the plan is never checked there.
+  if (chartInterval !== undefined && !backtestSupported(chartInterval) && errorCount === 0) {
+    return { tone: 'warn', text: 'Not checked', announce: '' }
+  }
   if (errorCount > 0) {
     const label = `${fmtInt(errorCount)} error${errorCount === 1 ? '' : 's'}`
     return {
@@ -747,13 +764,17 @@ export function planStatus(
   return { tone: 'neutral', text: 'Checking…', announce: '' }
 }
 
-/** Why Run is disabled, or null when it can run. */
+/** Why Run is disabled, or null when it can run. `chartInterval`: the chart's timeframe. */
 export function runBlockedReason(
   state: TesterState,
   text: string,
   parsed: ParsedPlan,
+  chartInterval?: Timeframe,
 ): string | null {
   if (state.run.kind === 'running') return 'A backtest is running'
+  if (chartInterval !== undefined && !backtestSupported(chartInterval)) {
+    return BACKTEST_TIMEFRAME_MESSAGE
+  }
   if (!parsed.ok) return 'Fix the JSON first'
   const v = state.validation
   if (v.kind === 'invalid' && v.text === text) return 'Fix the plan errors first'
@@ -799,10 +820,10 @@ export interface HistoryPlan {
 export function historyPlan(
   firstBar: number | null,
   window: BacktestReport['window'],
-  interval: Interval,
+  interval: Timeframe,
   cap = MAX_HISTORY_BARS,
 ): HistoryPlan {
-  const step = INTERVAL_SECONDS[interval]
+  const step = timeframeSeconds(interval)
   const room = Math.max(0, cap)
   if (firstBar === null || firstBar <= window.start) {
     return { needed: false, target: window.start, bars: 0, partial: false, unreachable: false }
@@ -821,7 +842,7 @@ export function historyPlan(
 /** Load older bars until the chart's first bar reaches `target` (a backtest's window start). */
 export interface HistoryTarget {
   symbol: string
-  interval: Interval
+  interval: Timeframe
   target: number
 }
 
@@ -840,7 +861,7 @@ export interface HistoryLoadState {
   /** Retry ticks since the last request started. */
   idleTicks: number
   /** The market whose last load gave up (shows "History load failed — Retry"). */
-  failed: { symbol: string; interval: Interval } | null
+  failed: { symbol: string; interval: Timeframe } | null
 }
 
 export type HistoryLoadAction =
@@ -905,7 +926,7 @@ export function historyLoadReducer(
 export function historyLoadFailed(
   state: HistoryLoadState,
   symbol: string,
-  interval: Interval,
+  interval: Timeframe,
 ): boolean {
   return (
     state.failed !== null && state.failed.symbol === symbol && state.failed.interval === interval

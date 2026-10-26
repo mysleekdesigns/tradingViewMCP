@@ -3,7 +3,7 @@ import { TesterIcon } from './BacktestPanel'
 import { ResearchIcon } from './ResearchPage'
 import './SidebarRail.css'
 
-export type SidebarPanel = 'watchlist' | 'alerts'
+export type SidebarPanel = 'watchlist' | 'alerts' | 'paper'
 
 export interface SidebarRailProps {
   active: SidebarPanel | null
@@ -20,6 +20,7 @@ export interface SidebarRailProps {
 const PANELS: readonly { id: SidebarPanel; label: string }[] = [
   { id: 'watchlist', label: 'Watchlist' },
   { id: 'alerts', label: 'Alerts' },
+  { id: 'paper', label: 'Paper trading' },
 ]
 
 /**
@@ -51,7 +52,13 @@ export function SidebarRail({
             title={pressed ? `Hide ${p.label.toLowerCase()}` : p.label}
             onClick={() => onSelect(pressed ? null : p.id)}
           >
-            {p.id === 'watchlist' ? <ListIcon /> : <AlarmIcon />}
+            {p.id === 'watchlist' ? (
+              <ListIcon />
+            ) : p.id === 'alerts' ? (
+              <AlarmIcon />
+            ) : (
+              <PaperIcon />
+            )}
             {withBadge && (
               <span className="side-rail__badge" aria-hidden="true">
                 {badge}
@@ -111,6 +118,16 @@ function AlarmIcon() {
     <svg {...ICON}>
       <circle cx="11" cy="12" r="6.5" />
       <path d="M11 8.5V12l2.2 1.6M3.5 6 6 3.5M18.5 6 16 3.5M6.5 18.5 5.2 20M15.5 18.5l1.3 1.5" />
+    </svg>
+  )
+}
+
+/** A ticket with a buy/sell arrow pair: simulated orders. */
+function PaperIcon() {
+  return (
+    <svg {...ICON}>
+      <rect x="3.5" y="4.5" width="15" height="13" rx="1.5" />
+      <path d="M8 14.5v-6M5.8 10.7 8 8.5l2.2 2.2M14 8.5v6M11.8 12.3l2.2 2.2 2.2-2.2" />
     </svg>
   )
 }
