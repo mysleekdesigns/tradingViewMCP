@@ -57,3 +57,24 @@ literal_lineage_corr = 0.95      # another family logic's hand-tuned literals bl
 [api]
 host = "127.0.0.1"               # local only
 port = 8788                      # server/ uses 8787
+
+[universe]
+# Point-in-time multi-coin universe (lab.data.universe_build). Not part of the research-run
+# fingerprint yet: no plan type reads it until the owner adds portfolio backtests.
+quote = "USDT"                   # Binance's deepest spot books; nearly every listed coin has a USDT pair
+interval = "1d"                  # cross-sectional momentum ranks multi-week returns and rebalances weekly
+archive_list_url = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"  # S3 listing behind data.binance.vision; keeps delisted symbols
+top_n = 30                       # liquid core: research note H1 uses the top 20-30 by trailing volume
+volume_window_days = 30          # trailing median dollar volume over a month, robust to one-day spikes
+min_history_days = 365           # PLAN.md: a coin is eligible only after 1 year of trading history
+relist_gap_days = 30             # a hole over a month is a delisting/relisting or ticker reuse (LUNA): restart the clock
+relist_jump = 5.0                # hole + >5x open vs last close = new market: redenominations (BNX, COCOS, QUICK), reuse (LUNA)
+delisted_after_days = 7          # manifest only: no bar in the final week of data = delisted
+exclude_bases = [                # not ordinary coins: stablecoins, fiat, gold, wrapped/staked duplicates, BTC 3x BULL/BEAR tokens
+  "USDC", "BUSD", "TUSD", "USDP", "PAX", "DAI", "FDUSD", "UST", "USTC", "USDS", "USDSB", "USDSOLD",
+  "SUSD", "USDE", "USD1", "RLUSD", "BFUSD", "XUSD", "PYUSD", "AEUR", "EURI",
+  "EUR", "GBP", "AUD", "BKRW", "KGST", "U",
+  "PAXG", "XAUT",
+  "WBTC", "WBETH", "BETH",
+  "BULL", "BEAR",
+]

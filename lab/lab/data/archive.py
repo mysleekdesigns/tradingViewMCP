@@ -43,13 +43,15 @@ KLINE_CSV_COLUMNS: tuple[str, ...] = (
     "ignore",
 )
 _US_THRESHOLD = 1e14  # ms timestamps are ~1.7e12 today; µs are ~1.7e15
-_SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,30}$")
+# Letters and digits only (no "/", ".", "_" or spaces, so a symbol is a safe path segment); any
+# script, because Binance lists coins such as 币安人生USDT; no lowercase.
+_SYMBOL_RE = re.compile(r"^[^\W_]{2,30}$")
 _MONTH_RE = re.compile(r"^(\d{4})-(\d{2})$")
 DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 
 def _check_symbol(symbol: str) -> str:
-    if not isinstance(symbol, str) or not _SYMBOL_RE.match(symbol):
+    if not isinstance(symbol, str) or not _SYMBOL_RE.match(symbol) or symbol != symbol.upper():
         raise ValueError(
             f"invalid symbol {symbol!r}; expected an uppercase Binance symbol like BTCUSDT"
         )
@@ -94,15 +96,19 @@ def _empty_candles() -> pd.DataFrame:
     return frame
 
 
-def parse_kline_csv(data: bytes) -> pd.DataFrame:
+def parse_kline_csv(data: bytes, *, drop_identical_rows: bool = False) -> pd.DataFrame:
     """Parse a Binance kline CSV into the candle convention.
 
     Tolerates a header row. Open times in ms or µs (detected per value, > 1e14 -> µs) are
     normalised to a UTC index. ``tradable = volume > 0``. Raises ``ValueError`` on malformed
-    input or duplicate open times.
+    input or duplicate open times. With ``drop_identical_rows``, a line repeated byte for byte
+    (seen in Binance's own AXSUSDT 2026-02 and UMAUSDT 2026-07 files) is kept once; rows that
+    share an open time but differ still raise.
     """
     text = data.decode("utf-8-sig")
     lines = [ln for ln in text.splitlines() if ln.strip()]
+    if drop_identical_rows:
+        lines = list(dict.fromkeys(ln.strip() for ln in lines))
     if not lines:
         return _empty_candles()
     first_field = lines[0].split(",", 1)[0].strip()
@@ -184,7 +190,7 @@ def download_month(
     if actual != expected:
         raise ValueError(f"{filename}: SHA-256 mismatch (expected {expected}, got {actual})")
 
-    return parse_kline_csv(_csv_from_zip(payload, filename))
+    return parse_kline_csv(_csv_from_zip(payload, filename), drop_identical_rows=True)
 
 
 def _month_range(start: str, end: str) -> list[tuple[int, int]]:

@@ -61,6 +61,20 @@ class ResearchGuardConfig:
 
 
 @dataclass(frozen=True)
+class UniverseConfig:
+    quote: str
+    interval: str
+    archive_list_url: str
+    top_n: int
+    volume_window_days: int
+    min_history_days: int
+    relist_gap_days: int
+    relist_jump: float
+    delisted_after_days: int
+    exclude_bases: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class LabConfig:
     data_dir: Path
     archive_base_url: str
@@ -76,6 +90,7 @@ class LabConfig:
     api_host: str
     api_port: int
     research: ResearchGuardConfig
+    universe: UniverseConfig
 
     @property
     def ledger_path(self) -> Path:
@@ -84,6 +99,10 @@ class LabConfig:
     @property
     def parquet_dir(self) -> Path:
         return self.data_dir / "klines"
+
+    @property
+    def universe_dir(self) -> Path:
+        return self.data_dir / "universe"
 
 
 def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> LabConfig:
@@ -150,7 +169,30 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> LabConfig:
                 raw["research"]["literal_lineage_corr"], "research.literal_lineage_corr"
             ),
         ),
+        universe=_universe(raw["universe"]),
     )
+
+
+def _universe(u: dict) -> UniverseConfig:
+    cfg = UniverseConfig(
+        quote=str(u["quote"]).upper(),
+        interval=str(u["interval"]),
+        archive_list_url=str(u["archive_list_url"]),
+        top_n=_min_int(u["top_n"], "universe.top_n", 1),
+        volume_window_days=_min_int(u["volume_window_days"], "universe.volume_window_days", 1),
+        min_history_days=_min_int(u["min_history_days"], "universe.min_history_days", 0),
+        relist_gap_days=_min_int(u["relist_gap_days"], "universe.relist_gap_days", 1),
+        relist_jump=_above_one(u["relist_jump"], "universe.relist_jump"),
+        delisted_after_days=_min_int(u["delisted_after_days"], "universe.delisted_after_days", 0),
+        exclude_bases=tuple(str(b).upper() for b in u["exclude_bases"]),
+    )
+    if cfg.min_history_days < cfg.volume_window_days:
+        raise ValueError(
+            f"universe.min_history_days ({cfg.min_history_days}) must be >= "
+            f"universe.volume_window_days ({cfg.volume_window_days}), or launch-week volume "
+            "decides a new coin's rank"
+        )
+    return cfg
 
 
 def _unit_interval(value: object, name: str) -> float:
@@ -161,6 +203,13 @@ def _unit_interval(value: object, name: str) -> float:
     if not 0.0 < v <= 1.0:
         raise ValueError(f"{name} must be in (0, 1], got {v}")
     return v
+
+
+def _above_one(value: object, name: str) -> float:
+    """``value`` as a float > 1; ``ValueError`` naming ``name`` otherwise."""
+    if isinstance(value, bool) or not isinstance(value, int | float) or not float(value) > 1.0:
+        raise ValueError(f"{name} must be a number > 1, got {value!r}")
+    return float(value)
 
 
 def _min_int(value: object, name: str, low: int) -> int:

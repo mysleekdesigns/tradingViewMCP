@@ -737,6 +737,29 @@ found" report, with every trial in the ledger.
 
 ---
 
+## Phase 10 — Multi-Coin Research (cross-sectional momentum, H1)
+
+Why: every single-symbol research run so far ended "no edge found", and the literature review
+(`agents/research/reports/Crypto strategy edge research.md`) says the best-supported effect left to
+test is cross-sectional momentum among liquid coins (H1: long-only top quintile of the top 20–30
+USDT coins by trailing volume, ranked on 28-day return, weekly rebalance). That needs a
+survivorship-free, point-in-time multi-coin universe and a portfolio backtest. Items marked
+**(owner)** touch lab paths that are read-only while `.claude/lab.lock` exists.
+
+### Checklist
+- [x] Point-in-time universe data layer (`lab/lab/data/listing.py`, `universe.py`, `universe_build.py`): every archive symbol including delisted ones, stablecoin/fiat/leveraged exclusions from `lab.toml [universe]`, one year of seasoning restarted after a relisting gap, trailing dollar-volume rank, perturbation-tested
+- [x] Daily klines for every selected USDT coin downloaded and the universe table built (`uv run python -m lab.data.universe_build symbols|download|build`), manifest reviewed
+- [ ] **(owner)** Portfolio backtest in `lab/lab/engine/`: target weights at t's close filled at t+1's open, per-asset costs on traded value, a held coin that stops printing exits at its last close (delisting return), cash when fewer coins qualify
+- [ ] **(owner)** Cross-sectional features in `lab/lab/registry/` (trailing return rank within the eligible set) with perturbation tests
+- [ ] **(owner)** Portfolio benchmarks and criteria: equal-weight universe, vol-targeted BTC, random-selection null with the same turnover; `[universe]` added to the research-run fingerprint
+- [ ] Portfolio plan type through `validate_plan` / `run_backtest` / `walk_forward` / ledger families, then one pre-registered H1 run
+
+**Done when:** H1 has been run once, end to end, through the same ledgered pipeline and success
+criteria as single-symbol plans, and the outcome (most likely "no edge found") is written up in
+the journal.
+
+---
+
 ## Testing Strategy
 
 - **Unit (Vitest):** indicator math, data mappers (Binance kline → Candle).
@@ -782,5 +805,6 @@ found" report, with every trial in the ledger.
 | 7 | Backtesting lab (Python, honest stats) | Large |
 | 8 | AI strategy research agents (Claude + Jev) | Large |
 | 9 | Polish + desktop app | Medium |
+| 10 | Multi-coin research (point-in-time universe, portfolio backtests, H1) | Large |
 
 **First usable version = end of Phase 3.**

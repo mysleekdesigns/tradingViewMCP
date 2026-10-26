@@ -295,3 +295,21 @@ def test_cli_prints_summary(
     out = capsys.readouterr().out
     assert "1 written (3 bars)" in out
     assert (tmp_path / "ETHUSDT" / "1h" / "2024-01.parquet").exists()
+
+
+def test_parse_can_drop_byte_identical_rows_but_not_conflicting_ones() -> None:
+    rows = kline_rows("2024-01-01", 3)
+    df = parse_kline_csv(to_csv([*rows, rows[1]]), drop_identical_rows=True)
+    assert len(df) == 3
+    conflicting = [*rows, [rows[1][0], *rows[2][1:]]]
+    with pytest.raises(ValueError, match="duplicate"):
+        parse_kline_csv(to_csv(conflicting), drop_identical_rows=True)
+
+
+def test_symbols_in_other_scripts_are_valid_but_paths_and_lowercase_are_not() -> None:
+    assert archive_url(BASE, "币安人生USDT", "1d", 2025, 10).endswith(
+        "/monthly/klines/币安人生USDT/1d/币安人生USDT-1d-2025-10.zip"
+    )
+    for bad in ("../USDT", "BTC_USDT", "BTC USDT", "btcUSDT", "ÉTHUSDT".lower()):
+        with pytest.raises(ValueError, match="invalid symbol"):
+            archive_url(BASE, bad, "1d", 2025, 10)

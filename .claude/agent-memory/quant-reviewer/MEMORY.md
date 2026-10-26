@@ -1,3 +1,4 @@
 - [Indicator conventions](indicator-conventions.md) — Phase 4 stepper/runner design, agreed TV formulas, runner `from` contract pitfalls
 - [Recurring issues](recurring-issues.md): Phase 7 stats traps; Phase 8 laundering/family/literal; Phase 9 replay hindsight (#32/#35 closed r3), limits, stale quotes; live data outside replay panel = Note
 - [Lab conventions](lab-conventions.md): engine/stats + Phase 8 research layer verified; Phase 9 regime, replay highWater, paper identity, web probe recipe
+- [Universe review 2026-10-26](universe-review-2026-10-26.md) — PIT universe: min-step look-ahead fixed (nominal interval), partial-download gate, relist-jump rule; open: fingerprint, delisting returns

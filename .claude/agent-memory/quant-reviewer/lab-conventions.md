@@ -55,3 +55,17 @@ Phase 9 (verified on 2026-10-26):
 - Phase 9 round 2 (2026-10-26), verified: regimeSourceBars live = raw minus forming last row; replay = raw rows <= the last visible (closed) bar, zero-volume rows included (closes N2); a zero-volume forming bar is excluded too. Lab /lab/regime labels are causal by rows, so useRegime keeping the previous series' points while loading leaks nothing (Chart filters to plotted times). Replay market orders fill at the cursor bar's close (TV-style, not t+1 open); orders are stamped with the bar's open time, so only later bars fill limits. The reset form keeps highWater. Live staleness: stream stale timeout 60 s reconnects silently with status 'live'.
 - Probe recipe (web): throwaway `web/src/state/zzqprobe.test.ts` that drives replay.ts pure functions + replayFeedStep/feedReplayBar/placeReplayOrder like App's effect, logging with appendFileSync to the scratchpad; run `npx vitest run <file>` from web/; delete it afterwards.
 - Phase 9 round 3 (2026-10-26), verified: timeframeProvider never emits a bucket that is not `complete && seeding===null`; mid-bucket entry and post-drop buckets are REST-seeded first, failed ended buckets go to onRepair (never emitted closed); REST aggregation drops the partial oldest bucket unless history starts there, parallel pages spaced BASE_PAGE*base never leave holes. regimeSourceBars' `raw` fallback (whole raw incl. forming row, formingLast false) is unreachable from replay because replay always drops load.bars' last row. Ribbon points filtered to appliedRef times.
+
+
+## Universe / data layer (added 2026-10-26)
+
+
+- Run fingerprint = sha256 over a *selective* `lab_values(cfg)` in lab/lab/research/runs.py, not the raw lab.toml text; adding a new lab.toml section does not invalidate frozen runs unless added there.
+- Lab lock covers lab/lab/engine, registry, stats and config/success_criteria* only; lab/config/lab.toml and lab/lab/data are NOT locked.
+- Candle convention (lab/lab/types.py validate_candles): UTC index, missing bars are absent rows (never NaN/ffill), zero-volume bars kept with tradable=False.
+- Perturbation helper: tests/synthetic.py perturb_after(frame, pos).
+- Archive download (lab/lab/data/archive.py): 404 month -> skipped; missing .CHECKSUM or sha mismatch -> ValueError aborts the remaining months of that symbol (earlier months stay on disk).
+- Offline test run: `cd lab && .venv/bin/python -m pytest -q` (~35 s, 1146 tests as of 2026-10-26).
+
+**Why:** saves re-deriving these on each review.
+**How to apply:** verify quickly (grep) before relying on any item; code may have moved.
