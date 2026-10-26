@@ -725,13 +725,13 @@ found" report, with every trial in the ledger.
 - [ ] **Bar replay**: step or play history forward bar by bar (also a manual look-ahead check for indicators)
 - [ ] **Manual paper trading** panel: pretend balance, market/limit orders, positions, P&L, on live or replayed prices
 - [ ] Seconds and custom timeframes (aggregate from trades/1m data)
-- [ ] Seasonals view (monthly/weekday return tables per symbol)
+- [x] Seasonals view (monthly/weekday return tables per symbol)
 - [ ] Regime ribbon overlay from hedgeFund's engine (filtered, never back-dated)
-- [ ] Keyboard shortcuts (timeframe keys, Esc to cancel drawing, Delete to remove)
-- [ ] Light/dark theme toggle
-- [ ] Settings page (default provider, colors, timezone)
-- [ ] Screenshot/export chart as PNG (`chart.takeScreenshot()`)
-- [ ] Add a second provider (Coinbase) to prove the provider abstraction
+- [x] Keyboard shortcuts (timeframe keys, Esc to cancel drawing, Delete to remove)
+- [x] Light/dark theme toggle
+- [x] Settings page (default provider, colors, timezone)
+- [x] Screenshot/export chart as PNG (`chart.takeScreenshot()`)
+- [x] Add a second provider (Coinbase) to prove the provider abstraction
 - [ ] Wrap in **Tauri** (`npm create tauri-app`) with the server as a sidecar
 - [ ] App icon + menu bar; launch at login (optional)
 
