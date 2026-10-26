@@ -75,15 +75,27 @@ class RunBudget:
 
 
 @dataclass(frozen=True)
+class PortfolioCriteria:
+    """Optional ``[portfolio]`` table: extra bars for multi-coin portfolio plans (PLAN.md
+    Phase 10). Without it a portfolio plan's portfolio rows are "missing" (fail closed)."""
+
+    beat_equal_weight: bool  # net Sharpe above the equal-weight universe on the same schedule
+    alpha_p_max: float  # HAC p-value of the net alpha to BTC must be at or below this
+    alpha_min_annual: float  # and the annualised net alpha to BTC above this
+
+
+@dataclass(frozen=True)
 class ResearchConfig:
     criteria: SuccessCriteria
     budget: RunBudget
     sha256: str  # of the file bytes; stored with the run so later edits are visible
+    portfolio: PortfolioCriteria | None = None  # the optional [portfolio] table
 
     def to_json(self) -> str:
-        return json.dumps(
-            {"criteria": asdict(self.criteria), "budget": asdict(self.budget)}, sort_keys=True
-        )
+        data: dict[str, Any] = {"criteria": asdict(self.criteria), "budget": asdict(self.budget)}
+        if self.portfolio is not None:
+            data["portfolio"] = asdict(self.portfolio)
+        return json.dumps(data, sort_keys=True)
 
 
 def _section(raw: dict[str, Any], name: str, cls: type) -> Any:
@@ -127,10 +139,18 @@ def load_research_config(path: Path | str = SUCCESS_CRITERIA_PATH) -> ResearchCo
         raw = tomllib.loads(data.decode())
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise ResearchConfigError(f"{p} is not valid TOML: {exc}") from exc
+    portfolio: PortfolioCriteria | None = None
+    if "portfolio" in raw:
+        portfolio = _section(raw, "portfolio", PortfolioCriteria)
+        if portfolio.alpha_p_max > 1.0:
+            raise ResearchConfigError(
+                f"[portfolio] alpha_p_max = {portfolio.alpha_p_max!r} is not a p-value in [0, 1]"
+            )
     return ResearchConfig(
         criteria=_section(raw, "criteria", SuccessCriteria),
         budget=_section(raw, "budget", RunBudget),
         sha256=hashlib.sha256(data).hexdigest(),
+        portfolio=portfolio,
     )
 
 

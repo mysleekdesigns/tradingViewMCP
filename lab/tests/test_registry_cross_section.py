@@ -14,12 +14,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from lab.data.universe import eligibility_mask
+from lab.data.universe import eligibility_mask, trailing_dollar_volume
 from lab.registry import REGISTRY
 from lab.registry.cross_section import (
     close_panel,
+    cross_sectional_dispersion,
     cross_sectional_percentile,
     cross_sectional_rank,
+    liquidity_share,
     log_returns,
     rebalance_rows,
     top_quantile_weights,
@@ -574,3 +576,468 @@ def test_functions_are_deterministic_and_do_not_mutate_inputs() -> None:
 def test_panel_functions_are_not_in_the_single_symbol_registry() -> None:
     names = {"close_panel", "trailing_return", "cross_sectional_rank", "top_quantile_weights"}
     assert names.isdisjoint(REGISTRY)
+
+
+# --------------------------------------------------------------------------- dispersion
+
+
+def test_dispersion_is_sample_std_over_eligible_finite_cells() -> None:
+    v = panel(
+        {
+            "A": [1.0, 2.0, 7.0, 1.0, NAN],
+            "B": [3.0, 9.0, NAN, 2.0, 5.0],
+            "C": [5.0, 4.0, 8.0, NAN, NAN],
+        }
+    )
+    mask = full_mask(v)
+    mask.loc[DAYS[1], "B"] = False  # row 1: {2, 4}
+    d = cross_sectional_dispersion(v, mask)
+    assert d.name == "dispersion"
+    assert d.dtype == np.float64
+    assert d.index.equals(v.index)
+    # row 0: mean 3, squared deviations 4 + 0 + 4, / (3 - 1) = 4 -> 2.
+    # row 1: mean 3, (1 + 1) / 1 = 2 -> sqrt(2). row 2: {7, 8} -> sqrt(0.5).
+    # row 3: {1, 2} -> sqrt(0.5). row 4: one finite cell -> NaN.
+    expected = [2.0, math.sqrt(2.0), math.sqrt(0.5), math.sqrt(0.5), NAN]
+    assert np.array_equal(d.to_numpy(), np.asarray(expected), equal_nan=True)
+
+
+def test_dispersion_min_names_and_empty_rows() -> None:
+    v = panel({"A": [1.0, 2.0], "B": [3.0, 4.0], "C": [5.0, NAN]})
+    d = cross_sectional_dispersion(v, full_mask(v), min_names=3)
+    assert np.array_equal(d.to_numpy(), [2.0, NAN], equal_nan=True)
+    none = pd.DataFrame(False, index=v.index, columns=v.columns)
+    assert cross_sectional_dispersion(v, none).isna().all()
+
+
+def test_dispersion_matches_numpy_std_and_ignores_column_order() -> None:
+    rng = np.random.default_rng(7)
+    idx = pd.date_range("2024-01-01", periods=40, freq="D", tz="UTC", name="time")
+    v = pd.DataFrame(
+        rng.normal(0.0, 0.2, (40, 12)), index=idx, columns=[f"S{j}" for j in range(12)]
+    )
+    mask = pd.DataFrame(rng.random((40, 12)) > 0.3, index=idx, columns=v.columns)
+    d = cross_sectional_dispersion(v, mask).to_numpy()
+    for i in range(40):
+        x = v.to_numpy()[i][mask.to_numpy()[i]]
+        ref = np.std(x, ddof=1) if x.size >= 2 else NAN
+        assert np.allclose(d[i], ref, rtol=1e-12, equal_nan=True)
+    cols = list(reversed(v.columns))
+    flipped = cross_sectional_dispersion(v[cols], mask[cols]).to_numpy()
+    assert np.array_equal(d, flipped, equal_nan=True)
+
+
+def test_dispersion_rejects_bad_input() -> None:
+    v = panel({"A": [1.0, 2.0], "B": [3.0, 4.0]})
+    mask = full_mask(v)
+    for bad in (1, 0, 2.0, True):
+        with pytest.raises(ValueError, match="min_names"):
+            cross_sectional_dispersion(v, mask, min_names=bad)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="mask columns"):
+        cross_sectional_dispersion(v, mask[["B", "A"]])
+    with pytest.raises(ValueError, match="mask index"):
+        cross_sectional_dispersion(v, mask.iloc[:1])
+    with pytest.raises(ValueError, match="bool frame"):
+        cross_sectional_dispersion(v, mask.astype(float))
+
+
+# --------------------------------------------------------------------------- liquidity share
+
+
+def test_liquidity_share_is_share_of_eligible_positive_dollar_volume() -> None:
+    dv = panel(
+        {
+            "A": [10.0, 10.0, 0.0, NAN],
+            "B": [30.0, 30.0, 25.0, -5.0],
+            "C": [60.0, 60.0, 75.0, NAN],
+            "D": [NAN, 5.0, NAN, NAN],
+        }
+    )
+    mask = full_mask(dv)
+    mask.loc[DAYS[1], "B"] = False
+    share = liquidity_share(dv, mask)
+    assert_same(
+        share,
+        [
+            [10.0 / 100.0, 30.0 / 100.0, 60.0 / 100.0, NAN],
+            [10.0 / 75.0, NAN, 60.0 / 75.0, 5.0 / 75.0],  # B masked out of the total
+            [NAN, 25.0 / 100.0, 75.0 / 100.0, NAN],  # zero volume is not a share
+            [NAN, NAN, NAN, NAN],  # negative / missing: nothing eligible
+        ],
+    )
+    sums = share.sum(axis=1, min_count=1).to_numpy()
+    assert np.allclose(sums[:3], 1.0, rtol=0, atol=1e-15)
+
+
+def test_liquidity_share_rejects_bad_input() -> None:
+    dv = panel({"A": [1.0, 2.0], "B": [3.0, 4.0]})
+    mask = full_mask(dv)
+    with pytest.raises(ValueError, match="mask columns"):
+        liquidity_share(dv, mask[["B", "A"]])
+    with pytest.raises(ValueError, match="mask index"):
+        liquidity_share(dv, mask.iloc[1:])
+    with pytest.raises(ValueError, match="bool frame"):
+        liquidity_share(dv, mask.astype(int))
+    with pytest.raises(ValueError, match="numbers only"):
+        liquidity_share(dv.astype(object).assign(A=["x", "y"]), mask)
+
+
+# --------------------------------------------------------------------------- banding
+
+
+def banding_scores() -> pd.DataFrame:
+    """Rows 0-2 and 4 are rebalances; row 3 is not (state must carry across it)."""
+    return panel(
+        {
+            "A": [5.0, 4.0, 2.0, 9.0, 3.0],
+            "B": [4.0, 3.0, 1.0, 9.0, 4.0],
+            "C": [3.0, 5.0, 4.0, 9.0, 2.0],
+            "D": [2.0, 2.0, 5.0, 9.0, 1.0],
+            "E": [1.0, 1.0, 3.0, 9.0, 5.0],
+        }
+    )
+
+
+def banding_schedule(s: pd.DataFrame) -> pd.Series:
+    return pd.Series([True, True, True, False, True], index=s.index, dtype=bool)
+
+
+def test_banding_hand_computed() -> None:
+    """quantile 0.4 of 5 -> enter at rank <= 2; exit_quantile 0.8 -> leave below rank 4.
+
+    row 0: A5 B4 C3 D2 E1 -> top 2 {A, B}.
+    row 1: C5 A4 B3 D2 E1 -> top 2 {C, A}; B (rank 3) held and inside the exit band stays;
+           D (rank 4) is inside the exit band but was not held, so it does not enter. 3 > n.
+    row 2: D5 C4 E3 A2 B1 -> top 2 {D, C}; A (rank 4) stays; B (rank 5) leaves; E (rank 3)
+           not held, does not enter.
+    row 3: not a rebalance (NaN), state {D, C, A} carries over.
+    row 4: E5 B4 A3 C2 D1 -> top 2 {E, B}; A (rank 3) and C (rank 4) stay; D (rank 5) leaves.
+    """
+    s = banding_scores()
+    w = top_quantile_weights(s, full_mask(s), banding_schedule(s), quantile=0.4, exit_quantile=0.8)
+    third, quarter = 1.0 / 3.0, 1.0 / 4.0
+    assert_same(
+        w,
+        [
+            [0.5, 0.5, 0.0, 0.0, 0.0],
+            [third, third, third, 0.0, 0.0],
+            [third, 0.0, third, third, 0.0],
+            [NAN] * 5,
+            [quarter, quarter, quarter, 0.0, quarter],
+        ],
+    )
+    plain = top_quantile_weights(s, full_mask(s), banding_schedule(s), quantile=0.4)
+    assert_same(
+        plain,
+        [
+            [0.5, 0.5, 0.0, 0.0, 0.0],
+            [0.5, 0.0, 0.5, 0.0, 0.0],
+            [0.0, 0.0, 0.5, 0.5, 0.0],
+            [NAN] * 5,
+            [0.0, 0.5, 0.0, 0.0, 0.5],
+        ],
+    )
+
+
+def test_banding_held_name_that_becomes_ineligible_leaves() -> None:
+    s = banding_scores()
+    mask = full_mask(s)
+    mask.loc[DAYS[1], "B"] = False  # B would have stayed at rank 3
+    w = top_quantile_weights(s, mask, banding_schedule(s), quantile=0.4, exit_quantile=0.8)
+    # row 1 eligible: C5 A4 D2 E1 (k = 4) -> n = ceil(1.6) = 2, e = ceil(3.2) = 4: {C, A}.
+    assert_same(w.iloc[[1]], [[0.5, 0.0, 0.5, 0.0, 0.0]])
+
+
+def test_banding_state_resets_when_too_few_are_eligible() -> None:
+    s = banding_scores()
+    mask = full_mask(s)
+    mask.loc[DAYS[1]] = [True, False, False, False, False]  # k = 1 < min_names = 2: cash
+    w = top_quantile_weights(
+        s, mask, banding_schedule(s), quantile=0.4, exit_quantile=0.8, min_names=2
+    )
+    assert_same(w.iloc[[1]], [[0.0] * 5])
+    # row 2 starts from nothing held: just the top 2 {D, C}, A (rank 4) is not kept.
+    assert_same(w.iloc[[2]], [[0.0, 0.0, 0.5, 0.5, 0.0]])
+
+
+def test_banding_equal_to_quantile_is_exactly_the_plain_rule() -> None:
+    rng = np.random.default_rng(11)
+    idx = pd.date_range("2024-01-01", periods=60, freq="D", tz="UTC", name="time")
+    cols = [f"S{j}" for j in range(9)]
+    s = pd.DataFrame(rng.normal(size=(60, 9)), index=idx, columns=cols)
+    mask = pd.DataFrame(rng.random((60, 9)) > 0.2, index=idx, columns=cols)
+    vol = pd.DataFrame(rng.uniform(0.01, 0.05, (60, 9)), index=idx, columns=cols)
+    sched = rebalance_rows(idx, every=3, offset=1)
+    for q in (0.2, 1.0 / 3.0, 0.5, 1.0):
+        plain = top_quantile_weights(s, mask, sched, quantile=q, inverse_vol=vol, min_names=2)
+        same = top_quantile_weights(
+            s, mask, sched, quantile=q, inverse_vol=vol, min_names=2, exit_quantile=q
+        )
+        assert np.array_equal(plain.to_numpy(), same.to_numpy(), equal_nan=True), q
+        wide = top_quantile_weights(s, mask, sched, quantile=q, exit_quantile=1.0, min_names=2)
+        assert ((wide.fillna(0) > 0).sum(axis=1) >= (plain.fillna(0) > 0).sum(axis=1)).all()
+
+
+def test_banding_with_inverse_vol_weights_over_all_picks() -> None:
+    s = banding_scores()
+    vol = panel({c: [0.1, 0.2, 0.4, 0.1, 0.1] for c in "ABCDE"})
+    vol["B"] = [0.1, 0.2, 0.4, 0.1, 0.1]
+    vol["A"] = [0.1, 0.4, 0.4, 0.1, 0.1]
+    w = top_quantile_weights(
+        s, full_mask(s), banding_schedule(s), quantile=0.4, exit_quantile=0.8, inverse_vol=vol
+    )
+    # row 1 picks {C, A, B} in rank order with vols 0.2, 0.4, 0.2.
+    inv = np.array([1 / 0.2, 1 / 0.4, 1 / 0.2])
+    ref = inv / inv.sum()
+    assert_same(w.iloc[[1]], [[ref[1], ref[2], ref[0], 0.0, 0.0]])
+
+
+# --------------------------------------------------------------------------- liquidity cap
+
+
+def test_liquidity_cap_limits_each_weight_and_leaves_excess_in_cash() -> None:
+    s = panel({"A": [4.0], "B": [3.0], "C": [2.0], "D": [1.0]})
+    share = panel({"A": [0.5], "B": [0.3], "C": [0.15], "D": [0.05]})
+    mask, sched = full_mask(s), always(s)
+    one = top_quantile_weights(
+        s, mask, sched, quantile=1.0, liquidity_share=share, liquidity_cap_mult=1.0
+    )
+    assert_same(one, [[0.25, 0.25, 0.15, 0.05]])
+    two = top_quantile_weights(
+        s, mask, sched, quantile=1.0, liquidity_share=share, liquidity_cap_mult=2.0
+    )
+    assert_same(two, [[0.25, 0.25, 0.25, 2.0 * 0.05]])
+    capped = top_quantile_weights(
+        s, mask, sched, quantile=1.0, max_weight=0.2, liquidity_share=share, liquidity_cap_mult=2.0
+    )
+    assert_same(capped, [[0.2, 0.2, 0.2, 2.0 * 0.05]])
+
+
+def test_liquidity_cap_drops_unsizable_symbol_before_ranking() -> None:
+    s = panel({"A": [4.0], "B": [3.0], "C": [2.0], "D": [1.0]})
+    share = panel({"A": [NAN], "B": [0.5], "C": [0.0], "D": [0.5]})
+    w = top_quantile_weights(
+        s, full_mask(s), always(s), quantile=0.5, liquidity_share=share, liquidity_cap_mult=5.0
+    )
+    # A (NaN share) and C (zero share) are not eligible: k = 2 -> n = 1 -> B.
+    assert_same(w, [[0.0, 1.0, 0.0, 0.0]])
+
+
+def test_liquidity_cap_off_by_default_matches_huge_multiple() -> None:
+    s = scores5()
+    share = liquidity_share(panel({c: [1.0, 2.0] for c in s.columns}), full_mask(s))
+    plain = top_quantile_weights(s, full_mask(s), always(s), quantile=0.4)
+    loose = top_quantile_weights(
+        s, full_mask(s), always(s), quantile=0.4, liquidity_share=share, liquidity_cap_mult=1e6
+    )
+    assert np.array_equal(plain.to_numpy(), loose.to_numpy(), equal_nan=True)
+
+
+# --------------------------------------------------------------------------- gate
+
+
+def test_gate_off_rows_go_to_cash_and_reset_banding() -> None:
+    s = banding_scores()
+    gate = pd.Series([True, False, True, False, True], index=s.index, dtype=bool)
+    third = 1.0 / 3.0
+    w = top_quantile_weights(
+        s, full_mask(s), banding_schedule(s), quantile=0.4, exit_quantile=0.8, gate=gate
+    )
+    assert_same(
+        w,
+        [
+            [0.5, 0.5, 0.0, 0.0, 0.0],
+            [0.0] * 5,  # gated off: all cash
+            [0.0, 0.0, 0.5, 0.5, 0.0],  # nothing held, so A (rank 4) is not kept
+            [NAN] * 5,  # gate ignored on a non-schedule row
+            [0.0, third, third, 0.0, third],  # held {D, C}: C (rank 4) stays, D (5) leaves
+        ],
+    )
+    all_on = pd.Series(True, index=s.index, dtype=bool)
+    ungated = top_quantile_weights(s, full_mask(s), banding_schedule(s), quantile=0.4)
+    on = top_quantile_weights(s, full_mask(s), banding_schedule(s), quantile=0.4, gate=all_on)
+    assert np.array_equal(ungated.to_numpy(), on.to_numpy(), equal_nan=True)
+
+
+def test_dispersion_gate_from_feature() -> None:
+    s = panel({"A": [0.1, 0.5, 0.2], "B": [0.0, -0.5, 0.2], "C": [NAN, NAN, NAN]})
+    mask = full_mask(s)
+    disp = cross_sectional_dispersion(s, mask)
+    gate = disp >= 0.05  # 0.0707, 0.707, 0.0 (row 2); NaN would compare False too
+    w = top_quantile_weights(s, mask, always(s), quantile=0.5, gate=gate)
+    assert_same(w, [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+
+
+# --------------------------------------------------------------------------- validation
+
+
+def test_safeguard_kwargs_reject_bad_arguments() -> None:
+    s = scores5()
+    mask, sched = full_mask(s), always(s)
+    share = liquidity_share(panel({c: [1.0, 2.0] for c in s.columns}), mask)
+    good_gate = pd.Series(True, index=s.index, dtype=bool)
+    cases: list[tuple[dict[str, object], str]] = [
+        ({"exit_quantile": 0.1}, "exit_quantile must be >= quantile"),
+        ({"exit_quantile": 1.5}, "exit_quantile"),
+        ({"exit_quantile": 0.0}, "exit_quantile"),
+        ({"exit_quantile": NAN}, "exit_quantile"),
+        ({"exit_quantile": True}, "exit_quantile"),
+        ({"liquidity_cap_mult": 2.0}, "given together"),
+        ({"liquidity_share": share}, "given together"),
+        ({"liquidity_share": share, "liquidity_cap_mult": 0.0}, "liquidity_cap_mult"),
+        ({"liquidity_share": share, "liquidity_cap_mult": -1.0}, "liquidity_cap_mult"),
+        ({"liquidity_share": share, "liquidity_cap_mult": math.inf}, "liquidity_cap_mult"),
+        ({"liquidity_share": share, "liquidity_cap_mult": True}, "liquidity_cap_mult"),
+        (
+            {"liquidity_share": share[list("EDCBA")], "liquidity_cap_mult": 1.0},
+            "liquidity_share columns",
+        ),
+        ({"liquidity_share": share.iloc[:1], "liquidity_cap_mult": 1.0}, "liquidity_share index"),
+        ({"gate": good_gate.astype(float)}, "gate must be a bool Series"),
+        (
+            {"gate": pd.Series([True, np.nan], index=s.index, dtype=object)},
+            "gate must be a bool Series",
+        ),
+        ({"gate": good_gate.to_numpy()}, "gate must be a bool Series"),
+        ({"gate": good_gate.iloc[:1]}, "gate index"),
+    ]
+    for kwargs, match in cases:
+        with pytest.raises(ValueError, match=match):
+            top_quantile_weights(s, mask, sched, quantile=0.4, **kwargs)  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- safeguard look-ahead
+
+SAFE_DAYS = 220
+SAFE_CUTS = [40, 75, 101, 102, 103, 150, SAFE_DAYS - 2]
+
+
+def safeguard_universe() -> dict[str, pd.DataFrame]:
+    """Eight daily coins (no ``EEE``: :func:`shock_after` lists that one) with holes, late
+    listings and an early delisting, so banding sees names come and go over ~30 rebalances."""
+    data: dict[str, pd.DataFrame] = {}
+    names = ["AAA", "BBB", "CCC", "DDD", "FFF", "GGG", "HHH", "III"]
+    for j, sym in enumerate(names):
+        start = pd.Timestamp("2024-01-01") + pd.Timedelta(days=[0, 5, 0, 30, 0, 12, 60, 0][j])
+        n = SAFE_DAYS - (start - pd.Timestamp("2024-01-01")).days
+        frame = make_candles(
+            n, seed=SEED + 20 + j, interval="1d", start=str(start.date()), vol=0.03 + 0.01 * (j % 4)
+        )
+        data[sym] = frame
+    data["CCC"] = data["CCC"].drop(data["CCC"].index[[30, 31, 32, 70, 140]])
+    data["III"] = data["III"].iloc[:130]  # delisted
+    return data
+
+
+def safeguard_pipeline(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    closes = close_panel(data)
+    mask = eligibility_mask(data, min_history_days=10)[closes.columns]
+    ret = trailing_return(closes, 28)
+    vol = trailing_volatility(closes, 14)
+    dv = trailing_dollar_volume(data, window_days=14)[closes.columns]
+    share = liquidity_share(dv, mask)
+    disp = cross_sectional_dispersion(ret, mask)
+    gate = disp >= 0.12
+    sched = rebalance_rows(closes.index, every=7, offset=3)
+    band = {"quantile": 0.25, "exit_quantile": 0.6, "schedule": sched}
+    return {
+        "dispersion": disp.to_frame(),
+        "gate": gate.to_frame(),
+        "liquidity_share": share,
+        "weights_band": top_quantile_weights(ret, mask, **band),  # type: ignore[arg-type]
+        "weights_band_invvol": top_quantile_weights(
+            ret,
+            mask,
+            inverse_vol=vol,
+            max_weight=0.6,
+            **band,  # type: ignore[arg-type]
+        ),
+        "weights_band_liq_gate": top_quantile_weights(
+            ret,
+            mask,
+            liquidity_share=share,
+            liquidity_cap_mult=2.0,
+            gate=gate,
+            **band,  # type: ignore[arg-type]
+        ),
+        "schedule": sched.to_frame(),
+    }
+
+
+def test_safeguard_pipeline_exercises_every_safeguard() -> None:
+    out = safeguard_pipeline(safeguard_universe())
+    sched = out["schedule"]["rebalance"].to_numpy()
+    gate = out["gate"]["dispersion"].to_numpy()
+    assert sched.sum() >= 30
+    assert gate[sched].any() and not gate[sched].all(), "gate must switch on and off"
+    plain = top_quantile_weights(
+        *_ret_mask(safeguard_universe()), out["schedule"]["rebalance"], quantile=0.25
+    )
+    banded = out["weights_band"]
+    counts_band = (banded.fillna(0) > 0).sum(axis=1).to_numpy()[sched]
+    counts_plain = (plain.fillna(0) > 0).sum(axis=1).to_numpy()[sched]
+    assert (counts_band > counts_plain).any(), "banding must hold a name outside the entry band"
+    liq = out["weights_band_liq_gate"].to_numpy()[sched]
+    assert np.isclose(liq.sum(axis=1), 0.0).sum() >= 1  # gated-off rows are cash
+    share = out["liquidity_share"].to_numpy()[sched]
+    held = liq > 0
+    assert np.all(liq[held] <= 2.0 * share[held])
+    assert (liq.sum(axis=1) < 1.0 - 1e-9).any(), "the liquidity cap must bind somewhere"
+
+
+def _ret_mask(data: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    closes = close_panel(data)
+    mask = eligibility_mask(data, min_history_days=10)[closes.columns]
+    return trailing_return(closes, 28), mask
+
+
+@pytest.mark.parametrize("t", SAFE_CUTS)
+def test_safeguard_outputs_through_t_are_bit_identical_after_perturbing_the_future(t: int) -> None:
+    data = safeguard_universe()
+    base = safeguard_pipeline(data)
+    cut = base["dispersion"].index[t]
+    shocked = safeguard_pipeline(shock_after(data, cut))
+    for name, frame in base.items():
+        after = shocked[name]
+        assert after.index[: t + 1].equals(frame.index[: t + 1]), name
+        cols = list(frame.columns)
+        before = frame.iloc[: t + 1].to_numpy()
+        got = after.loc[after.index[: t + 1], cols].to_numpy()
+        assert np.array_equal(before, got, equal_nan=True), (
+            f"{name} changed at or before t={t} after perturbing the future"
+        )
+        if "EEE" in after.columns:  # the late listing is invisible through t
+            new = after["EEE"].to_numpy()[: t + 1]
+            if name.startswith("weights"):
+                sched = base["schedule"]["rebalance"].to_numpy()[: t + 1]
+                assert np.array_equal(new[sched], np.zeros(sched.sum()))
+                assert np.isnan(new[~sched]).all()
+            else:
+                assert np.isnan(new).all(), name
+
+
+@pytest.mark.parametrize(
+    "name", ["dispersion", "liquidity_share", "weights_band", "weights_band_liq_gate"]
+)
+def test_safeguard_perturbation_actually_changes_later_outputs(name: str) -> None:
+    data = safeguard_universe()
+    base = safeguard_pipeline(data)
+    t = 102
+    cut = base["dispersion"].index[t]
+    shocked = safeguard_pipeline(shock_after(data, cut))
+    cols = list(base[name].columns)
+    later = base[name].index[t + 1 :]
+    a = base[name].loc[later, cols].to_numpy()
+    b = shocked[name].reindex(index=later, columns=cols).to_numpy()
+    assert not np.array_equal(a, b, equal_nan=True), name
+
+
+def test_safeguards_are_deterministic_and_do_not_mutate_inputs() -> None:
+    data = safeguard_universe()
+    snapshot = {s: f.copy() for s, f in data.items()}
+    a = safeguard_pipeline(data)
+    b = safeguard_pipeline({s: f.copy() for s, f in data.items()})
+    for s, f in data.items():
+        pd.testing.assert_frame_equal(f, snapshot[s])
+    for name in a:
+        assert np.array_equal(a[name].to_numpy(), b[name].to_numpy(), equal_nan=True), name

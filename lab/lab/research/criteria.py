@@ -948,12 +948,18 @@ def evaluate_plan(
     loader: CandleLoader | None = None,
 ) -> CriteriaReport:
     """Judge ``plan_hash`` in research run ``run_id`` against the run's frozen criteria (module
-    docstring). ``loader`` rebuilds bar times when the behaviour family compares trials across
-    intervals or windows (default: the lab's parquet loader). Raises ``ValueError`` if the run
-    was never started or its frozen lab.toml fingerprint is missing or differs from ``cfg``."""
+    docstring; a portfolio plan is judged by
+    :func:`lab.research.portfolio_criteria.evaluate_portfolio_plan`, which adds its rows).
+    ``loader`` rebuilds bar times when the behaviour family compares trials across intervals
+    or windows (default: the lab's parquet loader). Raises ``ValueError`` if the run was never
+    started or its frozen lab.toml fingerprint is missing or differs from ``cfg``."""
     c = frozen_criteria(ledger, run_id)
     check_lab_fingerprint(ledger, run_id, cfg)
     bt = _latest(ledger, run_id, plan_hash, "backtest")
+    from lab.research import portfolio_criteria as pc  # lazy: it imports this module
+
+    if pc.is_portfolio_evidence(ledger, run_id, plan_hash, bt):
+        return pc.evaluate_portfolio_plan(ledger, run_id, plan_hash, cfg, c, loader=loader)
     adv = _latest(ledger, run_id, plan_hash, "adversarial")
     cross = _latest(ledger, run_id, plan_hash, "crosscheck")
     family = _family(ledger, run_id, plan_hash, bt, cfg, loader)

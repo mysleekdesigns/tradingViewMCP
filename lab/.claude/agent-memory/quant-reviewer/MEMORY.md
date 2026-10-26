@@ -1,0 +1,1 @@
+- [Canonical memory lives at repo root](../../../../.claude/agent-memory/quant-reviewer/MEMORY.md) — read/update /Users/simonlacey/Documents/GitHub/tradingView/.claude/agent-memory/quant-reviewer/ (recurring-issues, lab-conventions); this lab/ copy is only a pointer

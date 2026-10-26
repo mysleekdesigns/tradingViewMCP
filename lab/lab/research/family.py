@@ -79,8 +79,17 @@ from lab.config import LabConfig
 from lab.engine.splits import design_view, slice_window
 from lab.ledger import Ledger
 from lab.plan import parse_plan, tunable_params
+from lab.plan import portfolio as pf
 from lab.plan.validator import PlanValidationError
-from lab.research.logic import feature_multiset, literal_vector, logic_hash, param_match_tokens
+from lab.research.logic import (
+    any_logic_hash,
+    as_portfolio_plan,
+    feature_multiset,
+    literal_vector,
+    logic_hash,
+    param_match_tokens,
+    portfolio_logic_hash,
+)
 from lab.types import Plan, Window, interval_seconds
 
 __all__ = [
@@ -94,8 +103,10 @@ __all__ = [
     "family_evidence",
     "family_holdout_conflict",
     "plan_logic",
+    "portfolio_param_token",
     "tried_literals",
     "tried_ranges",
+    "tried_ranges_portfolio",
     "wf_lineage_check",
     "wf_lineage_problems",
 ]
@@ -147,9 +158,17 @@ class FamilyInfo:
 # --------------------------------------------------------------------------- cached parsing
 
 
+def portfolio_param_token(key: str) -> str:
+    """Match token of a portfolio tunable path (``selection.quantile``): the path itself, so a
+    value tried by one portfolio plan constrains the same path of another."""
+    return f"p:{key}"
+
+
 @lru_cache(maxsize=65_536)
 def _logic_of_text(plan_json: str) -> str | None:
     try:
+        if pf.is_portfolio_plan(plan_json):
+            return portfolio_logic_hash(plan_json)
         return logic_hash(plan_json)
     except (PlanValidationError, ValueError, TypeError):
         return None
@@ -166,6 +185,8 @@ def plan_logic(plan: str | Mapping[str, Any] | None) -> str | None:
 @lru_cache(maxsize=65_536)
 def _multiset_of_text(plan_json: str) -> tuple[str, ...] | None:
     try:
+        if pf.is_portfolio_plan(plan_json):
+            return (f"portfolio:{as_portfolio_plan(plan_json).score_feature}",)
         return feature_multiset(plan_json)
     except (PlanValidationError, ValueError, TypeError):
         return None
@@ -174,6 +195,9 @@ def _multiset_of_text(plan_json: str) -> tuple[str, ...] | None:
 @lru_cache(maxsize=65_536)
 def _literals_of_text(plan_json: str) -> tuple[float, ...] | None:
     try:
+        if pf.is_portfolio_plan(plan_json):
+            as_portfolio_plan(plan_json)
+            return ()  # every number of a portfolio plan is a tunable, none is a rule literal
         return literal_vector(plan_json)
     except (PlanValidationError, ValueError, TypeError):
         return None
@@ -183,6 +207,11 @@ def _literals_of_text(plan_json: str) -> tuple[float, ...] | None:
 def _plan_values(plan_json: str) -> tuple[tuple[frozenset[str], float], ...]:
     """``(match tokens, value)`` for every tunable of the plan in ``plan_json``."""
     try:
+        if pf.is_portfolio_plan(plan_json):
+            values = pf.tunable_values(as_portfolio_plan(plan_json))
+            return tuple(
+                (frozenset({portfolio_param_token(k)}), float(v)) for k, v in values.items()
+            )
         p = parse_plan(plan_json)
         return tuple(
             (param_match_tokens(p, key), float(spec.default))
@@ -195,14 +224,18 @@ def _plan_values(plan_json: str) -> tuple[tuple[frozenset[str], float], ...]:
 @lru_cache(maxsize=65_536)
 def _key_tokens(plan_json: str, key: str) -> frozenset[str]:
     try:
+        if pf.is_portfolio_plan(plan_json):
+            return frozenset({portfolio_param_token(key)})
         return param_match_tokens(parse_plan(plan_json), key)
     except (PlanValidationError, ValueError, TypeError):
         return frozenset()
 
 
-def _text(plan: Plan | Mapping[str, Any] | str) -> str:
+def _text(plan: Plan | pf.PortfolioPlan | Mapping[str, Any] | str) -> str:
     if isinstance(plan, str):
         return plan
+    if isinstance(plan, pf.PortfolioPlan):
+        return json.dumps(pf.plan_to_dict(plan), sort_keys=True)
     if isinstance(plan, Plan):
         from lab.plan import plan_to_dict
 
@@ -339,7 +372,7 @@ def behaviour_family(
     symbol: str,
     plan_hash: str,
     cfg: LabConfig,
-    plan: Plan | Mapping[str, Any] | str | None = None,
+    plan: Plan | pf.PortfolioPlan | Mapping[str, Any] | str | None = None,
     loader: Loader | None = None,
 ) -> FamilyInfo:
     """The behaviour family of the plan ``plan_hash`` on ``symbol`` (module docstring).
@@ -354,7 +387,7 @@ def behaviour_family(
     plans = ledger.research_plans(symbol=symbol, research_only=False)
     base = ledger.latest_research_base_trial(plan_hash)
     if plan is not None:
-        own = logic_hash(plan)
+        own = any_logic_hash(plan)
     else:
         own = plan_logic(plans.get(plan_hash)) or (
             plan_logic(base.plan_json) if base is not None else None
@@ -400,7 +433,7 @@ def _compute_family(
     symbol: str,
     plan_hash: str,
     cfg: LabConfig,
-    plan: Plan | Mapping[str, Any] | str | None,
+    plan: Plan | pf.PortfolioPlan | Mapping[str, Any] | str | None,
     own: str | None,
     base: Any,
     plans: Mapping[str, str],
@@ -620,6 +653,48 @@ def tried_ranges(
                 for b in bounds:
                     if isinstance(b, int | float) and not isinstance(b, bool):
                         add(tokens, float(b))
+    return {k: (min(v), max(v), len(v)) for k, v in values.items()}
+
+
+def tried_ranges_portfolio(
+    ledger: Ledger, family: FamilyInfo, plan: pf.PortfolioPlan, symbol: str
+) -> dict[str, tuple[float, float, int]]:
+    """:func:`tried_ranges` for a portfolio plan on the ledger pseudo-symbol ``symbol``: every
+    value any trial of a family plan tried for each tunable path of ``plan`` (any run, any
+    window but the holdout), plus the declared bounds of every family Optuna study. Paths match
+    by name (:func:`portfolio_param_token`). Keys never tried are absent."""
+    wanted = {portfolio_param_token(k): k for k in pf.tunable_params(plan)}
+    values: dict[str, list[float]] = {}
+
+    def add(tokens: Iterable[str], value: float) -> None:
+        if not math.isfinite(value):
+            return
+        for token in tokens:
+            if token in wanted:
+                values.setdefault(wanted[token], []).append(value)
+
+    plans = {
+        h: pj
+        for h, pj in ledger.research_plans(symbol=symbol, research_only=False).items()
+        if h in family.plan_hashes or plan_logic(pj) in family.logic_hashes
+    }
+    for pj in plans.values():
+        for tokens, value in _plan_values(pj):
+            add(tokens, value)
+    for pj, space_json in ledger.research_study_spaces(symbol=symbol, research_only=False):
+        if plan_logic(pj) not in family.logic_hashes:
+            continue
+        try:
+            space = json.loads(space_json)
+        except ValueError:
+            continue
+        if not isinstance(space, dict):
+            continue
+        for key, bounds in space.items():
+            if isinstance(bounds, list) and len(bounds) == 2:
+                for b in bounds:
+                    if isinstance(b, int | float) and not isinstance(b, bool):
+                        add(_key_tokens(pj, str(key)), float(b))
     return {k: (min(v), max(v), len(v)) for k, v in values.items()}
 
 

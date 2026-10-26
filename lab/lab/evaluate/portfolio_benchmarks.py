@@ -1,12 +1,15 @@
 """Benchmarks for multi-coin portfolio strategies (PLAN.md Phase 10).
 
-A cross-sectional strategy must beat three things, all through the same engine and costs:
+A cross-sectional strategy must beat three things, all through the same engine and costs
+(including the optional participation ``impact``: pass the strategy's own
+:class:`lab.engine.costs.ImpactModel` so the strategy and its benchmarks pay the same cost model):
 
 1. **Equal-weight universe** (:func:`equal_weight_universe`): every eligible member, equal
    weight, rebalanced on the strategy's schedule. Separates stock-picking from simply owning the
    liquid crypto market.
 2. **Vol-targeted BTC** (:func:`btc_vol_target_returns`): the lab's single-asset benchmark,
    reindexed to the portfolio calendar, so a portfolio result is comparable with every earlier run.
+   It is single-symbol and never pays participation impact (BTC/ETH costs unchanged).
 3. **Random-selection null** (:func:`random_selection_null`): on each of the strategy's decision
    rows the null holds as many members as the strategy, with the same total weight (so the same
    cash share) and the same weighting rule (equal or inverse-vol). It also keeps as many of its
@@ -18,6 +21,39 @@ A cross-sectional strategy must beat three things, all through the same engine a
    credited as selection skill. Only the choice of coins within those constraints differs.
    Mean turnover of both is reported side by side.
 
+**Liquidity cap** (``liquidity_share`` + ``liquidity_cap_mult``, both or neither, the same
+values the strategy's :func:`lab.registry.cross_section.top_quantile_weights` used). A capped
+strategy puts little weight on illiquid coins and so pays little participation impact; a
+benchmark that ignored the cap would hold illiquid coins at full weight, pay far more impact
+and hand a no-skill strategy a fake edge. So both benchmarks replicate the strategy's
+procedure rather than its post-cap totals:
+
+* Equal weight: ``1/k`` over the ``k`` members with a finite liquidity share ``> 0``, each
+  capped at ``mult * share[t, coin]``; the excess stays in cash (not redistributed).
+* Random null, on each strategy decision row ``t`` (call the strategy's names there ``H``):
+
+  1. Draw pool: members with a finite ``share > 0`` (and finite ``inverse_vol > 0`` when
+     weighting by inverse vol), exactly the names the strategy could rank. Breadth (``|H|``
+     names), retention (as many of the null's own previous names kept as the strategy kept)
+     and volatility terciles are matched as without the cap.
+  2. Pre-cap total ``T``: the strategy's weights before capping. Under the weighting rule
+     (``raw = 1`` or ``1/vol``) an uncapped strategy name ``j`` has
+     ``w[t, j] = T * raw_j / sum(raw over H)``, so ``T`` is read off the uncapped names:
+     ``T = min(1, max over uncapped j in H of w[t, j] * sum(raw) / raw_j)``. A name counts
+     as capped when ``w[t, j] >= (1 - 1e-9) * min(max_weight, mult * share[t, j])``. If every
+     name in ``H`` is capped (or none can be sized), ``T = 1``: the rule of
+     ``top_quantile_weights``, whose pre-cap weights always sum to 1.
+  3. The null's picks get ``T * raw / sum(raw)`` and each is capped at
+     ``min(max_weight, mult * share[t, pick])``; the excess stays in cash.
+
+  So the null matches the strategy's dates, breadth, retention, weighting rule, volatility
+  terciles and *pre-cap* total, and its post-cap exposure (how much the caps bite) follows
+  from the liquidity of the names it drew, just as the strategy's does from its own. Exposure
+  is therefore no longer matched row by row: :class:`RandomSelectionNull` reports the mean
+  decision-row exposure of the strategy and of each path side by side (``strategy_exposure``,
+  ``exposure``). Without the cap every rule above is the unchanged original: the null is
+  scaled to the strategy's post-cap row sum and capped at ``max_weight`` only.
+
 Pure: no I/O, no prints, no module state; randomness only through an explicit seed.
 Results are historical and not forward-looking.
 """
@@ -25,11 +61,12 @@ Results are historical and not forward-looking.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 
+from lab.engine.costs import ImpactModel
 from lab.engine.portfolio import PortfolioResult, net_returns_for, run_portfolio
 from lab.evaluate.benchmarks import vol_target_buy_and_hold
 from lab.stats.metrics import metrics_from_returns
@@ -51,18 +88,74 @@ def _check_members(members: pd.DataFrame) -> None:
         raise ValueError("members must be a bool frame (e.g. eligible & top-N liquid)")
 
 
-def equal_weight_weights(members: pd.DataFrame, schedule: pd.Series) -> pd.DataFrame:
+def _check_liquidity(
+    liquidity_share: pd.DataFrame | None,
+    liquidity_cap_mult: float | None,
+    like: pd.DataFrame,
+    like_name: str,
+) -> tuple[np.ndarray | None, float]:
+    """``(share array, mult)``, or ``(None, 0.0)`` when the cap is off. Same rules as
+    ``top_quantile_weights``: both or neither, ``share`` aligned with ``like``, ``mult``
+    finite and > 0."""
+    if (liquidity_share is None) != (liquidity_cap_mult is None):
+        raise ValueError("liquidity_share and liquidity_cap_mult must be given together")
+    if liquidity_share is None:
+        return None, 0.0
+    if not isinstance(liquidity_share, pd.DataFrame):
+        raise ValueError(
+            f"liquidity_share must be a DataFrame, got {type(liquidity_share).__name__}"
+        )
+    if not liquidity_share.index.equals(like.index) or list(liquidity_share.columns) != list(
+        like.columns
+    ):
+        raise ValueError(f"liquidity_share must have the same index and columns as {like_name}")
+    try:
+        share = liquidity_share.to_numpy(dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("liquidity_share must hold numbers only") from exc
+    if isinstance(liquidity_cap_mult, bool) or not isinstance(
+        liquidity_cap_mult, int | float | np.number
+    ):
+        raise ValueError(f"liquidity_cap_mult must be a number > 0, got {liquidity_cap_mult!r}")
+    mult = float(liquidity_cap_mult)
+    if not (np.isfinite(mult) and mult > 0.0):
+        raise ValueError(f"liquidity_cap_mult must be finite and > 0, got {liquidity_cap_mult!r}")
+    return share, mult
+
+
+def _sizable_share(share: np.ndarray) -> np.ndarray:
+    with np.errstate(invalid="ignore"):
+        return np.isfinite(share) & (share > 0)
+
+
+def equal_weight_weights(
+    members: pd.DataFrame,
+    schedule: pd.Series,
+    *,
+    liquidity_share: pd.DataFrame | None = None,
+    liquidity_cap_mult: float | None = None,
+) -> pd.DataFrame:
     """Decision rows (``schedule`` True): 1/k on each of the k members, 0 elsewhere (all 0 if
-    k = 0). Other rows all NaN (hold)."""
+    k = 0). Other rows all NaN (hold).
+
+    With ``liquidity_share`` and ``liquidity_cap_mult`` (both or neither, as in
+    ``top_quantile_weights``): only members with a finite share ``> 0`` count (k is their
+    number), and each weight is capped at ``liquidity_cap_mult * share[t, member]``; the
+    excess stays in cash, not redistributed."""
     _check_members(members)
     if not isinstance(schedule, pd.Series) or not schedule.index.equals(members.index):
         raise ValueError("schedule must be a bool Series on members.index")
     if not pd.api.types.is_bool_dtype(schedule):
         raise ValueError(f"schedule must be bool, got dtype {schedule.dtype}")
+    share, mult = _check_liquidity(liquidity_share, liquidity_cap_mult, members, "members")
     m = members.to_numpy(dtype=bool)
+    if share is not None:
+        m = m & _sizable_share(share)
     k = m.sum(axis=1, keepdims=True)
     with np.errstate(divide="ignore", invalid="ignore"):
         w = np.where(k > 0, m / np.maximum(k, 1), 0.0)
+    if share is not None:
+        w = np.where(m, np.minimum(w, mult * np.where(m, share, 0.0)), 0.0)
     w[~schedule.to_numpy(dtype=bool)] = np.nan
     return pd.DataFrame(w, index=members.index, columns=members.columns)
 
@@ -76,15 +169,26 @@ def equal_weight_universe(
     init_cash: float = 10_000.0,
     min_rebalance: float = 0.0,
     segment_starts: Mapping[str, pd.DatetimeIndex] | None = None,
+    impact: ImpactModel | None = None,
+    liquidity_share: pd.DataFrame | None = None,
+    liquidity_cap_mult: float | None = None,
 ) -> PortfolioResult:
-    """Equal-weight every member on the schedule, through :func:`run_portfolio`."""
+    """Equal-weight every member on the schedule, through :func:`run_portfolio` (same
+    ``costs``, ``impact`` and liquidity cap as the strategy; see
+    :func:`equal_weight_weights`)."""
     return run_portfolio(
         candles_by_symbol,
-        equal_weight_weights(members, schedule),
+        equal_weight_weights(
+            members,
+            schedule,
+            liquidity_share=liquidity_share,
+            liquidity_cap_mult=liquidity_cap_mult,
+        ),
         costs=costs,
         init_cash=init_cash,
         min_rebalance=min_rebalance,
         segment_starts=segment_starts,
+        impact=impact,
     )
 
 
@@ -130,6 +234,10 @@ class RandomSelectionNull:
     turnover: np.ndarray  # annual turnover per path (x equity)
     n_paths: int
     seed: int
+    # Mean over the strategy's decision rows of each path's decision-row weight sum (the
+    # invested share it asked for); with a liquidity cap this differs from the strategy's.
+    exposure: np.ndarray = field(default_factory=lambda: np.empty(0))
+    strategy_exposure: float = float("nan")  # the same mean for the strategy's own weights
 
     def p_value(self, strategy_sharpe: float) -> float:
         """Share of paths whose Sharpe is >= the strategy's, counting the strategy itself
@@ -146,6 +254,31 @@ def _null_weights(
     raw = np.ones(len(picks)) if vol_row is None else 1.0 / vol_row[picks]
     w = raw / raw.sum() * total
     return np.minimum(w, max_weight)
+
+
+_CAPPED_TOL = 1e-9  # a weight within this relative distance of its cap counts as capped
+
+
+def _pre_cap_total(
+    row: np.ndarray, vol_row: np.ndarray | None, limit_row: np.ndarray, held: np.ndarray
+) -> float:
+    """The strategy's pre-cap total ``T`` on one decision row (module docstring, step 2)."""
+    idx = np.flatnonzero(held)
+    raw = np.ones(len(idx)) if vol_row is None else 1.0 / vol_row[idx]
+    w = row[idx]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        implied = w * raw.sum() / raw
+        free = w < limit_row[idx] * (1.0 - _CAPPED_TOL)
+    ok = free & np.isfinite(implied)
+    if not ok.any():
+        return 1.0
+    return min(float(implied[ok].max()), 1.0)
+
+
+def _decision_exposure(weights: np.ndarray, rows: np.ndarray) -> float:
+    if rows.size == 0:
+        return float("nan")
+    return float(np.nan_to_num(weights[rows], nan=0.0).sum(axis=1).mean())
 
 
 _TERCILES = (
@@ -196,6 +329,8 @@ def random_selection_weights(
     inverse_vol: pd.DataFrame | None = None,
     max_weight: float = 1.0,
     vol_panel: pd.DataFrame | None = None,
+    liquidity_share: pd.DataFrame | None = None,
+    liquidity_cap_mult: float | None = None,
 ) -> pd.DataFrame:
     """One null path (see the module docstring). On each strategy decision row with k names,
     of which ``kept`` were also in the strategy's previous decision: keep ``kept`` random names
@@ -205,11 +340,20 @@ def random_selection_weights(
     finite vol > 0 are eligible, as in ``top_quantile_weights``), scaled to the strategy's row
     sum and capped at ``max_weight``. ``vol_panel`` (default: ``inverse_vol``) is a trailing
     volatility panel known at each row; with it, fresh names match the strategy's fresh names'
-    counts per volatility tercile of the eligible pool. NaN rows stay NaN (hold)."""
+    counts per volatility tercile of the eligible pool. With ``liquidity_share`` and
+    ``liquidity_cap_mult`` (both or neither; the strategy's own values), only names with a
+    finite share > 0 are drawn, the pre-cap total is the strategy's, and each pick is capped at
+    ``min(max_weight, mult * share)`` with the excess in cash (module docstring, steps 1-3).
+    NaN rows stay NaN (hold)."""
     if not 0 < max_weight <= 1:
         raise ValueError(f"max_weight must be in (0, 1], got {max_weight!r}")
+    share, mult = _check_liquidity(
+        liquidity_share, liquidity_cap_mult, strategy_weights, "the strategy weights"
+    )
     w = strategy_weights.to_numpy(dtype=float)
     m = members.to_numpy(dtype=bool)
+    if share is not None:
+        m = m & _sizable_share(share)
     sizing = None
     if inverse_vol is not None:
         _check_panel("inverse_vol", inverse_vol, like=strategy_weights)
@@ -253,10 +397,14 @@ def random_selection_weights(
             rest = np.setdiff1d(np.flatnonzero(pool), picks)
             extra = rng.choice(rest, size=min(short, len(rest)), replace=False)
             picks = np.concatenate([picks, extra]).astype(int)
-        total = min(float(row.sum()), 1.0)
-        out[i, picks] = _null_weights(
-            picks, total, None if sizing is None else sizing[i], max_weight
-        )
+        vol_row = None if sizing is None else sizing[i]
+        if share is None:
+            total = min(float(row.sum()), 1.0)
+            out[i, picks] = _null_weights(picks, total, vol_row, max_weight)
+        else:
+            limit = np.minimum(max_weight, mult * share[i])  # NaN where share is NaN
+            total = _pre_cap_total(row, vol_row, limit, held)
+            out[i, picks] = np.minimum(_null_weights(picks, total, vol_row, 1.0), limit[picks])
         prev_null = np.zeros_like(prev_null)
         prev_null[picks] = True
     return pd.DataFrame(out, index=strategy_weights.index, columns=strategy_weights.columns)
@@ -277,10 +425,14 @@ def random_selection_null(
     init_cash: float = 10_000.0,
     min_rebalance: float = 0.0,
     segment_starts: Mapping[str, pd.DatetimeIndex] | None = None,
+    impact: ImpactModel | None = None,
+    liquidity_share: pd.DataFrame | None = None,
+    liquidity_cap_mult: float | None = None,
 ) -> RandomSelectionNull:
-    """Sharpe, total return and annual turnover of ``n_paths`` random-selection portfolios
-    (module docstring). Pass the strategy's own ``members`` mask, weighting inputs, a trailing
-    ``vol_panel`` and engine settings so only the choice of coins differs."""
+    """Sharpe, total return, annual turnover and mean decision exposure of ``n_paths``
+    random-selection portfolios (module docstring). Pass the strategy's own ``members`` mask,
+    weighting inputs, a trailing ``vol_panel``, liquidity cap and engine settings (``costs``
+    and ``impact`` included) so only the choice of coins differs."""
     _check_panel("strategy_weights", strategy_weights)
     _check_members(members)
     _check_panel("members", members, like=strategy_weights)
@@ -297,9 +449,13 @@ def random_selection_null(
             inverse_vol=inverse_vol,
             max_weight=max_weight,
             vol_panel=vol_panel,
+            liquidity_share=liquidity_share,
+            liquidity_cap_mult=liquidity_cap_mult,
         )
         for _ in range(n_paths)
     ]
+    sw = strategy_weights.to_numpy(dtype=float)
+    rows = np.flatnonzero(~np.isnan(sw).all(axis=1))
     runs = net_returns_for(
         candles_by_symbol,
         paths,
@@ -307,6 +463,7 @@ def random_selection_null(
         init_cash=init_cash,
         min_rebalance=min_rebalance,
         segment_starts=segment_starts,
+        impact=impact,
     )
     metrics = [metrics_from_returns(r.returns, interval) for r in runs]
     return RandomSelectionNull(
@@ -315,4 +472,8 @@ def random_selection_null(
         turnover=np.array([annual_turnover(r.turnover, interval) for r in runs], dtype=float),
         n_paths=n_paths,
         seed=seed,
+        exposure=np.array(
+            [_decision_exposure(p.to_numpy(dtype=float), rows) for p in paths], dtype=float
+        ),
+        strategy_exposure=_decision_exposure(sw, rows),
     )

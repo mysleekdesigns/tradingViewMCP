@@ -60,6 +60,7 @@ from lab.ledger import (
     metrics_to_json,
 )
 from lab.plan import parse_plan, plan_hash, plan_to_dict
+from lab.plan.portfolio import is_portfolio_plan
 from lab.report import num
 from lab.research.criteria import PRE_HOLDOUT_EXCLUDED, evaluate_plan, frozen_criteria
 from lab.research.family import behaviour_family, family_holdout_conflict
@@ -158,11 +159,20 @@ def run_holdout_check(
 ) -> dict[str, Any]:
     """Spend one locked-holdout check on ``raw_plan`` (module docstring for the guards).
 
+    A portfolio plan (``"kind": "portfolio"``) goes to
+    :func:`lab.research.portfolio.run_portfolio_holdout_check` (same guards and answer).
+
     Returns ONLY ``{"passed": bool, "checks_used": int, "checks_left": int}``. Raises
     :class:`~lab.plan.validator.PlanValidationError` for an invalid plan,
     :class:`HoldoutRefusedError` when a guard refuses (nothing spent), and
     :class:`DataUnavailableError` when there is no holdout data (nothing spent).
     """
+    if is_portfolio_plan(raw_plan):
+        from lab.research.portfolio import run_portfolio_holdout_check  # lazy: heavy imports
+
+        return run_portfolio_holdout_check(
+            raw_plan, run_id=run_id, cfg=cfg, ledger=ledger, loader=loader or default_loader(cfg)
+        )
     plan = parse_plan(raw_plan)
     h = plan_hash(plan)
     lh = logic_hash(plan)

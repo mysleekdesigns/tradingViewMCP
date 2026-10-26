@@ -70,6 +70,7 @@ min_history_days = 365           # PLAN.md: a coin is eligible only after 1 year
 relist_gap_days = 30             # a hole over a month is a delisting/relisting or ticker reuse (LUNA): restart the clock
 relist_jump = 5.0                # hole + >5x open vs last close = new market: redenominations (BNX, COCOS, QUICK), reuse (LUNA)
 delisted_after_days = 7          # manifest only: no bar in the final week of data = delisted
+liquidity_cap_mult = 10.0        # a coin's weight never exceeds 10x its share of eligible trailing dollar volume (a 1% share caps at 10%)
 exclude_bases = [                # not ordinary coins: stablecoins, fiat, gold, wrapped/staked duplicates, BTC 3x BULL/BEAR tokens
   "USDC", "BUSD", "TUSD", "USDP", "PAX", "DAI", "FDUSD", "UST", "USTC", "USDS", "USDSB", "USDSOLD",
   "SUSD", "USDE", "USD1", "RLUSD", "BFUSD", "XUSD", "PYUSD", "AEUR", "EURI",
@@ -78,3 +79,16 @@ exclude_bases = [                # not ordinary coins: stablecoins, fiat, gold, 
   "WBTC", "WBETH", "BETH",
   "BULL", "BEAR",
 ]
+
+[portfolio]
+# Portfolio (multi-coin) research runs (lab.portfolio_runner). Frozen into the research-run
+# fingerprint under "universe" (lab.research.runs.lab_values), so changing one mid-run is refused.
+impact_coef = 0.7                # square-root law Y (impact = Y * sigma * sqrt(Q / ADV)); the literature puts Y at ~0.5-1
+impact_aum_usd = 1_000_000.0     # book size the participation is sized on: returns are scale-free, so impact needs an explicit notional (fixed, not current equity)
+impact_adv_days = 30             # trailing median daily dollar volume over a month, the same horizon as the universe ranking
+impact_vol_days = 30             # trailing daily volatility over a month for the impact's sigma
+impact_cap = 0.05                # never more than 5% impact per fill: beyond that the square-root law is extrapolating
+min_rebalance = 0.0              # no rebalance band in the engine: the plan's rank banding is the turnover control under test
+alpha_rolling_days = 60          # PLAN.md Phase 10: alpha/beta to BTC full period and rolling 60-day
+null_paths = 500                 # random-selection null paths: a 95th-percentile bar resolves to 1/501
+neighbourhood_max_trials = 37    # base + 9 portfolio tunables (every safeguard on) x 4 non-base steps, so every +/-20% neighbour runs

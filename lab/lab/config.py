@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,6 +73,24 @@ class UniverseConfig:
     relist_jump: float
     delisted_after_days: int
     exclude_bases: tuple[str, ...]
+    # a coin's target weight is capped at this multiple of its share of eligible trailing
+    # dollar volume (portfolio runs; not a universe-build setting)
+    liquidity_cap_mult: float
+
+
+@dataclass(frozen=True)
+class PortfolioConfig:
+    """``[portfolio]``: settings of multi-coin portfolio research runs (lab.portfolio_runner)."""
+
+    impact_coef: float  # square-root impact Y
+    impact_aum_usd: float  # fixed book size the participation is sized on (not current equity)
+    impact_adv_days: int
+    impact_vol_days: int
+    impact_cap: float  # max impact fraction per fill, in [0, 1)
+    min_rebalance: float  # engine rebalance band (absolute weight)
+    alpha_rolling_days: int  # rolling alpha/beta window to BTC
+    null_paths: int  # random-selection null paths
+    neighbourhood_max_trials: int  # base + every +/-pct neighbour of the portfolio tunables
 
 
 @dataclass(frozen=True)
@@ -91,6 +110,7 @@ class LabConfig:
     api_port: int
     research: ResearchGuardConfig
     universe: UniverseConfig
+    portfolio: PortfolioConfig
 
     @property
     def ledger_path(self) -> Path:
@@ -112,7 +132,7 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> LabConfig:
     if not data_dir.is_absolute():
         data_dir = LAB_ROOT / data_dir
     c, s, b, st = raw["costs"], raw["splits"], raw["benchmarks"], raw["stats"]
-    return LabConfig(
+    cfg = LabConfig(
         data_dir=data_dir,
         archive_base_url=raw["data"]["archive_base_url"],
         costs=CostModel(
@@ -170,7 +190,69 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> LabConfig:
             ),
         ),
         universe=_universe(raw["universe"]),
+        portfolio=_portfolio(raw["portfolio"]),
     )
+    _check_sell_price_positive(cfg)
+    return cfg
+
+
+def _check_sell_price_positive(cfg: LabConfig) -> None:
+    """A portfolio sell fills at ``open * (1 - slippage - impact)``: both caps, at the largest
+    cost-stress factor, must stay below 1 or a stressed sell price could go to zero or below."""
+    worst = max((1.0, *cfg.stress_factors))
+    total = (cfg.costs.slippage_cap + cfg.portfolio.impact_cap) * worst
+    if not total < 1.0:
+        raise ValueError(
+            f"costs.slippage_cap ({cfg.costs.slippage_cap:g}) + portfolio.impact_cap "
+            f"({cfg.portfolio.impact_cap:g}) at the largest cost stress x{worst:g} is {total:g}; "
+            "it must stay below 1 so a sell fill price stays positive"
+        )
+
+
+def _portfolio(p: dict) -> PortfolioConfig:
+    return PortfolioConfig(
+        impact_coef=_non_negative(p["impact_coef"], "portfolio.impact_coef"),
+        impact_aum_usd=_positive(p["impact_aum_usd"], "portfolio.impact_aum_usd"),
+        impact_adv_days=_min_int(p["impact_adv_days"], "portfolio.impact_adv_days", 1),
+        impact_vol_days=_min_int(p["impact_vol_days"], "portfolio.impact_vol_days", 2),
+        impact_cap=_fraction_below_one(p["impact_cap"], "portfolio.impact_cap"),
+        min_rebalance=_fraction_below_one(p["min_rebalance"], "portfolio.min_rebalance"),
+        alpha_rolling_days=_min_int(p["alpha_rolling_days"], "portfolio.alpha_rolling_days", 2),
+        null_paths=_min_int(p["null_paths"], "portfolio.null_paths", 1),
+        neighbourhood_max_trials=_min_int(
+            p["neighbourhood_max_trials"], "portfolio.neighbourhood_max_trials", 1
+        ),
+    )
+
+
+def _number(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"{name} must be a number, got {value!r}")
+    v = float(value)
+    if not math.isfinite(v):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    return v
+
+
+def _non_negative(value: object, name: str) -> float:
+    v = _number(value, name)
+    if v < 0:
+        raise ValueError(f"{name} must be >= 0, got {v}")
+    return v
+
+
+def _positive(value: object, name: str) -> float:
+    v = _number(value, name)
+    if v <= 0:
+        raise ValueError(f"{name} must be > 0, got {v}")
+    return v
+
+
+def _fraction_below_one(value: object, name: str) -> float:
+    v = _number(value, name)
+    if not 0.0 <= v < 1.0:
+        raise ValueError(f"{name} must be in [0, 1), got {v}")
+    return v
 
 
 def _universe(u: dict) -> UniverseConfig:
@@ -185,6 +267,7 @@ def _universe(u: dict) -> UniverseConfig:
         relist_jump=_above_one(u["relist_jump"], "universe.relist_jump"),
         delisted_after_days=_min_int(u["delisted_after_days"], "universe.delisted_after_days", 0),
         exclude_bases=tuple(str(b).upper() for b in u["exclude_bases"]),
+        liquidity_cap_mult=_positive(u["liquidity_cap_mult"], "universe.liquidity_cap_mult"),
     )
     if cfg.min_history_days < cfg.volume_window_days:
         raise ValueError(

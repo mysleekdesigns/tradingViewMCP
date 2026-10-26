@@ -13,13 +13,15 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping, Sequence
+from itertools import pairwise
 
 import numpy as np
 import pandas as pd
 import pytest
 from _pytest.python_api import ApproxBase
 
-from lab.engine.portfolio import ORDER_COLUMNS, PortfolioResult, run_portfolio
+from lab.engine.costs import ImpactModel
+from lab.engine.portfolio import ORDER_COLUMNS, PortfolioResult, net_returns_for, run_portfolio
 from lab.types import ZERO_COSTS, CostModel
 from tests.synthetic import make_candles, perturb_after
 
@@ -548,3 +550,216 @@ def test_segment_exits_record_the_reopen_ratio() -> None:
     assert plain.segment_exits.empty and list(plain.segment_exits.columns) == list(
         SEGMENT_EXIT_COLUMNS
     )
+
+
+# --------------------------------------------------------------------------- participation impact
+
+# coef 0.1, a 100k book, 1-day ADV (the previous bar's dollar volume) and 2-return sigma: the
+# first fill with finite inputs is at row 3 (sigma needs returns at rows 1 and 2).
+IMPACT = ImpactModel(coef=0.1, aum_usd=1e5, adv_days=1, vol_days=2, cap=0.03)
+# Rows (open, close); volume 1000 on every bar, so dollar volume = 1000 * close.
+IMPACT_ROWS = [(100, 100), (100, 110), (110, 99), (99, 100), (100, 100), (100, 100)]
+
+
+def _impact_bars(n: int = 6) -> pd.DataFrame:
+    frame = bars(IMPACT_ROWS[:n])
+    frame["volume"] = 1000.0
+    return frame
+
+
+def test_impact_hand_example_one_buy_one_sell() -> None:
+    cands = {"A": _impact_bars()}
+    w = targets(cands, {2: {"A": 1.0}, 3: {"A": 0.0}})
+    res = run_portfolio(cands, w, costs=COSTS, init_cash=CASH, impact=IMPACT)
+
+    # Buy at row 3's open (99). Q = |delta| / equity_open * aum = 10000 / 10000 * 1e5 = 1e5.
+    # ADV = dollar volume of row 2 = 99 * 1000 = 99000.
+    # sigma = std(ddof=1) of r1 = log 1.1, r2 = log 0.9 -> log(1.1 / 0.9) / sqrt(2).
+    sig3 = np.log(1.1 / 0.9) / np.sqrt(2)
+    frac_b = 0.1 * sig3 * np.sqrt(1e5 / 99_000)  # ~0.01426, under the 0.03 cap
+    fill_b = 99 * (1 + SLIP + frac_b)
+    units = CASH / (fill_b * (1 + FEE))
+    fee_b = units * fill_b * FEE
+    eq3 = units * 100
+    # Sell everything at row 4's open (100): Q = units * 100 / eq3 * 1e5 = 1e5,
+    # ADV = row 3's 100 * 1000 = 1e5, sigma = std of r2 = log 0.9, r3 = log(100 / 99).
+    sig4 = abs(np.log(0.9) - np.log(100 / 99)) / np.sqrt(2)
+    frac_s = 0.1 * sig4 * np.sqrt(1e5 / 1e5)
+    fill_s = 100 * (1 - SLIP - frac_s)
+    fee_s = units * fill_s * FEE
+    eq4 = units * fill_s - fee_s
+
+    o = res.orders
+    assert o[["side", "reason"]].values.tolist() == [["buy", "rebalance"], ["sell", "rebalance"]]
+    assert list(o["time"]) == [w.index[3], w.index[4]]
+    assert o["price"].tolist() == [approx(fill_b), approx(fill_s)]
+    assert o["units"].tolist() == [approx(units), approx(units)]
+    assert o["fee"].tolist() == [approx(fee_b), approx(fee_s)]
+    assert res.equity.tolist() == [
+        approx(CASH),
+        approx(CASH),
+        approx(CASH),
+        approx(eq3),
+        approx(eq4),
+        approx(eq4),
+    ]
+    assert res.impact_cost == approx(units * 99 * frac_b + units * 100 * frac_s)
+    # The gross run pays no impact (nor fees/slippage): the buy fills at 99, the sell at 100.
+    assert res.gross_returns.iloc[4] == approx(0.0)
+    assert res.gross_returns.iloc[3] == approx(100 / 99 - 1)
+
+
+def test_impact_in_warm_up_charges_the_cap() -> None:
+    cands = {"A": _impact_bars()}
+    w = targets(cands, {0: {"A": 1.0}})
+    res = run_portfolio(cands, w, costs=COSTS, init_cash=CASH, impact=IMPACT)
+    # Row 1's open: no ADV (needs a full 1-day window before row 1) and no sigma -> cap 0.03.
+    assert res.orders["price"].tolist() == [approx(100 * (1 + SLIP + 0.03))]
+    units = CASH / (100 * (1 + SLIP + 0.03) * (1 + FEE))
+    assert res.impact_cost == approx(units * 100 * 0.03)
+
+
+def test_forced_exit_pays_impact_from_rows_before_the_exit_bar() -> None:
+    # A stops printing after row 4 (delisted); B keeps the union going and is never held.
+    cands = {"A": _impact_bars(5), "B": bars([(50, 50)] * 6)}
+    w = targets(cands, {2: {"A": 1.0}})
+    res = run_portfolio(cands, w, costs=COSTS, init_cash=CASH, impact=IMPACT)
+
+    sig3 = np.log(1.1 / 0.9) / np.sqrt(2)
+    frac_b = 0.1 * sig3 * np.sqrt(1e5 / 99_000)
+    units = CASH / (99 * (1 + SLIP + frac_b) * (1 + FEE))
+    # Exit at row 4's close (100). Q = units * 100 / equity_close * aum = 1e5 (the whole book),
+    # with the same inputs as a fill at row 4's open: ADV = 1e5 (row 3), sigma from r2, r3.
+    sig4 = abs(np.log(0.9) - np.log(100 / 99)) / np.sqrt(2)
+    frac_x = 0.1 * sig4
+    fill_x = 100 * (1 - SLIP - frac_x)
+    exit_row = orders_at(res, 4)
+    assert exit_row["reason"].tolist() == ["delisting"]
+    assert exit_row["price"].tolist() == [approx(fill_x)]
+    assert res.equity.iloc[4] == approx(units * fill_x * (1 - FEE))
+    assert res.impact_cost == approx(units * 99 * frac_b + units * 100 * frac_x)
+
+
+def test_zero_impact_model_is_bit_identical_to_no_impact() -> None:
+    cands, seg = _universe()
+    idx = union(cands)
+    w = _decisions(idx, seed=1)
+    kw = {"costs": VOL_COSTS, "init_cash": CASH, "min_rebalance": 0.02, "segment_starts": seg}
+    plain = run_portfolio(cands, w, **kw)  # type: ignore[arg-type]
+    zero = ImpactModel(coef=0.0, aum_usd=1e6, adv_days=5, vol_days=5, cap=0.0)
+    free = run_portfolio(cands, w, impact=zero, **kw)  # type: ignore[arg-type]
+    for name in ("equity", "returns", "gross_returns", "turnover"):
+        assert np.array_equal(getattr(plain, name).to_numpy(), getattr(free, name).to_numpy())
+    pd.testing.assert_frame_equal(plain.orders, free.orders, check_exact=True)
+    assert plain.impact_cost == 0.0 and free.impact_cost == 0.0
+    assert len(plain.orders) > 10
+
+
+def _impact_universe_run(aum: float) -> PortfolioResult:
+    cands, seg = _universe()
+    w = _decisions(union(cands), seed=1)
+    model = ImpactModel(coef=0.5, aum_usd=aum, adv_days=10, vol_days=10, cap=0.2)
+    return run_portfolio(
+        cands,
+        w,
+        costs=VOL_COSTS,
+        init_cash=CASH,
+        min_rebalance=0.02,
+        segment_starts=seg,
+        impact=model,
+    )
+
+
+def test_impact_is_monotone_in_book_size_and_never_touches_gross() -> None:
+    cands, seg = _universe()
+    w = _decisions(union(cands), seed=1)
+    plain = run_portfolio(
+        cands, w, costs=VOL_COSTS, init_cash=CASH, min_rebalance=0.02, segment_starts=seg
+    )
+    runs = [_impact_universe_run(aum) for aum in (1e2, 1e4, 1e6)]
+    finals = [plain.equity.iloc[-1]] + [r.equity.iloc[-1] for r in runs]
+    assert all(a > b for a, b in pairwise(finals)), finals
+    assert 0 < runs[0].impact_cost < runs[1].impact_cost
+    for r in runs:
+        assert np.array_equal(r.gross_returns.to_numpy(), plain.gross_returns.to_numpy())
+
+
+def test_net_returns_for_matches_run_portfolio_with_impact() -> None:
+    cands, seg = _universe()
+    w = _decisions(union(cands), seed=3)
+    model = ImpactModel(coef=0.5, aum_usd=1e4, adv_days=10, vol_days=10, cap=0.2)
+    kw = {"costs": VOL_COSTS, "init_cash": CASH, "min_rebalance": 0.02, "segment_starts": seg}
+    full = run_portfolio(cands, w, impact=model, **kw)  # type: ignore[arg-type]
+    (fast,) = net_returns_for(cands, [w], impact=model, **kw)  # type: ignore[arg-type]
+    assert np.array_equal(fast.returns.to_numpy(), full.returns.to_numpy())
+    assert np.array_equal(fast.turnover.to_numpy(), full.turnover.to_numpy())
+    assert fast.impact_cost == full.impact_cost > 0
+
+
+@pytest.mark.parametrize("t", [30, 63, 110, 155, 180])
+def test_no_lookahead_with_impact_perturbing_after_t(t: int) -> None:
+    cands, seg = _universe()
+    idx = union(cands)
+    master = _decisions(idx, seed=1)
+    t_time = idx[t]
+    model = ImpactModel(coef=0.5, aum_usd=1e4, adv_days=10, vol_days=10, cap=0.2)
+
+    def run(c: Mapping[str, pd.DataFrame], wts: pd.DataFrame) -> PortfolioResult:
+        kept = {s: v[v.isin(c[s].index)] for s, v in seg.items()}
+        return run_portfolio(
+            c,
+            wts.reindex(union(c)),
+            costs=VOL_COSTS,
+            init_cash=CASH,
+            min_rebalance=0.02,
+            segment_starts=kept,
+            impact=model,
+        )
+
+    base = run(cands, master)
+    perturbed = {
+        s: perturb_after(c, int(c.index.searchsorted(t_time, side="right")) - 1, seed=7)
+        for s, c in cands.items()
+    }
+    later = _decisions(idx, seed=2)
+    mixed = master.copy()
+    mixed.loc[mixed.index > t_time] = later.loc[later.index > t_time]
+    _assert_same_through(base, run(perturbed, mixed), t_time)
+    assert base.impact_cost > 0
+
+
+def test_rejects_a_bad_impact_model() -> None:
+    cands, w = _ok()
+    with pytest.raises(ValueError, match="impact"):
+        run_portfolio(cands, w, costs=COSTS, impact="0.1")  # type: ignore[arg-type]
+    bad = ImpactModel(coef=0.1, aum_usd=-1.0, adv_days=1, vol_days=2, cap=0.03)
+    with pytest.raises(ValueError, match="aum_usd"):
+        run_portfolio(cands, w, costs=COSTS, impact=bad)
+    with pytest.raises(ValueError, match="cap"):
+        net_returns_for(
+            cands,
+            [w],
+            costs=COSTS,
+            impact=ImpactModel(coef=0.1, aum_usd=1.0, adv_days=1, vol_days=2, cap=1.0),
+        )
+
+
+@pytest.mark.parametrize("entry", ["run_portfolio", "net_returns_for"])
+def test_rejects_slippage_plus_impact_cap_of_one_or_more(entry: str) -> None:
+    """Sells fill at open * (1 - slip - frac): at slip + frac >= 1 the price is <= 0."""
+    cands, w = _ok()
+    costs = CostModel(fee_rate=FEE, slippage_rate=SLIP, slippage_vol_mult=0.1, slippage_cap=0.5)
+    impact = ImpactModel(coef=0.1, aum_usd=1.0, adv_days=1, vol_days=2, cap=0.5)
+
+    def call(c: CostModel, im: ImpactModel) -> object:
+        if entry == "run_portfolio":
+            return run_portfolio(cands, w, costs=c, impact=im)
+        return net_returns_for(cands, [w], costs=c, impact=im)
+
+    with pytest.raises(ValueError, match=r"costs\.slippage_cap.*impact\.cap"):
+        call(costs, impact)
+    flat = CostModel(fee_rate=FEE, slippage_rate=0.6, slippage_vol_mult=0.0)
+    with pytest.raises(ValueError, match=r"costs\.slippage_rate.*impact\.cap"):
+        call(flat, ImpactModel(coef=0.1, aum_usd=1.0, adv_days=1, vol_days=2, cap=0.4))
+    call(costs, ImpactModel(coef=0.1, aum_usd=1.0, adv_days=1, vol_days=2, cap=0.49))
+    call(COSTS, impact)  # flat 1% slippage: 0.01 + 0.5 < 1 although slippage_cap is 1.0

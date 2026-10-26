@@ -264,6 +264,60 @@ def load_universe(
     return wide
 
 
+def manifest_path(universe_dir: Path, quote: str, interval: str) -> Path:
+    """The ``.json`` manifest written next to the universe table."""
+    return universe_path(universe_dir, quote, interval).with_suffix(".json")
+
+
+def manifest_sha256(universe_dir: Path, quote: str, interval: str) -> str | None:
+    """sha256 hex of the manifest file's bytes, or None when there is no manifest. The manifest
+    holds the table's own sha256 and the build time, so any rebuild changes this hash; research
+    runs freeze it at ``start_run`` and refuse to continue once it changed."""
+    path = manifest_path(universe_dir, quote, interval)
+    if not path.is_file():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def load_universe_ranks(
+    universe_dir: Path,
+    quote: str,
+    interval: str,
+    *,
+    end: pd.Timestamp,
+    allow_incomplete: bool = False,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """``(wide rank frame, manifest)`` with only the rows whose bar time is before ``end``.
+
+    Same checks as :func:`load_universe` (a manifest whose ``parquet_sha256`` matches the
+    table, no left-out symbols), but rows at or after ``end`` are filtered while reading, so a
+    design-window caller passing ``end = holdout_start`` never holds a holdout row."""
+    path = universe_path(universe_dir, quote, interval)
+    if not path.is_file():
+        raise ValueError(
+            f"no universe at {str(path)!r}; run `uv run python -m lab.data.universe_build build`"
+        )
+    meta_path = manifest_path(universe_dir, quote, interval)
+    meta = json.loads(meta_path.read_text()) if meta_path.is_file() else None
+    if meta is None or meta.get("parquet_sha256") != hashlib.sha256(path.read_bytes()).hexdigest():
+        raise ValueError(f"universe {path.name} has no matching manifest; rebuild it")
+    left_out = meta.get("symbols_incomplete_download") or {}
+    if left_out and not allow_incomplete:
+        raise ValueError(
+            f"universe {path.name} was built without {len(left_out)} incomplete symbol(s) "
+            f"({', '.join(sorted(left_out)[:5])}); finish `download` and rebuild"
+        )
+    long = pd.read_parquet(path, filters=[("time", "<", end)])
+    long = long.loc[pd.DatetimeIndex(long["time"]) < end]
+    if long.empty:
+        wide = pd.DataFrame(index=pd.DatetimeIndex([], tz="UTC", name="time"))
+    else:
+        wide = long.pivot(index="time", columns="symbol", values="rank").sort_index()
+        wide.index = pd.DatetimeIndex(wide.index, name="time")
+    wide.columns.name = None
+    return wide, meta
+
+
 def _peg_suspects(candles_by_symbol: Mapping[str, pd.DataFrame]) -> list[str]:
     out = []
     for symbol, frame in candles_by_symbol.items():
@@ -275,7 +329,8 @@ def _peg_suspects(candles_by_symbol: Mapping[str, pd.DataFrame]) -> list[str]:
     return sorted(out)
 
 
-PRICE_JUMP_FACTOR = 5.0  # a >5x close-to-close move between bars: likely a ticker reuse or redenomination
+# a >5x close-to-close move between bars: likely a ticker reuse or redenomination
+PRICE_JUMP_FACTOR = 5.0
 
 
 def _price_jumps(candles_by_symbol: Mapping[str, pd.DataFrame]) -> dict[str, list[str]]:
@@ -470,7 +525,8 @@ def main(argv: list[str] | None = None, cfg: LabConfig | None = None) -> int:
             print(f"  ever in top {ucfg.top_n}: {len(info['ever_in_top_n'])}")
             print(f"  of those delisted: {info['ever_in_top_n_and_delisted']}")
             print(f"  peg suspects (check exclude_bases): {info['peg_suspects']}")
-            print(f"  >{PRICE_JUMP_FACTOR:g}x bar-to-bar jumps (check tickers): {info['price_jumps']}")
+            jumps = info["price_jumps"]
+            print(f"  >{PRICE_JUMP_FACTOR:g}x bar-to-bar jumps (check tickers): {jumps}")
             if incomplete:
                 print(f"  built WITHOUT {len(incomplete)} incomplete symbol(s); see manifest")
             print(f"  manifest: {path.with_suffix('.json')}")

@@ -15,6 +15,17 @@ Tools (all return compact JSON: never equity curves or trade lists):
 * ``get_ledger``, ``get_report``, ``get_budget``: read the run (holdout trials hidden).
 * ``holdout_check(run_id, plan)``: the locked holdout, budgeted server-side; pass/fail only.
 
+Portfolio plans (``"kind": "portfolio"``, PLAN.md Phase 10) go through the same tools, routed
+to :mod:`lab.research.portfolio` / :mod:`lab.portfolio_runner`: the universe comes from lab.toml
+``[universe]`` (its manifest sha256 is frozen at ``start_run`` and every portfolio call refuses
+once it changed), benchmarks are the equal-weight universe, BTC buy-and-hold, vol-targeted BTC
+and the random-selection null (all scored from the plan's first decision), the cross-check is an
+independent accounting replay (accounting only: it cannot catch signal look-ahead or a cost-model
+bug), and ``get_report`` adds the ``[portfolio]`` criteria rows. ``rebalance.offset`` is pinned
+at 0 (validate_plan and every portfolio tool reject another value; run_adversarial's
+other-weekday table is descriptive timing luck).
+Single-symbol plans behave exactly as before.
+
 Budgets are enforced here, before anything runs: an unknown run id, a run whose frozen lab.toml
 fingerprint differs from the server's, a new plan beyond ``max_proposals``, or a call whose
 worst-case trial count exceeds the remaining ``max_backtests`` is refused with the numbers.
@@ -64,10 +75,12 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
+from lab import portfolio_runner as pr
 from lab.config import LabConfig, load_config
 from lab.engine.splits import design_view, design_window, walk_forward_folds
 from lab.ledger import SELECTION_SOURCES, Ledger
 from lab.plan import parse_plan, plan_hash, plan_to_dict, tunable_params
+from lab.plan import portfolio as pf
 from lab.plan import validate_plan as _validate_plan
 from lab.plan.validator import PlanValidationError, format_errors
 from lab.registry import REGISTRY
@@ -84,16 +97,29 @@ from lab.research.family import (
     behaviour_family,
     tried_literals,
     tried_ranges,
+    tried_ranges_portfolio,
     wf_lineage_check,
 )
 from lab.research.holdout import HoldoutRefusedError, run_holdout_check
 from lab.research.logic import canonical_space, logic_hash
 from lab.research.pipeline import adversarial_evidence, backtest_evidence, crosscheck_evidence
+from lab.research.portfolio import (
+    portfolio_adversarial_evidence,
+    portfolio_backtest_evidence,
+    portfolio_crosscheck_evidence,
+    portfolio_family,
+    portfolio_lineage_check,
+    portfolio_space,
+    portfolio_sweep_evidence,
+    portfolio_walk_forward_evidence,
+)
 from lab.research.runs import (
     budget_status,
     check_lab_fingerprint,
+    check_universe_manifest,
     holdout_budget,
     start_research_run,
+    universe_manifest,
 )
 from lab.runner import (
     CandleLoader,
@@ -140,6 +166,14 @@ any plan whose design-window returns correlate with one of its plans at or above
 [research] literal_lineage_corr (0.95 by default; e.g. a no-op or cosmetic copy). A different
 logic that merely trends alike (below that bar) is not blocked by those literals.
 holdout_check needs a matched run_crosscheck first.
+Portfolio plans ({"kind": "portfolio", ...}; list_features shows the schema): long-only top
+quantile of the lab.toml [universe] (point-in-time top-N coins by trailing dollar volume), same
+tools and budgets; min_trades counts filled rebalances; benchmarks are the equal-weight
+universe, BTC buy-and-hold, vol-targeted BTC and a random-selection null, all scored from the
+plan's first decision (the first rebalance on which it could have invested, gate or not);
+rebalance.offset is fixed by the lab at 0 (run_adversarial's other-weekday table is timing
+luck, never resubmittable); get_report adds beat_equal_weight and alpha-to-BTC rows
+([portfolio] criteria; missing without them).
 Plans that trade alike are ONE hypothesis: the same logic re-tuned or on any interval, and
 plans whose design-window returns correlate at or above the family threshold
 ([research] family_return_corr, 0.8 by default; aligned by timestamp across intervals, so a
@@ -171,6 +205,17 @@ class SpaceRange(TypedDict):
 
 
 # --------------------------------------------------------------------------- helpers
+
+
+def _portfolio_or_error(raw: Mapping[str, Any], cfg: LabConfig) -> tuple[pf.PortfolioPlan, str]:
+    try:
+        plan = pr.parse_portfolio_plan(raw, cfg)
+    except PlanValidationError as exc:
+        raise ToolError(
+            "portfolio plan is invalid; fix these and resubmit (validate_plan is free):\n"
+            + format_errors(exc.errors)
+        ) from None
+    return plan, pf.portfolio_plan_hash(plan)
 
 
 def _plan_or_error(raw: Mapping[str, Any]) -> tuple[Plan, str]:
@@ -379,6 +424,13 @@ def build_server(
         except ValueError as exc:
             raise ToolError(str(exc)) from None
 
+    def check_universe(led: Ledger, run_id: str) -> None:
+        """Portfolio calls: the run's frozen universe manifest must match the one on disk."""
+        try:
+            check_universe_manifest(led, run_id, config)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from None
+
     def guard(led: Ledger, run_id: str, h: str, cost: int, what: str) -> None:
         """Refuse (before anything runs or is recorded) when ``what`` would exceed the run's
         frozen budget. ``cost`` is the worst-case number of ledger trials it records."""
@@ -436,13 +488,19 @@ def build_server(
         with lock, open_ledger() as led:
             run_id = start_research_run(led, research, label=text, cfg=config)
             hb = holdout_budget(led, run_id, config)
-        return {
+        out: dict[str, Any] = {
             "run_id": run_id,
             "criteria": asdict(research.criteria),
             "budget": asdict(research.budget),
             "holdout_budget": hb,
             "config_sha256": research.sha256,
         }
+        if research.portfolio is not None:
+            out["portfolio_criteria"] = asdict(research.portfolio)
+        manifest = universe_manifest(config)
+        if manifest is not None:
+            out["universe_manifest_sha256"] = manifest["sha256"]
+        return out
 
     # ------------------------------------------------------------------ free tools
 
@@ -469,13 +527,71 @@ def build_server(
                     ],
                 }
                 for spec in REGISTRY.values()
-            ]
+            ],
+            "portfolio": {
+                "note": (
+                    'A portfolio plan has "kind": "portfolio" and none of the single-symbol keys: '
+                    "a long-only top quantile of the lab.toml [universe] (point-in-time top-"
+                    f"{config.universe.top_n} {config.universe.quote} coins by trailing dollar "
+                    f"volume, interval {config.universe.interval}), ranked on a score feature, "
+                    "rebalanced every N rows; optional rank banding (selection.exit_quantile) "
+                    "and dispersion gate. Weights are capped at "
+                    f"{config.universe.liquidity_cap_mult:g}x each coin's liquidity share."
+                ),
+                "score_features": [
+                    {
+                        "name": s.name,
+                        "description": s.description,
+                        "lookback_low": s.lookback_low,
+                        "lookback_high": s.lookback_high,
+                    }
+                    for s in pf.SCORE_FEATURES.values()
+                ],
+                "schema": pf.portfolio_plan_json_schema(),
+            },
         }
 
     @server.tool(annotations=_READ_ONLY)
     def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
         """Validate a plan (free: no ledger trial, no budget). Returns errors with JSON paths,
-        or the plan_hash and the tunable params (keys usable in run_sweep's space)."""
+        or the plan_hash and the tunable params (keys usable in run_sweep's space). Portfolio
+        plans ("kind": "portfolio") are validated against the universe interval."""
+        if pf.is_portfolio_plan(plan):
+            res = pf.validate_portfolio_plan(plan, interval=config.universe.interval)
+            if res.plan is None:
+                return {
+                    "valid": False,
+                    "kind": pf.PORTFOLIO_KIND,
+                    "errors": [
+                        {"path": e.partition(": ")[0], "message": e.partition(": ")[2] or e}
+                        for e in res.errors
+                    ],
+                }
+            pinned = pf.pinned_offset_errors(res.plan)
+            if pinned:  # the lab pins the rebalance weekday; every portfolio tool refuses too
+                return {
+                    "valid": False,
+                    "kind": pf.PORTFOLIO_KIND,
+                    "errors": [{"path": e.path, "message": e.message} for e in pinned],
+                }
+            specs = pr.portfolio_param_specs(res.plan)
+            return {
+                "valid": True,
+                "kind": pf.PORTFOLIO_KIND,
+                "errors": [],
+                "plan_hash": pf.portfolio_plan_hash(res.plan),
+                "plan_logic": pf.plan_logic(res.plan),
+                "tunable_params": {
+                    k: {"kind": s.kind, "default": s.default, "low": s.low, "high": s.high}
+                    for k, s in specs.items()
+                },
+                "note": (
+                    "rebalance.offset is fixed by the lab at 0 (not tunable, not "
+                    "resubmittable); a sweep must keep "
+                    "selection.exit_quantile >= selection.quantile (other combinations are "
+                    "pruned as infeasible, still ledgered)"
+                ),
+            }
         parsed, errors = _validate_plan(plan)
         if parsed is None:
             return {
@@ -518,7 +634,26 @@ def build_server(
         vol-targeted, random entry), a run-local DSR (dsr_run_local; get_report's DSR row, with
         the global trial count and variance, is authoritative), PBO over the ±20%
         neighbourhood, fixed-param walk-forward folds, regime breakdown, warnings. Every run is
-        ledger trials; the report is evidence for get_report."""
+        ledger trials; the report is evidence for get_report. Portfolio plans: equal-weight
+        universe, BTC buy-and-hold, vol-targeted BTC and random-selection null benchmarks
+        (all from the first decision), alpha/beta to BTC, turnover, fees and impact, segment
+        exits, and dispersion + gate state per rebalance."""
+        if pf.is_portfolio_plan(plan):
+            _, ph = _portfolio_or_error(plan, config)
+            with open_ledger() as led:
+                check_run(led, run_id)
+            with run_lock(run_id), open_ledger() as led:
+                check_run(led, run_id)
+                check_universe(led, run_id)
+                guard(led, run_id, ph, pr.backtest_cost(config), "run_backtest")
+                out = lab_call(
+                    lambda: portfolio_backtest_evidence(
+                        plan, run_id=run_id, cfg=config, ledger=led, loader=load
+                    )
+                )
+                out = _relabel_run_local_dsr(out)
+                out["budget"] = budget_status(led, run_id, config)
+            return out
         _, h = _plan_or_error(plan)
         with open_ledger() as led:
             check_run(led, run_id)
@@ -536,7 +671,25 @@ def build_server(
     def run_adversarial(run_id: str, plan: dict[str, Any]) -> dict[str, Any]:
         """Adversarial checks on the design window: signal delay 1/3/5 bars, sign flip, cost
         stress, Monte Carlo trade reshuffle, permutation null. Every variant is a ledger
-        trial; the report is evidence for get_report."""
+        trial; the report is evidence for get_report. Portfolio plans: stale inputs 1/3/5
+        rebalance periods old on the same rebalance rows, cost stress (fees, slippage and
+        impact), and a descriptive timing-luck table of the other rebalance weekdays (the lab
+        pins rebalance.offset at 0, so those variants cannot be resubmitted)."""
+        if pf.is_portfolio_plan(plan):
+            pplan, ph = _portfolio_or_error(plan, config)
+            with open_ledger() as led:
+                check_run(led, run_id)
+            with run_lock(run_id), open_ledger() as led:
+                check_run(led, run_id)
+                check_universe(led, run_id)
+                guard(led, run_id, ph, pr.adversarial_cost(config, pplan), "run_adversarial")
+                out = lab_call(
+                    lambda: portfolio_adversarial_evidence(
+                        plan, run_id=run_id, cfg=config, ledger=led, loader=load
+                    )
+                )
+                out["budget"] = budget_status(led, run_id, config)
+            return out
         _, h = _plan_or_error(plan)
         with open_ledger() as led:
             check_run(led, run_id)
@@ -556,7 +709,24 @@ def build_server(
         """Re-run an already backtested plan in the event-driven engine (nautilus_trader) on
         the same design window and compare trades and returns with the vectorbt engine.
         matched=true only when the engine is available and both agree. Needs run_backtest
-        evidence for this exact plan first; counts as 1 backtest for the budget guard."""
+        evidence for this exact plan first; counts as 1 backtest for the budget guard.
+        Portfolio plans: an independent accounting replay recomputes net equity from the same
+        weights, candles, costs and impact and must match within 1e-8 (relative)."""
+        if pf.is_portfolio_plan(plan):
+            _, ph = _portfolio_or_error(plan, config)
+            with open_ledger() as led:
+                check_run(led, run_id)
+            with run_lock(run_id), open_ledger() as led:
+                check_run(led, run_id)
+                check_universe(led, run_id)
+                guard(led, run_id, ph, 1, "run_crosscheck")
+                out = lab_call(
+                    lambda: portfolio_crosscheck_evidence(
+                        plan, run_id=run_id, cfg=config, ledger=led, loader=load
+                    )
+                )
+                out["budget"] = budget_status(led, run_id, config)
+            return out
         _, h = _plan_or_error(plan)
         with open_ledger() as led:
             check_run(led, run_id)
@@ -577,7 +747,31 @@ def build_server(
     ) -> dict[str, Any]:
         """Optuna (seeded TPE) search maximising the net Sharpe on the design window over the
         explicit ranges in space ({tunable key: {low, high}}). Every trial is a ledger trial
-        and raises the DSR bar; the best of many trials is biased upward."""
+        and raises the DSR bar; the best of many trials is biased upward. Portfolio plans:
+        space keys are the tunable paths validate_plan lists."""
+        if pf.is_portfolio_plan(plan):
+            pplan, ph = _portfolio_or_error(plan, config)
+            if isinstance(n_trials, bool) or n_trials < 1:
+                raise ToolError(f"n_trials must be a positive integer, got {n_trials!r}")
+            with open_ledger() as led:
+                check_run(led, run_id)
+            with run_lock(run_id), open_ledger() as led:
+                check_run(led, run_id)
+                check_universe(led, run_id)
+                try:
+                    prng = portfolio_space(
+                        pplan, space, frozen_criteria(led, run_id).neighbourhood_pct
+                    )
+                except ValueError as exc:
+                    raise ToolError(str(exc)) from None
+                guard(led, run_id, ph, n_trials, f"run_sweep with n_trials={n_trials}")
+                out = lab_call(
+                    lambda: portfolio_sweep_evidence(
+                        plan, prng, n_trials, run_id=run_id, cfg=config, ledger=led, loader=load
+                    )
+                )
+                out["budget"] = budget_status(led, run_id, config)
+            return out
         parsed, h = _plan_or_error(plan)
         lh = logic_hash(parsed)
         if isinstance(n_trials, bool) or n_trials < 1:
@@ -640,7 +834,10 @@ def build_server(
     ) -> dict[str, Any]:
         """Walk-forward optimisation inside the design window: per fold, Optuna searches space
         on the train window only, then the chosen params run once on the test window. The
-        stitched out-of-sample net Sharpe is what the success criteria judge."""
+        stitched out-of-sample net Sharpe is what the success criteria judge. Portfolio plans
+        follow the same lineage rule (cover every value the behaviour family tried)."""
+        if pf.is_portfolio_plan(plan):
+            return portfolio_walk_forward_tool(run_id, plan, space, n_trials_per_fold)
         parsed, h = _plan_or_error(plan)
         lh = logic_hash(parsed)
         if isinstance(n_trials_per_fold, bool) or n_trials_per_fold < 1:
@@ -718,6 +915,71 @@ def build_server(
             out["budget"] = budget_status(led, run_id, config)
         return out
 
+    def portfolio_walk_forward_tool(
+        run_id: str, plan: dict[str, Any], space: dict[str, SpaceRange], n_trials_per_fold: int
+    ) -> dict[str, Any]:
+        pplan, ph = _portfolio_or_error(plan, config)
+        if isinstance(n_trials_per_fold, bool) or n_trials_per_fold < 1:
+            raise ToolError(
+                f"n_trials_per_fold must be a positive integer, got {n_trials_per_fold!r}"
+            )
+        with open_ledger() as led:
+            check_run(led, run_id)
+        with run_lock(run_id), open_ledger() as led:
+            check_run(led, run_id)
+            check_universe(led, run_id)
+            try:
+                prng = portfolio_space(pplan, space, frozen_criteria(led, run_id).neighbourhood_pct)
+            except ValueError as exc:
+                raise ToolError(str(exc)) from None
+            family = portfolio_family(led, pplan, ph, config, load)
+            if family.base_trial_id is None:
+                raise ToolError(
+                    f"walk_forward needs a run_backtest of this exact plan ({ph[:12]}) first: its "
+                    "design-window returns identify which earlier trials belong to the same "
+                    "hypothesis, and the walk-forward space must cover what they tried"
+                )
+            ranges = tried_ranges_portfolio(led, family, pplan, pr.universe_symbol(config))
+            problems, notes = portfolio_lineage_check(pplan, prng, ranges)
+            if problems:
+                raise ToolError(
+                    "walk_forward must search at least every value this hypothesis's behaviour "
+                    "family already tried (backtests, neighbours, sweeps, and walk-forwards of "
+                    "this logic or of plans whose design-window returns correlate with it, in any "
+                    "run); otherwise its out-of-sample folds replay an in-sample choice: "
+                    + "; ".join(problems)
+                )
+
+            def n_folds() -> int:
+                data = pr.load_universe_data(config, load, end=config.splits.holdout_start)
+                return len(pr.portfolio_folds(pr.design_window(data, config), config))
+
+            folds = lab_call(n_folds)
+            if folds == 0:
+                raise ToolError("no walk-forward fold fits in the portfolio design window")
+            cost = pr.walk_forward_cost(folds, n_trials_per_fold)
+            guard(
+                led,
+                run_id,
+                ph,
+                cost,
+                f"walk_forward ({folds} folds x ({n_trials_per_fold} train + 1 test))",
+            )
+            out = lab_call(
+                lambda: portfolio_walk_forward_evidence(
+                    plan,
+                    prng,
+                    n_trials_per_fold,
+                    run_id=run_id,
+                    cfg=config,
+                    ledger=led,
+                    loader=load,
+                    lineage_notes=notes,
+                )
+            )
+            out["budget"] = budget_status(led, run_id, config)
+        return out
+
     # ------------------------------------------------------------------ reads
 
     @server.tool(annotations=_READ_ONLY)
@@ -786,7 +1048,10 @@ def build_server(
                 "holdout_check is disabled on this server (STRATEGY_LAB_DISABLE_HOLDOUT=1): "
                 "the orchestrator runs holdout checks itself. Report the candidate instead."
             )
-        _plan_or_error(plan)
+        if pf.is_portfolio_plan(plan):
+            _portfolio_or_error(plan, config)
+        else:
+            _plan_or_error(plan)
         with open_ledger() as led:
             check_run(led, run_id)
         with run_lock(run_id), open_ledger() as led:

@@ -763,10 +763,10 @@ in 2025–26, with cross-sectional dispersion down 38% after 2022; its 1-day rev
 first-order risks for H1, so they are measured and controlled before the run, not after
 (`agents/research/reports/Project improvement research.md`, section 3).
 
-- [ ] **(owner)** Cross-sectional dispersion feature in `lab/lab/registry/cross_section.py` (cross-sectional std of trailing returns among eligible coins at row t, perturbation-tested) and logged per rebalance in the portfolio run so the critic can see whether any edge lives only in high-dispersion periods; optional dispersion gate in the portfolio plan type
-- [ ] **(owner)** Liquidity-aware weights: cap each coin's target weight by its share of trailing dollar volume (`lab.toml [universe]` setting, frozen into the run fingerprint)
-- [ ] **(owner)** Rank banding: a coin enters the top quintile only when its rank crosses the boundary by a margin and leaves only when it falls below a wider one (hysteresis), so weekly rebalances do not churn the edge of the quintile
-- [ ] **(owner)** Participation cost term in `lab/lab/engine/costs.py` for portfolio runs: square-root market impact on traded value divided by the coin's trailing dollar volume, added to the existing fee + volatility-scaled slippage; BTC/ETH single-symbol costs unchanged
+- [x] **(owner)** Cross-sectional dispersion feature in `lab/lab/registry/cross_section.py` (cross-sectional std of trailing returns among eligible coins at row t, perturbation-tested) and logged per rebalance in the portfolio run so the critic can see whether any edge lives only in high-dispersion periods; optional dispersion gate in the portfolio plan type
+- [x] **(owner)** Liquidity-aware weights: cap each coin's target weight by its share of trailing dollar volume (`lab.toml [universe]` setting, frozen into the run fingerprint)
+- [x] **(owner)** Rank banding: a coin enters the top quintile only when its rank crosses the boundary by a margin and leaves only when it falls below a wider one (hysteresis), so weekly rebalances do not churn the edge of the quintile
+- [x] **(owner)** Participation cost term in `lab/lab/engine/costs.py` for portfolio runs: square-root market impact on traded value divided by the coin's trailing dollar volume, added to the existing fee + volatility-scaled slippage; BTC/ETH single-symbol costs unchanged
 - [ ] H1 report decomposes returns into alpha and beta to BTC (full period and rolling 60-day), since a long-only top quintile carries most of BTC's beta; the journal says "no edge found" if the alpha is not significant after costs
 
 **Done when:** H1 has been run once, end to end, through the same ledgered pipeline and success

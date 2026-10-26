@@ -371,6 +371,12 @@ def _record_error(
     )
 
 
+# Public names for other searches that write the same ledger rows (lab.portfolio_runner): the
+# "_study" design in params_json is what the sweep-PBO basis and the walk-forward lineage read.
+params_json = _params_json
+study_meta = _study_meta
+
+
 def _suggest(trial: optuna.Trial, space: Mapping[str, ParamSpec]) -> dict[str, float]:
     params: dict[str, float] = {}
     for key, spec in space.items():

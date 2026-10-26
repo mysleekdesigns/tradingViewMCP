@@ -29,6 +29,27 @@ Semantics (every point is pinned by a hand-calculated test in ``tests/test_engin
    exactly, and cash never goes negative (no leverage, no shorting).
 4. **Slippage** per symbol is :func:`lab.engine.costs.slippage_series` on that symbol's own
    candles (causal: the fraction at its row j depends only on its rows < j).
+4b. **Participation impact** (optional ``impact: ImpactModel``; None = no impact, results
+   bit-identical to the engine without it). Per symbol, ``(adv, sigma) =``
+   :func:`lab.engine.costs.impact_inputs` on its own candles with its segment starts (causal:
+   the values at its row j use only its rows < j; warm-up restarts at each listing segment).
+   At a rebalance fill at row j, ``trade_value_usd = |delta| / equity_open * impact.aum_usd``
+   with ``delta`` in open-price terms from point 3 (for buys, BEFORE the pro-rata scaling to
+   cash), and ``frac = impact_fraction(trade_value_usd, adv[j], sigma[j])`` (NaN or <= 0
+   inputs -> ``impact.cap``). Sells fill at ``open * (1 - slip - frac)``, buys at
+   ``open * (1 + slip + frac)``; fees then apply to the fill as before. A forced exit at row
+   j's close (point 5) pays impact too, with ``trade_value_usd = units * close / equity_close
+   * impact.aum_usd`` where ``equity_close = cash + sum(units * mark)`` at that close before
+   any forced exit, and the SAME ``adv[j], sigma[j]`` as a fill at row j's open (rows < j
+   only, although the close is known by then: one rule for every fill at row j), filling at
+   ``close * (1 - slip - frac)``. ``impact_cost`` = sum over fills of ``units * reference
+   price * frac`` (reference = the open, or the close for forced exits), in cash units. The
+   gross run (point 8) pays no impact. ``costs.slippage_cap + impact.cap`` (or
+   ``costs.slippage_rate + impact.cap`` with flat slippage, ``slippage_vol_mult == 0``) must
+   be < 1 (``ValueError`` naming both otherwise; see :func:`lab.engine.costs.validate_impact`),
+   so ``1 - slip - frac`` stays positive and no sell fills at a price <= 0. Impact is sized
+   on the fixed ``impact.aum_usd``, not on the compounding equity (see
+   :mod:`lab.engine.costs`).
 5. **Forced exits** (survivorship-safe delisting returns). If a symbol is held (units > 0) at
    its LAST bar in the data and that bar is earlier than the union's last row (it stopped
    printing: delisted), everything is sold at that bar's ``close * (1 - slip)`` with the fee,
@@ -64,7 +85,14 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from lab.engine.costs import slippage_series, validate_costs
+from lab.engine.costs import (
+    ImpactModel,
+    impact_fraction,
+    impact_inputs,
+    slippage_series,
+    validate_costs,
+    validate_impact,
+)
 from lab.types import CostModel, validate_candles
 
 _SUM_TOL = 1e-9  # float slack on a decision row's weight sum
@@ -91,6 +119,9 @@ class PortfolioResult:
     # crash during a suspension that the exit dodged (the break itself is only known after the
     # hole), so reports list these and never treat them as skill.
     segment_exits: pd.DataFrame
+    # Sum over fills of units * reference price * impact fraction (cash units); 0 without
+    # an ImpactModel. Last, with a default, so existing constructors keep working.
+    impact_cost: float = 0.0
 
 
 SEGMENT_EXIT_COLUMNS: tuple[str, ...] = (
@@ -109,6 +140,7 @@ class NetRun:
 
     returns: pd.Series
     turnover: pd.Series
+    impact_cost: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -123,6 +155,8 @@ class _Market:
     can_fill: np.ndarray  # bool: has a bar and tradable
     slip: np.ndarray  # slippage fraction at the symbol's own row; 0 where no bar
     force: np.ndarray  # int8: 0, _REASON_DELISTING or _REASON_SEGMENT_END at a close
+    adv: np.ndarray | None = None  # impact ADV at the symbol's own row (rows < it); NaN no bar
+    sigma: np.ndarray | None = None  # impact sigma likewise
 
 
 @dataclass(frozen=True)
@@ -132,6 +166,7 @@ class _Sim:
     turnover: np.ndarray
     orders: list[tuple[int, np.ndarray, str, np.ndarray, np.ndarray, np.ndarray, str]]
     fees_paid: float
+    impact_cost: float
 
 
 # --------------------------------------------------------------------------- validation
@@ -255,6 +290,7 @@ def _build_market(
     index: pd.DatetimeIndex,
     costs: CostModel,
     segment_ends: Mapping[str, np.ndarray],
+    impact: ImpactModel | None = None,
 ) -> _Market:
     n, m = len(index), len(symbols)
     open_ = np.full((n, m), np.nan)
@@ -263,6 +299,11 @@ def _build_market(
     can_fill = np.zeros((n, m), dtype=bool)
     slip = np.zeros((n, m))
     force = np.zeros((n, m), dtype=np.int8)
+    adv: np.ndarray | None = None
+    sigma: np.ndarray | None = None
+    if impact is not None:
+        adv = np.full((n, m), np.nan)
+        sigma = np.full((n, m), np.nan)
     for k, symbol in enumerate(symbols):
         candles = frames[symbol]
         rows = index.get_indexer(candles.index)
@@ -275,7 +316,10 @@ def _build_market(
             force[rows[-1], k] = _REASON_DELISTING
         if symbol in segment_ends:
             force[rows[segment_ends[symbol]], k] = _REASON_SEGMENT_END
-    return _Market(index, symbols, open_, close, has_bar, can_fill, slip, force)
+        if impact is not None and adv is not None and sigma is not None:
+            starts = candles.index[segment_ends[symbol] + 1] if symbol in segment_ends else None
+            adv[rows, k], sigma[rows, k] = impact_inputs(candles, impact, segment_starts=starts)
+    return _Market(index, symbols, open_, close, has_bar, can_fill, slip, force, adv, sigma)
 
 
 # --------------------------------------------------------------------------- simulation
@@ -289,6 +333,7 @@ def _simulate(
     slip: np.ndarray,
     init_cash: float,
     min_rebalance: float,
+    impact: ImpactModel | None = None,
 ) -> _Sim:
     n, m = w.shape
     units = np.zeros(m)
@@ -296,6 +341,7 @@ def _simulate(
     pending = np.full(m, np.nan)  # NaN = no pending target
     cash = float(init_cash)
     fees_paid = 0.0
+    impact_cost = 0.0
     equity = np.empty(n)
     held = np.zeros((n, m))
     turnover = np.zeros(n)
@@ -330,7 +376,12 @@ def _simulate(
                 sold = np.where(
                     sell_all[sells], u[sells], np.minimum(u[sells], -delta[sells] / px[sells])
                 )
-                fill = px[sells] * (1.0 - slip[j, c])
+                if impact is None:
+                    fill = px[sells] * (1.0 - slip[j, c])
+                else:
+                    frac = _impact_at(mkt, impact, j, c, np.abs(delta[sells]) / equity_open)
+                    fill = px[sells] * (1.0 - slip[j, c] - frac)
+                    impact_cost += float((sold * px[sells] * frac).sum())
                 notional = sold * fill
                 fee = fee_rate * notional
                 cash += float(notional.sum() - fee.sum())
@@ -345,11 +396,17 @@ def _simulate(
                 c = cols[buys]
                 budget = delta[buys]
                 total = float(budget.sum())
+                if impact is None:
+                    fill = px[buys] * (1.0 + slip[j, c])
+                else:  # participation is sized on the intended trade, before cash scaling
+                    frac = _impact_at(mkt, impact, j, c, budget / equity_open)
+                    fill = px[buys] * (1.0 + slip[j, c] + frac)
                 if total > cash:
                     budget = budget * (cash / total)
                     total = float(budget.sum())
-                fill = px[buys] * (1.0 + slip[j, c])
                 bought = budget / (fill * (1.0 + fee_rate))
+                if impact is not None:
+                    impact_cost += float((bought * px[buys] * frac).sum())
                 notional = bought * fill
                 fee = fee_rate * notional
                 cash = max(cash - total, 0.0)
@@ -365,7 +422,15 @@ def _simulate(
             if exit_mask.any():
                 c = np.flatnonzero(exit_mask)
                 sold = units[c].copy()
-                fill = mkt.close[j, c] * (1.0 - slip[j, c])
+                if impact is None:
+                    fill = mkt.close[j, c] * (1.0 - slip[j, c])
+                else:
+                    mark_close = np.where(has_bar, mkt.close[j], last_close)
+                    equity_close = cash + float(units @ mark_close)
+                    value = sold * mkt.close[j, c]
+                    frac = _impact_at(mkt, impact, j, c, value / equity_close)
+                    fill = mkt.close[j, c] * (1.0 - slip[j, c] - frac)
+                    impact_cost += float((value * frac).sum())
                 notional = sold * fill
                 fee = fee_rate * notional
                 cash += float(notional.sum() - fee.sum())
@@ -388,7 +453,16 @@ def _simulate(
             pending = np.nan_to_num(w[j], nan=0.0)
             pending[forced] = np.nan  # decided on a market that ends at this close
 
-    return _Sim(equity, held, turnover, orders, fees_paid)
+    return _Sim(equity, held, turnover, orders, fees_paid, impact_cost)
+
+
+def _impact_at(
+    mkt: _Market, impact: ImpactModel, j: int, cols: np.ndarray, share: np.ndarray
+) -> np.ndarray:
+    """Impact fraction for fills of ``cols`` at row j; ``share`` = trade value / equity."""
+    if mkt.adv is None or mkt.sigma is None:
+        raise ValueError("impact given but the market was built without impact inputs")
+    return impact_fraction(share * impact.aum_usd, mkt.adv[j, cols], mkt.sigma[j, cols], impact)
 
 
 def _orders_frame(sim: _Sim, mkt: _Market) -> pd.DataFrame:
@@ -439,6 +513,7 @@ def run_portfolio(
     init_cash: float = 10_000.0,
     min_rebalance: float = 0.0,
     segment_starts: Mapping[str, pd.DatetimeIndex] | None = None,
+    impact: ImpactModel | None = None,
 ) -> PortfolioResult:
     """Backtest long-only target weights across many symbols (see the module docstring).
 
@@ -447,7 +522,8 @@ def run_portfolio(
     candle index with the sorted symbols as columns; a row is a decision at that row's close
     (all-NaN row = hold). ``segment_starts[symbol]`` lists the symbol's bar times where a new
     listing segment begins (never its first bar); the position is force-closed at the close
-    before each. Raises ``ValueError`` naming the bad input.
+    before each. ``impact`` adds the square-root participation cost (module docstring 4b) to
+    the net run only. Raises ``ValueError`` naming the bad input.
     """
     if not isinstance(candles_by_symbol, Mapping) or len(candles_by_symbol) == 0:
         raise ValueError("candles_by_symbol must be a non-empty Mapping[str, DataFrame]")
@@ -459,6 +535,8 @@ def run_portfolio(
     if not isinstance(costs, CostModel):
         raise ValueError(f"costs must be a CostModel, got {type(costs).__name__}")
     validate_costs(costs)
+    if impact is not None:
+        validate_impact(impact, costs)
     cash0 = _check_number("init_cash", init_cash, positive=True)
     band = _check_number("min_rebalance", min_rebalance, positive=False)
 
@@ -469,9 +547,9 @@ def run_portfolio(
     w = _check_weights(weights, index, symbols)
     segment_ends = _segment_end_rows(segment_starts, frames)
 
-    mkt = _build_market(frames, symbols, index, costs, segment_ends)
+    mkt = _build_market(frames, symbols, index, costs, segment_ends, impact)
     decision = (~np.isnan(w)).any(axis=1)
-    net = _simulate(mkt, w, decision, costs.fee_rate, mkt.slip, cash0, band)
+    net = _simulate(mkt, w, decision, costs.fee_rate, mkt.slip, cash0, band, impact)
     gross = _simulate(mkt, w, decision, 0.0, np.zeros_like(mkt.slip), cash0, band)
 
     held = pd.DataFrame(net.held, index=index, columns=pd.Index(symbols, name=weights.columns.name))
@@ -486,6 +564,7 @@ def run_portfolio(
         fees_paid=float(net.fees_paid),
         init_cash=cash0,
         segment_exits=_segment_exits(orders, frames),
+        impact_cost=float(net.impact_cost),
     )
 
 
@@ -511,6 +590,7 @@ def net_returns_for(
     init_cash: float = 10_000.0,
     min_rebalance: float = 0.0,
     segment_starts: Mapping[str, pd.DatetimeIndex] | None = None,
+    impact: ImpactModel | None = None,
 ) -> list[NetRun]:
     """Net per-bar returns and turnover of several weight frames on the same market, with
     exactly the semantics of :func:`run_portfolio` but building the market once and skipping
@@ -522,22 +602,27 @@ def net_returns_for(
     if not isinstance(costs, CostModel):
         raise ValueError(f"costs must be a CostModel, got {type(costs).__name__}")
     validate_costs(costs)
+    if impact is not None:
+        validate_impact(impact, costs)
     cash0 = _check_number("init_cash", init_cash, positive=True)
     band = _check_number("min_rebalance", min_rebalance, positive=False)
     index = frames[symbols[0]].index
     for s in symbols[1:]:
         index = index.union(frames[s].index)
     index = pd.DatetimeIndex(index, name="time")
-    mkt = _build_market(frames, symbols, index, costs, _segment_end_rows(segment_starts, frames))
+    mkt = _build_market(
+        frames, symbols, index, costs, _segment_end_rows(segment_starts, frames), impact
+    )
     out = []
     for weights in weights_list:
         w = _check_weights(weights, index, symbols)
         decision = (~np.isnan(w)).any(axis=1)
-        sim = _simulate(mkt, w, decision, costs.fee_rate, mkt.slip, cash0, band)
+        sim = _simulate(mkt, w, decision, costs.fee_rate, mkt.slip, cash0, band, impact)
         out.append(
             NetRun(
                 returns=pd.Series(_returns(sim.equity), index=index, name="returns"),
                 turnover=pd.Series(sim.turnover, index=index, name="turnover"),
+                impact_cost=float(sim.impact_cost),
             )
         )
     return out

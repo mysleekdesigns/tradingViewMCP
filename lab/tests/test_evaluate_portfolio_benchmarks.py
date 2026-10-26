@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from lab.data.universe import trailing_dollar_volume
+from lab.engine.costs import ImpactModel
 from lab.engine.portfolio import net_returns_for, run_portfolio
 from lab.evaluate.benchmarks import vol_target_buy_and_hold
 from lab.evaluate.portfolio_benchmarks import (
@@ -20,6 +22,7 @@ from lab.evaluate.portfolio_benchmarks import (
 )
 from lab.registry.cross_section import (
     close_panel,
+    liquidity_share,
     rebalance_rows,
     top_quantile_weights,
     trailing_return,
@@ -292,3 +295,325 @@ def test_vol_matched_null_is_calibrated_when_momentum_tilts_to_volatile_coins() 
     p = np.array(pvals)
     assert p.mean() > 0.3, p.mean()
     assert (p <= 0.1).mean() <= 0.25, p
+
+
+IMPACT = ImpactModel(coef=0.5, aum_usd=1e5, adv_days=10, vol_days=10, cap=0.05)
+
+
+def test_equal_weight_universe_passes_impact_through() -> None:
+    data = coins()
+    members = all_members(data)
+    sched = weekly(members.index)
+    plain = equal_weight_universe(data, members, sched, costs=COSTS)
+    hit = equal_weight_universe(data, members, sched, costs=COSTS, impact=IMPACT)
+    direct = run_portfolio(data, equal_weight_weights(members, sched), costs=COSTS, impact=IMPACT)
+    pd.testing.assert_series_equal(hit.equity, direct.equity)
+    assert hit.impact_cost == direct.impact_cost > 0
+    assert plain.impact_cost == 0.0
+    assert hit.equity.iloc[-1] / hit.init_cash < plain.equity.iloc[-1] / plain.init_cash
+    pd.testing.assert_series_equal(hit.gross_returns, plain.gross_returns)
+
+
+def test_random_selection_null_pays_the_same_impact_as_the_strategy() -> None:
+    data = coins(n=6)
+    members = all_members(data)
+    w = pd.DataFrame(np.nan, index=members.index, columns=members.columns)
+    w.loc[weekly(members.index).to_numpy()] = [1 / 3, 1 / 3, 1 / 3, 0.0, 0.0, 0.0]
+    kw = {"costs": COSTS, "n_paths": 5, "seed": 11}
+    plain = random_selection_null(data, w, members, "1d", **kw)  # type: ignore[arg-type]
+    hit = random_selection_null(data, w, members, "1d", impact=IMPACT, **kw)  # type: ignore[arg-type]
+    # Same seed -> same paths; impact only lowers every path's return.
+    assert np.all(hit.total_return < plain.total_return)
+    paths = [random_selection_weights(w, members, np.random.default_rng(11)) for _ in range(1)]
+    (first,) = net_returns_for(data, paths, costs=COSTS, impact=IMPACT)
+    assert metrics_from_returns(first.returns, "1d").total_return == pytest.approx(
+        hit.total_return[0], rel=1e-12
+    )
+
+
+# --------------------------------------------------------------------------- liquidity cap
+
+
+def frame(index: pd.DatetimeIndex, columns: pd.Index, rows: dict[int, list[float]]) -> pd.DataFrame:
+    out = pd.DataFrame(np.nan, index=index, columns=columns)
+    for i, vals in rows.items():
+        out.iloc[i] = vals
+    return out
+
+
+def test_capped_equal_weight_splits_sizable_members_and_keeps_the_excess_in_cash() -> None:
+    idx = pd.date_range("2024-01-01", periods=2, freq="D", tz="UTC", name="time")
+    members = pd.DataFrame({c: [True, True] for c in "ABCD"}, index=idx)
+    share = pd.DataFrame(
+        {"A": [0.5, 0.5], "B": [0.3, 0.3], "C": [0.2, 0.2], "D": [np.nan, np.nan]}, index=idx
+    )
+    sched = pd.Series([True, False], index=idx)
+    w = equal_weight_weights(members, sched, liquidity_share=share, liquidity_cap_mult=1.0)
+    # k = 3 (D has no share), 1/3 each, capped at 1.0 * share; 1/6 stays in cash.
+    np.testing.assert_allclose(w.iloc[0].to_numpy(), [1 / 3, 0.3, 0.2, 0.0], rtol=1e-15)
+    assert w.iloc[0].sum() == pytest.approx(5 / 6)
+    assert w.iloc[1].isna().all()
+    loose = equal_weight_weights(members, sched, liquidity_share=share, liquidity_cap_mult=1e6)
+    np.testing.assert_allclose(loose.iloc[0].to_numpy(), [1 / 3, 1 / 3, 1 / 3, 0.0])
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"liquidity_cap_mult": 2.0}, "together"),
+        ({"share": True}, "together"),
+        ({"share": True, "liquidity_cap_mult": 0.0}, "liquidity_cap_mult"),
+        ({"share": True, "liquidity_cap_mult": float("inf")}, "liquidity_cap_mult"),
+        ({"share": True, "liquidity_cap_mult": True}, "liquidity_cap_mult"),
+        ({"share": "short", "liquidity_cap_mult": 2.0}, "same index and columns"),
+    ],
+)
+def test_liquidity_cap_inputs_are_validated_everywhere(kwargs: dict, match: str) -> None:
+    data = coins()
+    members = all_members(data)
+    sched = weekly(members.index)
+    share = pd.DataFrame(0.25, index=members.index, columns=members.columns)
+    kw = dict(kwargs)
+    marker = kw.pop("share", None)
+    if marker is True:
+        kw["liquidity_share"] = share
+    elif marker == "short":
+        kw["liquidity_share"] = share.iloc[:-1]
+    strat = equal_weight_weights(members, sched)
+    with pytest.raises(ValueError, match=match):
+        equal_weight_weights(members, sched, **kw)
+    with pytest.raises(ValueError, match=match):
+        equal_weight_universe(data, members, sched, costs=COSTS, **kw)
+    with pytest.raises(ValueError, match=match):
+        random_selection_weights(strat, members, np.random.default_rng(0), **kw)
+    with pytest.raises(ValueError, match=match):
+        random_selection_null(data, strat, members, "1d", costs=COSTS, n_paths=2, seed=0, **kw)
+
+
+def test_capped_equal_weight_universe_runs_the_capped_weights() -> None:
+    data = coins()
+    members = all_members(data)
+    sched = weekly(members.index)
+    share = pd.DataFrame(
+        np.tile([0.6, 0.25, 0.1, 0.05], (len(members), 1)),
+        index=members.index,
+        columns=members.columns,
+    )
+    kw = {"liquidity_share": share, "liquidity_cap_mult": 2.0}
+    res = equal_weight_universe(data, members, sched, costs=COSTS, impact=IMPACT, **kw)
+    w = equal_weight_weights(members, sched, **kw)
+    direct = run_portfolio(data, w, costs=COSTS, impact=IMPACT)
+    pd.testing.assert_series_equal(res.equity, direct.equity)
+    # caps 1.2, 0.5, 0.2, 0.1 against 1/4: the two small coins bind, 20% stays in cash
+    assert w.loc[sched].sum(axis=1).to_numpy() == pytest.approx(0.8)
+    plain = equal_weight_universe(data, members, sched, costs=COSTS, impact=IMPACT)
+    assert res.impact_cost < plain.impact_cost
+
+
+LIQ = np.array([0.4, 0.3, 0.15, 0.1, 0.05, np.nan])  # C5 has no share: never drawn
+
+
+def six_coin_case() -> tuple[pd.DataFrame, pd.DataFrame]:
+    data = coins(6)
+    members = all_members(data)
+    share = pd.DataFrame(
+        np.tile(LIQ, (len(members), 1)), index=members.index, columns=members.columns
+    )
+    return members, share
+
+
+def test_capped_null_draws_sizable_names_and_caps_each_pick_like_the_strategy() -> None:
+    members, share = six_coin_case()
+    strat = frame(members.index, members.columns, {0: [0, 0, 0, 0.1, 0.05, 0], 7: [0.0] * 6})
+    # The strategy's two picks (C3, C4) are both capped (1/2 > 1.0 * share): pre-cap T = 1.
+    for seed in range(30):
+        path = random_selection_weights(
+            strat,
+            members,
+            np.random.default_rng(seed),
+            liquidity_share=share,
+            liquidity_cap_mult=1.0,
+        )
+        row = path.iloc[0].to_numpy()
+        picks = np.flatnonzero(row > 0)
+        assert len(picks) == 2 and 5 not in picks
+        np.testing.assert_array_equal(row[picks], np.minimum(0.5, LIQ[picks]))
+        assert row.sum() < 1.0  # the excess over the caps stays in cash
+        assert (path.iloc[7] == 0.0).all()
+
+
+def test_capped_null_reads_the_pre_cap_total_from_the_uncapped_names() -> None:
+    members, share = six_coin_case()
+    # 60% invested before caps: C0 uncapped at 0.3 (< 0.4), C4 capped at 0.05.
+    strat = frame(members.index, members.columns, {0: [0.3, 0, 0, 0, 0.05, 0]})
+    seen = set()
+    for seed in range(30):
+        path = random_selection_weights(
+            strat,
+            members,
+            np.random.default_rng(seed),
+            liquidity_share=share,
+            liquidity_cap_mult=1.0,
+        )
+        row = path.iloc[0].to_numpy()
+        picks = np.flatnonzero(row > 0)
+        seen.update(picks.tolist())
+        np.testing.assert_allclose(row[picks], np.minimum(0.3, LIQ[picks]), rtol=1e-12)
+    assert seen == {0, 1, 2, 3, 4}
+
+
+def test_capped_null_with_inverse_vol_reads_the_pre_cap_total() -> None:
+    members, share = six_coin_case()
+    vol = pd.DataFrame(0.02, index=members.index, columns=members.columns)
+    vol.iloc[:, 1] = 0.04
+    inv = np.array([50.0, 25.0])
+    pre = 0.9 * inv / inv.sum()  # [0.6, 0.3]: under the caps 0.8 and 0.6 (mult 2)
+    strat = frame(members.index, members.columns, {0: [pre[0], pre[1], 0, 0, 0, 0]})
+    for seed in range(30):
+        path = random_selection_weights(
+            strat,
+            members,
+            np.random.default_rng(seed),
+            inverse_vol=vol,
+            liquidity_share=share,
+            liquidity_cap_mult=2.0,
+        )
+        row = path.iloc[0].to_numpy()
+        picks = np.flatnonzero(row > 0)
+        raw = 1.0 / vol.iloc[0].to_numpy()[picks]
+        expect = np.minimum(0.9 * raw / raw.sum(), 2.0 * LIQ[picks])
+        np.testing.assert_allclose(row[picks], expect, rtol=1e-12)
+
+
+def test_null_with_a_cap_that_never_binds_matches_the_uncapped_null() -> None:
+    data = coins(6)
+    members = all_members(data)
+    share = pd.DataFrame(1 / 6, index=members.index, columns=members.columns)
+    strat = equal_weight_weights(members, weekly(members.index))
+    strat.loc[strat.notna().all(axis=1)] = [0.5, 0.5, 0.0, 0.0, 0.0, 0.0]
+    a = random_selection_weights(strat, members, np.random.default_rng(4))
+    b = random_selection_weights(
+        strat, members, np.random.default_rng(4), liquidity_share=share, liquidity_cap_mult=1e6
+    )
+    pd.testing.assert_frame_equal(a, b, rtol=1e-12)
+
+
+def test_null_reports_strategy_and_path_exposure() -> None:
+    members, share = six_coin_case()
+    data = coins(6)
+    strat = frame(
+        members.index,
+        members.columns,
+        {0: [0, 0, 0, 0.1, 0.05, 0], 7: [0.25, 0.25, 0, 0, 0, 0], 14: [0.0] * 6},
+    )
+    kw = {"costs": COSTS, "n_paths": 6, "seed": 3}
+    plain = random_selection_null(data, strat, members, "1d", **kw)  # type: ignore[arg-type]
+    assert plain.strategy_exposure == pytest.approx((0.15 + 0.5 + 0.0) / 3)
+    # Without a cap the null asks for the strategy's row sums exactly.
+    np.testing.assert_allclose(plain.exposure, plain.strategy_exposure)
+    capped = random_selection_null(
+        data, strat, members, "1d", liquidity_share=share, liquidity_cap_mult=1.0, **kw
+    )  # type: ignore[arg-type]
+    assert capped.exposure.shape == (6,)
+    assert capped.strategy_exposure == plain.strategy_exposure
+    # Row 0: T = 1 (both capped) -> two picks at min(0.5, share). Row 7: T = 0.5 (uncapped
+    # 0.25 each) -> two picks at min(0.25, share). Exposure follows the names drawn.
+    paths = [
+        random_selection_weights(
+            strat,
+            members,
+            np.random.default_rng(3),
+            liquidity_share=share,
+            liquidity_cap_mult=1.0,
+        )
+    ]
+    first = paths[0].iloc[[0, 7, 14]].sum(axis=1).mean()
+    assert capped.exposure[0] == pytest.approx(first, rel=1e-12)
+    default = RandomSelectionNull(np.zeros(1), np.zeros(1), np.zeros(1), n_paths=1, seed=0)
+    assert default.exposure.size == 0 and np.isnan(default.strategy_exposure)
+
+
+def capped_no_skill(
+    seed: int, n_coins: int, bars: int, mult: float = 2.0
+) -> tuple[dict, pd.DataFrame, pd.DataFrame, dict]:
+    """Driftless iid coins whose dollar volume is log-spaced from $5M to $2B a day (so the
+    cap binds on the small ones), 28-day momentum top quintile, weekly, liquidity-capped."""
+    rng = np.random.default_rng(seed)
+    adv = np.exp(np.linspace(np.log(5e6), np.log(2e9), n_coins))
+    data = {}
+    for k in range(n_coins):
+        c = make_candles(bars, seed=seed * 100 + k, interval="1d", start="2023-01-01", vol=0.04)
+        c["volume"] = adv[k] / c["close"] * rng.uniform(0.7, 1.3, len(c))
+        data[f"C{k:02d}USDT"] = c
+    closes = close_panel(data)
+    members = closes.notna() & (np.arange(len(closes))[:, None] >= 40)
+    dv = trailing_dollar_volume(data, window_days=30)[closes.columns]
+    kw = {"liquidity_share": liquidity_share(dv, members), "liquidity_cap_mult": mult}
+    sched = rebalance_rows(closes.index, every=7, offset=40)
+    w = top_quantile_weights(trailing_return(closes, 28), members, sched, quantile=0.2, **kw)
+    return data, members, w, kw
+
+
+# A $50M book: with the old null (cap ignored, the strategy's post-cap total spread equally)
+# the fast test below gave mean p 0.21 and 6 of 24 seeds at p <= 0.05; with the fix 0.42 and 0.
+CAL_IMPACT = ImpactModel(coef=1.0, aum_usd=5e7, adv_days=30, vol_days=30, cap=0.05)
+
+
+def capped_p_values(seeds: range, n_coins: int, bars: int, n_paths: int) -> np.ndarray:
+    pvals = []
+    for seed in seeds:
+        data, members, w, kw = capped_no_skill(seed, n_coins, bars)
+        res = run_portfolio(data, w, costs=COSTS, impact=CAL_IMPACT)
+        null = random_selection_null(
+            data,
+            w,
+            members,
+            "1d",
+            costs=COSTS,
+            n_paths=n_paths,
+            seed=seed,
+            impact=CAL_IMPACT,
+            **kw,
+        )
+        pvals.append(null.p_value(metrics_from_returns(res.returns, "1d").sharpe))
+    return np.array(pvals)
+
+
+def test_cap_binds_in_the_null_and_in_equal_weight() -> None:
+    _, members, w, kw = capped_no_skill(0, n_coins=20, bars=200)
+    share = kw["liquidity_share"].to_numpy()
+    sched = w.notna().any(axis=1).to_numpy()
+    assert w.loc[sched].sum(axis=1).max() < 1.0  # the strategy itself is capped
+    path = random_selection_weights(w, members, np.random.default_rng(1), **kw)
+    p = path.to_numpy()[sched]
+    k = (w.to_numpy()[sched] > 0).sum(axis=1)
+    held = p > 0
+    assert (held.sum(axis=1) == k).all()  # breadth matched
+    limit = np.minimum(1.0 / k[:, None], 2.0 * share[sched])
+    np.testing.assert_allclose(p[held], limit[held], rtol=1e-12)  # T = 1, every pick capped
+    assert (p[held] < 1.0 / np.broadcast_to(k[:, None], p.shape)[held]).mean() > 0.5
+    ew = equal_weight_weights(members, pd.Series(sched, index=members.index), **kw)
+    assert ew.loc[sched].sum(axis=1).max() < 1.0
+
+
+def test_capped_null_is_calibrated_for_a_no_skill_strategy_with_impact() -> None:
+    """Reviewer finding: a null that spread the capped strategy's total equally over random
+    coins held illiquid coins at full weight and paid far more impact, so no-skill capped
+    momentum came out significant (probe: mean p 0.22, 5 of 12 seeds p <= 0.05). Replicating the
+    strategy's cap on the random names restores calibration. Fast version; the slow one runs
+    more seeds and paths."""
+    p = capped_p_values(range(24), n_coins=20, bars=300, n_paths=20)
+    assert 0.35 < p.mean() < 0.65, p
+    # 20 paths: p <= 0.05 only when no path beats the strategy, chance 1/21 per seed; 24
+    # seeds expect ~1.1 and P(>= 5) is under 1%.
+    assert (p <= 0.05).sum() <= 4, p
+    assert (p <= 0.10).sum() <= 6, p  # chance 2/21 per seed, ~2.3 expected
+
+
+@pytest.mark.slow
+def test_capped_null_is_calibrated_for_a_no_skill_strategy_with_impact_slow() -> None:
+    p = capped_p_values(range(80), n_coins=30, bars=600, n_paths=40)
+    assert 0.4 < p.mean() < 0.6, p
+    # 40 paths: chance of p <= 0.05 is 2/41 per seed; 80 seeds expect ~3.9, P(>= 10) < 1%.
+    assert (p <= 0.05).sum() <= 9, p
+    assert (p <= 0.10).mean() <= 0.17, p

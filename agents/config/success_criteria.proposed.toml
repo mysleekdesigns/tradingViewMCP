@@ -31,3 +31,19 @@ max_proposals = 15                  # distinct plans submitted for a backtest
 max_backtests = 3000                # ledger trials under the run, Optuna trials included
 max_holdout_checks = 1              # also capped by lab.toml holdout_budget (3)
 max_usd = 20.0                      # model spend cap for an autonomous run
+
+# Portfolio (multi-coin) plans, PLAN.md Phase 10 ("kind": "portfolio"). Optional extra bars,
+# frozen with the rest at start_run when present. Without this table a portfolio plan's three
+# portfolio rows read "missing", so it can never pass the pre-holdout bar (fail closed). The
+# owner opts in by uncommenting the table below in lab/config/success_criteria.toml.
+# For portfolio plans the [criteria] above are read as: min_trades = REBALANCES with at least
+# one fill (a rebalanced book has no discrete trades; weekly over the design window is ~300),
+# beat_buy_hold / beat_vol_target = BTC buy-and-hold / vol-targeted BTC, and
+# random_entry_percentile_min = the random-selection null (same members, breadth, turnover,
+# weighting, vol terciles and liquidity caps); every benchmark is scored from the plan's first
+# decision. cost_stress_factor scales fees, slippage AND participation impact.
+#
+# [portfolio]
+# beat_equal_weight = true            # the selection must beat simply owning the liquid universe (equal weight, same schedule, costs and caps)
+# alpha_p_max = 0.05                  # net alpha to BTC significant at 5% (Newey-West HAC t-test): a long-only top quintile mostly carries BTC's beta
+# alpha_min_annual = 0.0              # and positive; the size bar is the significance test above plus the Sharpe criteria (costs already deducted), not a guessed hurdle

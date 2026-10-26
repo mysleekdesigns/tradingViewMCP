@@ -92,3 +92,54 @@ def perturb_after(candles: pd.DataFrame, t: int, *, seed: int = 99) -> pd.DataFr
     # Future tradable flags change too, so a feature that peeks at later suspensions fails.
     out.iloc[t + 1 :, out.columns.get_loc("tradable")] = rng.random(k) > 0.2
     return out
+
+
+def make_universe_candles(
+    *,
+    start: str = "2019-01-01",
+    n: int = 900,
+    seed: int = 11,
+    drift: float = 0.002,
+) -> dict[str, pd.DataFrame]:
+    """A small seeded multi-coin daily universe for portfolio tests (offline, no network).
+
+    Eight ``*USDT`` coins with different drifts, volatilities and time-varying dollar volume,
+    so liquidity ranks and momentum ranks both change over time. Special cases:
+
+    * ``BTCUSDT`` trades every day (the market benchmark);
+    * ``DEADUSDT`` stops printing after 400 days (a delisting);
+    * ``GAPUSDT`` rallies into a 40-day hole from day 300 and reopens 10x higher (a new listing
+      segment, e.g. a redenomination), so a momentum book holds it into the break.
+
+    Dollar volume is ~1e8-1e9 a day, so participation impact on a 1M book stays small.
+    """
+    specs = {
+        "AAAUSDT": (drift * 1.5, 0.030, 3.0),
+        "BBBUSDT": (drift * 0.5, 0.025, 2.0),
+        "BTCUSDT": (drift, 0.020, 8.0),
+        "CCCUSDT": (-drift * 0.5, 0.035, 2.5),
+        "DEADUSDT": (-drift, 0.040, 1.5),
+        "EEEUSDT": (drift * 2.0, 0.045, 1.0),
+        "FFFUSDT": (0.0, 0.030, 1.2),
+        "GAPUSDT": (drift * 3.0, 0.040, 2.2),
+    }
+    rng = np.random.default_rng(seed)
+    out: dict[str, pd.DataFrame] = {}
+    for k, (symbol, (mu, vol, liq)) in enumerate(specs.items()):
+        c = make_candles(n, seed=seed + k, interval="1d", start=start, vol=vol, drift=mu)
+        level = np.exp(np.cumsum(rng.normal(0.0, 0.05, n)))
+        c["volume"] = c["volume"] * liq * 1e6 * level / c["close"].to_numpy()
+        if symbol == "DEADUSDT":
+            c = c.iloc[:400]
+        if symbol == "GAPUSDT":
+            ramp = np.exp(0.012 * np.clip(np.arange(n) - 250, 0, 50))  # momentum into the hole
+            for col in ("open", "high", "low", "close"):
+                c[col] = c[col] * ramp
+            c["volume"] = c["volume"] / ramp
+            after = c.iloc[340:].copy()
+            for col in ("open", "high", "low", "close"):
+                after[col] = after[col] * 10.0
+            after["volume"] = after["volume"] / 10.0
+            c = pd.concat([c.iloc[:300], after])
+        out[symbol] = c
+    return out

@@ -42,11 +42,16 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 from lab.plan import checked_expressions, parse_plan
-from lab.types import Plan
+from lab.plan import portfolio as pf
+from lab.plan.validator import PlanValidationError
+from lab.types import Plan, PlanError
 
 __all__ = [
     "LOGIC_VERSION",
+    "PORTFOLIO_LOGIC_VERSION",
     "alias_map",
+    "any_logic_hash",
+    "as_portfolio_plan",
     "canonical_param_key",
     "canonical_space",
     "feature_multiset",
@@ -54,6 +59,7 @@ __all__ = [
     "logic_hash",
     "logic_payload",
     "param_match_tokens",
+    "portfolio_logic_hash",
 ]
 
 # Bump if the canonical form changes (old and new hashes never compare). v2 dropped the interval.
@@ -236,3 +242,60 @@ def feature_multiset(plan: Plan | Mapping[str, Any] | str) -> tuple[str, ...]:
     with the same multiset can trade alike after a no-op clause; used to fail closed when their
     returns cannot be compared."""
     return tuple(sorted(f.feature for f in _as_plan(plan).features))
+
+
+# --------------------------------------------------------------------------- portfolio plans
+
+# Bump if the portfolio canonical form changes (old and new hashes never compare).
+PORTFOLIO_LOGIC_VERSION = 1
+
+
+def as_portfolio_plan(plan: pf.PortfolioPlan | Mapping[str, Any] | str) -> pf.PortfolioPlan:
+    """A validated :class:`~lab.plan.portfolio.PortfolioPlan` from a plan object, dict, or JSON
+    text, checked against the plan's own ``interval`` (a stored plan is canonical JSON; the
+    universe interval is enforced where the plan is submitted). Raises
+    :class:`~lab.plan.validator.PlanValidationError` when it is not a valid portfolio plan."""
+    if isinstance(plan, pf.PortfolioPlan):
+        return plan
+    raw: Any = plan
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, RecursionError) as exc:
+            raise PlanValidationError([PlanError("$", f"not JSON: {exc}")]) from exc
+    if not pf.is_portfolio_plan(raw):
+        raise PlanValidationError([PlanError("kind", "not a portfolio plan")])
+    interval = raw.get("interval")
+    if not isinstance(interval, str):
+        raise PlanValidationError([PlanError("interval", "missing")])
+    res = pf.validate_portfolio_plan(raw, interval=interval)
+    if res.plan is None:
+        raise PlanValidationError(
+            [PlanError(*(e.split(": ", 1) if ": " in e else ("$", e))) for e in res.errors]
+        )
+    return res.plan
+
+
+def portfolio_logic_hash(plan: pf.PortfolioPlan | Mapping[str, Any] | str) -> str:
+    """sha256 hex of ``{"v", "kind": "portfolio", "logic": plan_logic(plan)}``: what the plan
+    does with every number removed (score feature, weighting scheme, banding on/off, gate
+    on/off; :func:`lab.plan.portfolio.plan_logic`). The universe is not part of it (it comes
+    from lab.toml, like a fixed market), so one portfolio logic is one hypothesis whatever the
+    universe size, and the interval is not either (as for single-symbol plans). Plans whose
+    logic strings differ but that trade alike (a no-op band or gate) are joined by the
+    behaviour family's return correlation (:mod:`lab.research.family`)."""
+    p = as_portfolio_plan(plan)
+    payload = {"v": PORTFOLIO_LOGIC_VERSION, "kind": pf.PORTFOLIO_KIND, "logic": pf.plan_logic(p)}
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _is_portfolio(plan: object) -> bool:
+    return isinstance(plan, pf.PortfolioPlan) or pf.is_portfolio_plan(plan)
+
+
+def any_logic_hash(plan: Plan | pf.PortfolioPlan | Mapping[str, Any] | str) -> str:
+    """:func:`portfolio_logic_hash` for a portfolio plan, else :func:`logic_hash`."""
+    if _is_portfolio(plan):
+        return portfolio_logic_hash(plan)  # type: ignore[arg-type]
+    return logic_hash(plan)  # type: ignore[arg-type]
