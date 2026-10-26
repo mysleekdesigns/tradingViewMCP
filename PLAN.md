@@ -721,12 +721,12 @@ found" report, with every trial in the ledger.
 ## Phase 9 — Polish & Desktop App (Optional)
 
 ### Checklist
-- [ ] Multi-chart layouts (1, 2, 4 charts) with optional symbol/crosshair sync
-- [ ] **Bar replay**: step or play history forward bar by bar (also a manual look-ahead check for indicators)
-- [ ] **Manual paper trading** panel: pretend balance, market/limit orders, positions, P&L, on live or replayed prices
-- [ ] Seconds and custom timeframes (aggregate from trades/1m data)
+- [x] Multi-chart layouts (1, 2, 4 charts) with optional symbol/crosshair sync
+- [x] **Bar replay**: step or play history forward bar by bar (also a manual look-ahead check for indicators)
+- [x] **Manual paper trading** panel: pretend balance, market/limit orders, positions, P&L, on live or replayed prices
+- [x] Seconds and custom timeframes (aggregate from trades/1m data)
 - [x] Seasonals view (monthly/weekday return tables per symbol)
-- [ ] Regime ribbon overlay from hedgeFund's engine (filtered, never back-dated)
+- [x] Regime ribbon overlay from hedgeFund's engine (filtered, never back-dated)
 - [x] Keyboard shortcuts (timeframe keys, Esc to cancel drawing, Delete to remove)
 - [x] Light/dark theme toggle
 - [x] Settings page (default provider, colors, timezone)
