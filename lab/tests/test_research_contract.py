@@ -272,7 +272,9 @@ def test_start_research_run_snapshots_the_lab_config(ledger: Ledger, tmp_path: P
         "optuna_seed",
         "init_cash",
         "research",
+        "universe",
     }
+    assert values["universe"]["top_n"] == cfg.universe.top_n
     assert values["optuna_seed"] == cfg.optuna_seed
     assert values["research"] == {
         "family_return_corr": cfg.research.family_return_corr,
@@ -361,3 +363,16 @@ def test_check_lab_fingerprint_refuses_runs_without_one_and_unknown_runs(
         check_lab_fingerprint(ledger, bare, small_cfg(tmp_path))
     with pytest.raises(ValueError, match="never started"):
         check_lab_fingerprint(ledger, "nope", small_cfg(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda c: replace(c, universe=replace(c.universe, top_n=20)),
+        lambda c: replace(c, universe=replace(c.universe, exclude_bases=("USDC",))),
+        lambda c: replace(c, universe=replace(c.universe, relist_jump=10.0)),
+    ],
+)
+def test_lab_fingerprint_covers_the_universe(tmp_path: Path, change: Any) -> None:
+    cfg = small_cfg(tmp_path)
+    assert lab_fingerprint(change(cfg))["fingerprint"] != lab_fingerprint(cfg)["fingerprint"]

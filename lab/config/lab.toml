@@ -59,8 +59,8 @@ host = "127.0.0.1"               # local only
 port = 8788                      # server/ uses 8787
 
 [universe]
-# Point-in-time multi-coin universe (lab.data.universe_build). Not part of the research-run
-# fingerprint yet: no plan type reads it until the owner adds portfolio backtests.
+# Point-in-time multi-coin universe (lab.data.universe_build). Part of the research-run
+# fingerprint: changing top_n or an exclusion mid-run would be an unledgered trial.
 quote = "USDT"                   # Binance's deepest spot books; nearly every listed coin has a USDT pair
 interval = "1d"                  # cross-sectional momentum ranks multi-week returns and rebalances weekly
 archive_list_url = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"  # S3 listing behind data.binance.vision; keeps delisted symbols

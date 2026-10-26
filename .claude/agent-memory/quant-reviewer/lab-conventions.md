@@ -69,3 +69,8 @@ Phase 9 (verified on 2026-10-26):
 
 **Why:** saves re-deriving these on each review.
 **How to apply:** verify quickly (grep) before relying on any item; code may have moved.
+
+Phase 10 portfolio engine (lab/lab/engine/portfolio.py), verified 2026-10-26:
+- Hand example (60/40, fee 0.1%, flat slip 0.05%) matches to the cent; budget includes fee (units = b/(fill(1+fee))), cash -= b exactly. 150-universe fuzz (holes, untradable, delistings, band 0/0.02): order-replayed cash never < 0, fees == sum(order fees), no units after a delisting, net_returns_for bit-equal to run_portfolio.
+- Forced delisting exit at the symbol's last bar close (slipped, fee) and cancel of same-close decisions: honest; a buy filling at the last bar's open pays the round trip. Mixed ms/us/ns indexes union/reindex fine (pandas 3). BTC vol-target reindex fill 0 preserves compounded return.
+- Cross-section perturbation tests have teeth (price shock, deleted bars, truncation, late listing, sanity test that later outputs change). Segment breaks in universe require a hole (relist_gap_days 30 or hole + 5x jump), eligibility needs 365 d since segment start, so a 28-row lookback across a break is always masked.

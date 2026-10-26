@@ -50,6 +50,9 @@ def lab_values(cfg: LabConfig) -> dict[str, Any]:
         "optuna_seed": int(cfg.optuna_seed),
         "init_cash": float(cfg.init_cash),
         "research": asdict(cfg.research),
+        "universe": {
+            k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(cfg.universe).items()
+        },
     }
 
 

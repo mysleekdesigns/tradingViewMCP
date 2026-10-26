@@ -732,8 +732,8 @@ found" report, with every trial in the ledger.
 - [x] Settings page (default provider, colors, timezone)
 - [x] Screenshot/export chart as PNG (`chart.takeScreenshot()`)
 - [x] Add a second provider (Coinbase) to prove the provider abstraction
-- [ ] Wrap in **Tauri** (`npm create tauri-app`) with the server as a sidecar
-- [ ] App icon + menu bar; launch at login (optional)
+- [ ] Wrap in **Tauri** (`npm create tauri-app`) with the server as a sidecar — **deferred by the owner 2026-10-26** (needs the Rust toolchain; not planned for now)
+- [ ] App icon + menu bar; launch at login (optional) — **deferred by the owner 2026-10-26**
 
 ---
 
@@ -749,14 +749,137 @@ survivorship-free, point-in-time multi-coin universe and a portfolio backtest. I
 ### Checklist
 - [x] Point-in-time universe data layer (`lab/lab/data/listing.py`, `universe.py`, `universe_build.py`): every archive symbol including delisted ones, stablecoin/fiat/leveraged exclusions from `lab.toml [universe]`, one year of seasoning restarted after a relisting gap, trailing dollar-volume rank, perturbation-tested
 - [x] Daily klines for every selected USDT coin downloaded and the universe table built (`uv run python -m lab.data.universe_build symbols|download|build`), manifest reviewed
-- [ ] **(owner)** Portfolio backtest in `lab/lab/engine/`: target weights at t's close filled at t+1's open, per-asset costs on traded value, a held coin that stops printing exits at its last close (delisting return), cash when fewer coins qualify
-- [ ] **(owner)** Cross-sectional features in `lab/lab/registry/` (trailing return rank within the eligible set) with perturbation tests
-- [ ] **(owner)** Portfolio benchmarks and criteria: equal-weight universe, vol-targeted BTC, random-selection null with the same turnover; `[universe]` added to the research-run fingerprint
-- [ ] Portfolio plan type through `validate_plan` / `run_backtest` / `walk_forward` / ledger families, then one pre-registered H1 run
+- [x] **(owner)** Portfolio backtest in `lab/lab/engine/`: target weights at t's close filled at t+1's open, per-asset costs on traded value, a held coin that stops printing exits at its last close (delisting return), cash when fewer coins qualify
+- [x] **(owner)** Cross-sectional features in `lab/lab/registry/` (trailing return rank within the eligible set) with perturbation tests
+- [x] **(owner)** Portfolio benchmarks: equal-weight universe, vol-targeted BTC, random-selection null matched on dates, breadth, exposure, turnover, weighting and volatility tercile; `[universe]` added to the research-run fingerprint
+- [ ] Portfolio plan type through `validate_plan` / `run_backtest` / `walk_forward` / ledger families and success criteria (portfolio benchmarks in `get_report`, universe manifest sha256 frozen into the run, all benchmarks scored from the strategy's first decision row, segment-end exits listed), then one pre-registered H1 run
+
+### Safeguards before the H1 run (added 2026-10-26)
+
+Why: an open February 2026 study of 20-day cross-sectional crypto momentum on 25 liquid coins
+(2020–2026, 20 bps one-way costs) found significant alpha in 2020–22, none in 2023–24, and losses
+in 2025–26, with cross-sectional dispersion down 38% after 2022; its 1-day reversal had a t-stat of
+4.6 out of sample and still lost 28% a year to 138% daily turnover. Turnover and regime are the
+first-order risks for H1, so they are measured and controlled before the run, not after
+(`agents/research/reports/Project improvement research.md`, section 3).
+
+- [ ] **(owner)** Cross-sectional dispersion feature in `lab/lab/registry/cross_section.py` (cross-sectional std of trailing returns among eligible coins at row t, perturbation-tested) and logged per rebalance in the portfolio run so the critic can see whether any edge lives only in high-dispersion periods; optional dispersion gate in the portfolio plan type
+- [ ] **(owner)** Liquidity-aware weights: cap each coin's target weight by its share of trailing dollar volume (`lab.toml [universe]` setting, frozen into the run fingerprint)
+- [ ] **(owner)** Rank banding: a coin enters the top quintile only when its rank crosses the boundary by a margin and leaves only when it falls below a wider one (hysteresis), so weekly rebalances do not churn the edge of the quintile
+- [ ] **(owner)** Participation cost term in `lab/lab/engine/costs.py` for portfolio runs: square-root market impact on traded value divided by the coin's trailing dollar volume, added to the existing fee + volatility-scaled slippage; BTC/ETH single-symbol costs unchanged
+- [ ] H1 report decomposes returns into alpha and beta to BTC (full period and rolling 60-day), since a long-only top quintile carries most of BTC's beta; the journal says "no edge found" if the alpha is not significant after costs
 
 **Done when:** H1 has been run once, end to end, through the same ledgered pipeline and success
-criteria as single-symbol plans, and the outcome (most likely "no edge found") is written up in
-the journal.
+criteria as single-symbol plans, with the dispersion, liquidity and banding safeguards in place,
+and the outcome (most likely "no edge found") is written up in the journal.
+
+---
+
+## Phase 11 — Lab Statistics v2 (owner, lab lock)
+
+Why: every item here changes how a result is judged, so every item is owner-only while
+`.claude/lab.lock` exists. The lab's Deflated Sharpe Ratio counts *nominal* trials: after three
+research runs N is 2,479 plans, which puts the bar near Sharpe 1.7, above anything published for
+crypto. A 2026 review of about 92,500 fully costed strategies (50,000 crypto across 20 pairs) found
+the 50,000 crypto trials were worth about 434 independent bets once trial correlation was counted,
+and the single best strategy had a DSR of 0.029. Counting *effective* trials keeps the bar honest
+and reachable. The MIT library `purgedcv` implements effective-N, CPCV paths, PBO, PSR, minimum
+backtest length and an Optuna trial recorder, and is a second implementation to test our own
+statistics against (report section 1).
+
+### Checklist
+- [ ] **(owner)** `effective_n_trials` in `lab/lab/stats/`: eigenvalue participation ratio of the design-window return correlation matrix of ledgered plans, per run and across runs, with unit tests on constructed cases (identical plans → 1; independent plans → N)
+- [ ] **(owner)** `get_report` shows nominal N and effective N side by side; `success_criteria.toml` gains a `dsr_trial_count = "nominal" | "effective"` key that is frozen into the ledger at `start_run` (the current runs stay on nominal; the choice is a pre-run decision, never changed mid-run)
+- [ ] **(owner)** Minimum backtest length (MinBTL) and minimum track record length (from the Probabilistic Sharpe Ratio) in `get_report`, so a plan with too few bars is rejected for that stated reason
+- [ ] **(owner)** Combinatorial Purged Cross-Validation (CPCV) in `lab/lab/engine/splits.py` as an *additional* validator beside walk-forward: C(N,K) purged, embargoed folds reconstructed into several out-of-sample paths, reported as a distribution of OOS Sharpe per plan; every path's backtests are ledgered; DSR still deflates by configurations searched, not paths
+- [ ] **(owner)** Second-implementation tests: `purgedcv` added as a dev dependency and `tests/test_stats_crosscheck.py` compares our DSR, PSR, expected-max-Sharpe and CSCV PBO against it on fixed inputs (tolerance documented), the way engine accounting is tested against hand examples
+- [ ] **(owner)** Run fingerprint (`lab/lab/research/runs.py::lab_values`) records `optuna.__version__`, `vectorbt.__version__`, and the explicit sampler settings (Optuna 5.0 turned multivariate TPE and constant liar on by default), so a rerun months later is comparable
+- [ ] Quant review of the whole phase, then `/run-gate 11`
+
+**Done when:** `get_report` for an existing ledgered plan shows nominal N, effective N, MinBTL,
+MinTRL and a CPCV path distribution; the cross-check tests against `purgedcv` pass; and a research
+run started after the change freezes its `dsr_trial_count` choice in the ledger.
+
+---
+
+## Phase 12 — Derivatives Data as Risk Filters
+
+Why: the strategy report's hypothesis H3 (funding and basis as a crash-risk or exposure filter on
+spot long-only plans) was parked because it seemed to need futures access. It does not for
+research: Binance's public archive (`data.binance.vision`, verified 2026-10-26) holds USDⓈ-M
+`fundingRate`, `premiumIndexKlines`, `markPriceKlines`, `indexPriceKlines`, `bookTicker` and
+`aggTrades` (monthly) and daily `metrics` (open interest, OI value, top-trader and global
+long/short ratios, taker buy/sell ratio at 5-minute resolution) from 2020-09-01, each zip with a
+`.CHECKSUM`. No futures account and no non-US IP is needed. Live futures streams for US IPs are a
+separate question; nothing in the chart depends on them here (report section 2).
+
+### Checklist
+- [ ] Archive downloader for `futures/um` `fundingRate`, `premiumIndexKlines`, `markPriceKlines`, `indexPriceKlines` (monthly) and `metrics` (daily) → Parquet under `lab/data/derivatives/` (gitignored), checksums verified, manifest with first/last timestamps per series, gaps recorded as gaps (never forward-filled); extend `lab/lab/data/archive.py` rather than copying it
+- [ ] Alignment module: each derivatives series aligned to the spot bar's *close* using the archive's own timestamps (a funding settlement or OI row is visible only at bars whose close is at or after its timestamp), unit-tested with a shifted-timestamp case
+- [ ] **(owner)** Registry features: `funding_rate`, `funding_zscore` (trailing window), `premium_index`, `basis_pct` (mark vs index), `oi_change` (trailing % change), `long_short_ratio`, each with the known-value test and the perturbation (no-look-ahead) test; feature docs say "exposure or crash-risk filter, not a direction signal"
+- [ ] `validate_plan` accepts the new features on spot long-only plans as gating clauses (e.g. `funding_zscore < 2`), and the derivatives manifest sha256 joins the research-run fingerprint
+- [ ] Research page / chart: optional funding and open-interest panes from the lab's Parquet (historical only; no live futures stream)
+- [ ] One pre-registered H3 run through the normal pipeline (criteria and budget written first, `strategy-critic` review, at most the budgeted holdout check), written up in the journal whatever the outcome
+
+**Done when:** BTCUSDT funding, premium index and open interest are downloadable, aligned to spot
+bars with the perturbation test passing, selectable in a plan, and H3 has been run once end to end
+with its result (most likely "no edge found") in the journal.
+
+---
+
+## Phase 13 — Research Agents v2
+
+Why: the Agent SDK (pinned 0.2.174) added structured outputs, nested background subagents with
+depth/concurrency caps, `defer` and `updatedToolOutput` hooks, and tool search on by default; some
+defaults changed twice in autumn 2026, so caps must be set explicitly. A 2026 study of 856 MCP tools
+found 97% of tool descriptions deficient (56% without a stated purpose) and measured a median
++5.85-point task-success gain from adding purpose, guidelines, limitations and parameter
+explanations, with compact variants keeping most of the gain. The "Agentic Trading" survey (77
+studies) found only 2 of 19 closed-loop studies reported time-consistent splits and 1 of 19 a cost
+model, and proposes a seven-item reporting checklist. The forward test also needs a frozen
+acceptance rule so "consistent with the backtest" is a number (report sections 4 and 5).
+
+### Checklist
+- [ ] Structured outputs: Designer returns plan JSON against the plan schema and Critic returns a `{verdict, reasons, evidence}` schema via `output_format={"type": "json_schema", ...}` (draft-07); invalid outputs are retried by the SDK and counted toward the proposal budget; dry-run test covers a deliberately invalid output
+- [ ] Subagent caps set explicitly in `agents/research/sdk_runner.py`: `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1`, `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` small, `permission_mode` explicit (already), and a note that `max_budget_usd` counts subagent spend; the dry run asserts the `init` message lists every `strategy-lab` tool (tool search is on by default; set `ENABLE_TOOL_SEARCH=false` for the Designer if any tool is missing)
+- [ ] Prompt-injection screening moved into a `PostToolUse` hook (`updatedToolOutput`) on the Scout's web tools, so scraped text is screened before the model sees it; Python heuristics and Jev stay as the screen, fail-open as today
+- [ ] `strategy-lab` MCP tool description audit against the rubric (purpose, when to use, when not to, each parameter, one short example, limits), kept compact; `tests/test_mcp_descriptions.py` checks every tool has each component
+- [ ] Reporting checklist header in the journal's end-of-run report: data and universe, time split and leakage, action semantics, execution and costs, leakage audit, artifacts, adaptation; each line names the ledger/run fields that prove it
+- [ ] Per-run ledger hash chain: each trial's record hashes the previous trial's hash; `get_ledger` can verify the chain (tamper evidence for the journal's "every trial in the ledger")
+- [ ] Idea library failure tags: when a plan is abandoned, the Critic's reason is stored as a tag (`cost_bound`, `regime_only`, `few_trades`, `beta_only`, `parameter_spike`, ...), and the Designer prompt includes the failure tags of the idea's family before proposing
+- [ ] Pre-registered paper-trade protocol in `agents/paper_trade.py prepare`: writes to the journal, before the first dry-run trade, the expected trade count and exposure with tolerances, a per-trade implementation-shortfall tolerance against the lab's modelled fill, and a minimum-track-record stopping rule from the candidate's claimed Sharpe; `compare` evaluates against that frozen protocol and declares pass / fail / continue; freqtrade `--dry-run` stays the venue (the Binance Spot Testnet retires endpoints aggressively and wipes accounts on reset)
+- [ ] Code review of `agents/` and quant review of the protocol arithmetic, then `/run-gate 13`
+
+**Done when:** a `--dry-run` research run completes with structured Designer/Critic outputs, the
+tool list assertion and the hash-chain verification passing, the journal report carries the
+checklist header, and `paper_trade.py prepare` writes a frozen protocol that `compare` evaluates.
+
+---
+
+## Phase 14 — Chart Upgrades (Lightweight Charts 5.2)
+
+Why: the app is on Lightweight Charts 5.2.1 but uses none of the features added since 5.0:
+series hit testing (5.2, `hoveredItem` / `hoveredTarget`, `hoveredSeriesOnTop`), data conflation
+for very long datasets (5.1, `enableConflation`, off by default), `takeScreenshot({ addTopLayer,
+includeCrosshair })` (5.0.9), and the pane API additions (5.0.8). TradingView published official
+plugin packages on 2026-09-16 (`@tradingview/lwc-toolkit`, `lwc-plugin-*`, `create-lwc-plugin`)
+and an Agent Skill for AI assistants (5.2.1). The MIT library `lightweight-charts-drawing` (v0.2)
+ships 86 TradingView-style drawing tools with export/import JSON and leaves undo, storage and
+toolbars to the host; its 0.x API broke between 0.1 and 0.2, so it is evaluated, not assumed
+(report section 6).
+
+### Checklist
+- [ ] PNG export includes drawings: check whether `web/src/chart/screenshot.ts` loses top-layer primitives today; if so pass `addTopLayer: true` (and optionally `includeCrosshair`) and add a test
+- [ ] Data conflation enabled for long histories and the seconds/custom timeframes (`enableConflation`, threshold tuned), with a no-regression test on indicator values (conflation is render-only; indicators still compute on every bar)
+- [ ] Series hit testing from 5.2 for the indicator legend and drawing selection (`hoveredItem` / `hoveredTarget`), replacing manual nearest-series lookups where present; `hoveredSeriesOnTop` on
+- [ ] Official plugin packages adopted where they replace hand-written code: `lwc-plugin-vertical-line`, `lwc-plugin-anchored-text`, `lwc-plugin-accessibility`; the repo's Lightweight Charts Agent Skill merged into `.claude/skills/lightweight-charts-v5`
+- [ ] Evaluate `lightweight-charts-drawing` in a branch: load the existing persisted drawings through its `importJSON`, compare behaviour with the four hand-built tools, and decide (adopt, adopt beside, or reject) with the reasons written in `web/README.md`
+- [ ] Indicators via `/add-indicator`: volume profile (fixed range, ported from the plugin example) and anchored VWAP, each with the known-value and no-look-ahead tests
+- [ ] Code review, `npx tsc -b`, `npx vitest run`, `npm run lint`, then `/run-gate 14`; browser checks listed for the owner
+
+**Done when:** a PNG export shows the drawings, a 1m chart with 100k+ bars zooms out smoothly with
+conflation on, hovering an indicator highlights it through hit testing, and the volume profile and
+anchored VWAP render with passing tests.
 
 ---
 
@@ -805,6 +928,10 @@ the journal.
 | 7 | Backtesting lab (Python, honest stats) | Large |
 | 8 | AI strategy research agents (Claude + Jev) | Large |
 | 9 | Polish + desktop app | Medium |
-| 10 | Multi-coin research (point-in-time universe, portfolio backtests, H1) | Large |
+| 10 | Multi-coin research (point-in-time universe, portfolio backtests, H1 with dispersion/liquidity/banding safeguards) | Large |
+| 11 | Lab statistics v2 (effective-N DSR, MinBTL/MinTRL, CPCV paths, purgedcv cross-check, version fingerprint; owner) | Medium |
+| 12 | Derivatives data as risk filters (futures archive → funding/premium/OI features, H3 run) | Medium |
+| 13 | Research agents v2 (structured outputs, subagent caps, MCP description audit, reporting checklist, failure tags, pre-registered paper test) | Medium |
+| 14 | Chart upgrades (5.2 hit testing, conflation, screenshots with drawings, plugin packages, drawing-library evaluation, volume profile, anchored VWAP) | Medium |
 
 **First usable version = end of Phase 3.**
