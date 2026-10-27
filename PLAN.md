@@ -818,7 +818,7 @@ separate question; nothing in the chart depends on them here (report section 2).
 - [x] Alignment module: each derivatives series aligned to the spot bar's *close* using the archive's own timestamps (a funding settlement or OI row is visible only at bars whose close is at or after its timestamp), unit-tested with a shifted-timestamp case
 - [ ] **(owner)** Registry features: `funding_rate`, `funding_zscore` (trailing window), `premium_index`, `basis_pct` (mark vs index), `oi_change` (trailing % change), `long_short_ratio`, each with the known-value test and the perturbation (no-look-ahead) test; feature docs say "exposure or crash-risk filter, not a direction signal"
 - [ ] `validate_plan` accepts the new features on spot long-only plans as gating clauses (e.g. `funding_zscore < 2`), and the derivatives manifest sha256 joins the research-run fingerprint
-- [ ] Research page / chart: optional funding and open-interest panes from the lab's Parquet (historical only; no live futures stream) — **built 2026-10-27** (`POST /lab/derivatives`, header toggle "Funding / OI"); awaiting the owner's browser check before ticking
+- [x] Research page / chart: optional funding and open-interest panes from the lab's Parquet (historical only; no live futures stream) — `POST /lab/derivatives` + header toggle "Funding / OI"; owner browser-checked 2026-10-27
 - [ ] One pre-registered H3 run through the normal pipeline (criteria and budget written first, `strategy-critic` review, at most the budgeted holdout check), written up in the journal whatever the outcome
 
 **Done when:** BTCUSDT funding, premium index and open interest are downloadable, aligned to spot

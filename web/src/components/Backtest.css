@@ -1310,6 +1310,19 @@ body.tester-resizing * {
   font-variant-numeric: tabular-nums;
 }
 
+/* Funding bars at the usual 0.01% fill a short pane to its top edge; a backing keeps the
+   derivatives legend readable over them in both themes. */
+.bt-pane-legend--chip {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
+}
+
+/* "as of" date when the newest derivatives value is older than the last bar (archive end). */
+.bt-pane-legend__asof {
+  color: var(--text-muted);
+}
+
 /* History notes in the report bar that need more room or a tone. */
 .tester__chart-note--wrap {
   max-width: 420px;

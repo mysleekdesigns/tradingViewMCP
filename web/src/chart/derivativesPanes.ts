@@ -200,6 +200,24 @@ export function derivativesValueAt(
   return i >= 0 ? points[i].value : null
 }
 
+/**
+ * Legend value without a crosshair: the newest non-null point at or before the last plotted bar,
+ * with its time. Archive files are published per month, so the live edge is usually past the
+ * archive; this matches the price axis's last-value label instead of showing "—". Never reads
+ * past `lastPlotted`, so bar replay stays point-in-time.
+ */
+export function derivativesLatestAt(
+  points: readonly DerivativesPoint[],
+  lastPlotted: number | undefined,
+): { time: number; value: number } | null {
+  if (lastPlotted === undefined) return null
+  for (let i = lastIndexAtOrBefore(points, lastPlotted); i >= 0; i--) {
+    const v = points[i].value
+    if (v !== null) return { time: points[i].time, value: v }
+  }
+  return null
+}
+
 /** True when at least one point has a value (else the pane shows a "no data" note). */
 export function hasAnyValue(points: readonly DerivativesPoint[]): boolean {
   return points.some((p) => p.value !== null)

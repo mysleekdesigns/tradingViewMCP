@@ -70,6 +70,7 @@ import {
   OPEN_INTEREST_TITLE,
   derivativesChartAdapter,
   derivativesColorsFor,
+  derivativesLatestAt,
   derivativesValueAt,
   formatCompactUsd,
   formatFundingPct,
@@ -1192,9 +1193,23 @@ function DerivativesPaneLegend({
   colorOf: (value: number) => string
 }) {
   if (typeof top !== 'number') return null
-  const value = derivativesValueAt(points, hoveredTime, lastPlotted)
+  // Hovering reads that exact bar; otherwise the newest value up to the last plotted bar, dated
+  // when it is older than that bar (the monthly archive usually ends before the live edge).
+  const latest = hoveredTime === undefined ? derivativesLatestAt(points, lastPlotted) : null
+  const value =
+    hoveredTime === undefined
+      ? (latest?.value ?? null)
+      : derivativesValueAt(points, hoveredTime, undefined)
+  const asOf =
+    latest !== null && lastPlotted !== undefined && latest.time < lastPlotted
+      ? new Date(latest.time * 1000).toLocaleDateString('en-US', {
+          month: 'short',
+          day: 'numeric',
+          timeZone: 'UTC',
+        })
+      : null
   return (
-    <div className="bt-pane-legend" style={{ top: top + 6 }} aria-live="off">
+    <div className="bt-pane-legend bt-pane-legend--chip" style={{ top: top + 6 }} aria-live="off">
       <span className="bt-pane-legend__title">{title}</span>
       {empty ? (
         <span className="bt-pane-legend__item">no archive data for these bars</span>
@@ -1204,6 +1219,7 @@ function DerivativesPaneLegend({
           style={value === null ? undefined : { color: colorOf(value) }}
         >
           {value === null ? '—' : format(value)}
+          {asOf !== null && <span className="bt-pane-legend__asof"> · {asOf}</span>}
         </span>
       )}
     </div>

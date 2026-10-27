@@ -200,7 +200,11 @@ body,
   gap: 10px;
   padding: 0 10px;
   min-width: 0;
-  overflow: hidden;
+  /* Clip sideways spill at narrow widths but let dropdowns (timeframes, chart type, layout) hang
+     below the bar. `hidden` clipped them and, being a scroll container, let the browser scroll
+     the whole bar out of view when a dropdown took focus; `clip` is not scrollable. */
+  overflow-x: clip;
+  overflow-y: visible;
   white-space: nowrap;
 }
 

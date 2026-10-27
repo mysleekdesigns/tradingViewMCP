@@ -4,6 +4,7 @@ import {
   DERIVATIVES_PANE_STRETCH,
   DerivativesPanes,
   derivativesColorsFor,
+  derivativesLatestAt,
   derivativesValueAt,
   formatCompactUsd,
   formatFundingPct,
@@ -113,6 +114,17 @@ describe('derivativesValueAt (legend)', () => {
     expect(derivativesValueAt(points, undefined, T0 + 3 * H)).toBe(3)
     expect(derivativesValueAt(points, undefined, undefined)).toBeNull()
     expect(derivativesValueAt([], undefined, T0)).toBeNull()
+  })
+
+  it('without hover, the legend shows the newest non-null value at or before the last plotted bar', () => {
+    // Live edge past the archive end: the last bars are null, the legend still shows 3 (and its time).
+    const live = [...points, { time: T0 + 3 * H, value: null }, { time: T0 + 4 * H, value: null }]
+    expect(derivativesLatestAt(live, T0 + 4 * H)).toEqual({ time: T0 + 2 * H, value: 3 })
+    // Bar replay at T0 + H (a gap): falls back to 1, never the later 3.
+    expect(derivativesLatestAt(points, T0 + H)).toEqual({ time: T0, value: 1 })
+    expect(derivativesLatestAt(points, T0 - H)).toBeNull()
+    expect(derivativesLatestAt(points, undefined)).toBeNull()
+    expect(derivativesLatestAt([{ time: T0, value: null }], T0)).toBeNull()
   })
 
   it('knows when a series has no value at all', () => {
