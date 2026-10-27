@@ -752,7 +752,7 @@ survivorship-free, point-in-time multi-coin universe and a portfolio backtest. I
 - [x] **(owner)** Portfolio backtest in `lab/lab/engine/`: target weights at t's close filled at t+1's open, per-asset costs on traded value, a held coin that stops printing exits at its last close (delisting return), cash when fewer coins qualify
 - [x] **(owner)** Cross-sectional features in `lab/lab/registry/` (trailing return rank within the eligible set) with perturbation tests
 - [x] **(owner)** Portfolio benchmarks: equal-weight universe, vol-targeted BTC, random-selection null matched on dates, breadth, exposure, turnover, weighting and volatility tercile; `[universe]` added to the research-run fingerprint
-- [ ] Portfolio plan type through `validate_plan` / `run_backtest` / `walk_forward` / ledger families and success criteria (portfolio benchmarks in `get_report`, universe manifest sha256 frozen into the run, all benchmarks scored from the strategy's first decision row, segment-end exits listed), then one pre-registered H1 run
+- [x] Portfolio plan type through `validate_plan` / `run_backtest` / `walk_forward` / ledger families and success criteria (portfolio benchmarks in `get_report`, universe manifest sha256 frozen into the run, all benchmarks scored from the strategy's first decision row, segment-end exits listed), then one pre-registered H1 run
 
 ### Safeguards before the H1 run (added 2026-10-26)
 
@@ -767,7 +767,7 @@ first-order risks for H1, so they are measured and controlled before the run, no
 - [x] **(owner)** Liquidity-aware weights: cap each coin's target weight by its share of trailing dollar volume (`lab.toml [universe]` setting, frozen into the run fingerprint)
 - [x] **(owner)** Rank banding: a coin enters the top quintile only when its rank crosses the boundary by a margin and leaves only when it falls below a wider one (hysteresis), so weekly rebalances do not churn the edge of the quintile
 - [x] **(owner)** Participation cost term in `lab/lab/engine/costs.py` for portfolio runs: square-root market impact on traded value divided by the coin's trailing dollar volume, added to the existing fee + volatility-scaled slippage; BTC/ETH single-symbol costs unchanged
-- [ ] H1 report decomposes returns into alpha and beta to BTC (full period and rolling 60-day), since a long-only top quintile carries most of BTC's beta; the journal says "no edge found" if the alpha is not significant after costs
+- [x] H1 report decomposes returns into alpha and beta to BTC (full period and rolling 60-day), since a long-only top quintile carries most of BTC's beta; the journal says "no edge found" if the alpha is not significant after costs
 
 **Done when:** H1 has been run once, end to end, through the same ledgered pipeline and success
 criteria as single-symbol plans, with the dispersion, liquidity and banding safeguards in place,
