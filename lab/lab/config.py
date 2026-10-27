@@ -97,6 +97,17 @@ class PortfolioConfig:
 
 
 @dataclass(frozen=True)
+class DerivativesConfig:
+    """``[derivatives]``: the USD-M futures public archive (lab.data.derivatives) and alignment."""
+
+    archive_base_url: str = "https://data.binance.vision/data/futures/um"
+    # at a bar close, a value older than this many of its own sampling intervals is a gap
+    stale_after_intervals: float = 2.0
+    # manifest: spacing above this multiple of the expected step is recorded as a gap
+    gap_factor: float = 1.5
+
+
+@dataclass(frozen=True)
 class LabConfig:
     data_dir: Path
     archive_base_url: str
@@ -114,6 +125,7 @@ class LabConfig:
     research: ResearchGuardConfig
     universe: UniverseConfig
     portfolio: PortfolioConfig
+    derivatives: DerivativesConfig = DerivativesConfig()
 
     @property
     def ledger_path(self) -> Path:
@@ -126,6 +138,10 @@ class LabConfig:
     @property
     def universe_dir(self) -> Path:
         return self.data_dir / "universe"
+
+    @property
+    def derivatives_dir(self) -> Path:
+        return self.data_dir / "derivatives"
 
 
 def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> LabConfig:
@@ -194,6 +210,7 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> LabConfig:
         ),
         universe=_universe(raw["universe"]),
         portfolio=_portfolio(raw["portfolio"]),
+        derivatives=_derivatives(raw.get("derivatives", {})),
     )
     _check_sell_price_positive(cfg)
     return cfg
@@ -229,6 +246,29 @@ def _portfolio(p: dict) -> PortfolioConfig:
             p["neighbourhood_max_trials"], "portfolio.neighbourhood_max_trials", 1
         ),
     )
+
+
+def _derivatives(d: dict) -> DerivativesConfig:
+    """``[derivatives]``; a missing key falls back to the ``DerivativesConfig`` default."""
+    default = DerivativesConfig()
+    url = d.get("archive_base_url", default.archive_base_url)
+    if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+        raise ValueError(f"derivatives.archive_base_url must be an http(s) URL, got {url!r}")
+    return DerivativesConfig(
+        archive_base_url=url,
+        stale_after_intervals=_at_least_one(
+            d.get("stale_after_intervals", default.stale_after_intervals),
+            "derivatives.stale_after_intervals",
+        ),
+        gap_factor=_at_least_one(d.get("gap_factor", default.gap_factor), "derivatives.gap_factor"),
+    )
+
+
+def _at_least_one(value: object, name: str) -> float:
+    v = _number(value, name)
+    if v < 1.0:
+        raise ValueError(f"{name} must be >= 1, got {v}")
+    return v
 
 
 def _number(value: object, name: str) -> float:

@@ -72,6 +72,10 @@ def _parse_month(value: str, name: str) -> tuple[int, int]:
     return year, month
 
 
+check_symbol = _check_symbol  # public names for lab.data.derivatives
+parse_month = _parse_month
+
+
 def _utc_now() -> pd.Timestamp:
     """Current UTC time (a seam so tests can pin the clock)."""
     return pd.Timestamp.now(tz="UTC")
@@ -154,7 +158,8 @@ def _expected_sha256(checksum_text: str, filename: str) -> str:
     raise ValueError(f"no SHA-256 for {filename} in its .CHECKSUM file")
 
 
-def _csv_from_zip(payload: bytes, filename: str) -> bytes:
+def csv_from_zip(payload: bytes, filename: str) -> bytes:
+    """The single CSV inside a Binance archive zip; ``ValueError`` naming ``filename`` otherwise."""
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as zf:
             members = [n for n in zf.namelist() if n.lower().endswith(".csv")]
@@ -165,15 +170,16 @@ def _csv_from_zip(payload: bytes, filename: str) -> bytes:
         raise ValueError(f"{filename} is not a valid zip: {exc}") from exc
 
 
-def download_month(
-    symbol: str, interval: str, year: int, month: int, *, base_url: str, client: httpx.Client
-) -> pd.DataFrame | None:
-    """Fetch, checksum-verify, and parse one monthly kline zip. Returns ``None`` on 404.
+_csv_from_zip = csv_from_zip  # older private name
 
-    Raises ``ValueError`` naming the file on a SHA-256 mismatch or a missing checksum, and
-    ``httpx.HTTPStatusError`` on other HTTP errors.
+
+def fetch_verified_zip(url: str, client: httpx.Client) -> bytes | None:
+    """Fetch one archive zip and verify it against its sibling ``.CHECKSUM``.
+
+    Returns the zip bytes, or ``None`` when the zip itself is 404. Raises ``ValueError`` naming
+    the file on a SHA-256 mismatch or a missing checksum, and ``httpx.HTTPStatusError`` on other
+    HTTP errors.
     """
-    url = archive_url(base_url, symbol, interval, year, month)
     filename = url.rsplit("/", 1)[-1]
     resp = client.get(url)
     if resp.status_code == 404:
@@ -189,11 +195,27 @@ def download_month(
     actual = hashlib.sha256(payload).hexdigest()
     if actual != expected:
         raise ValueError(f"{filename}: SHA-256 mismatch (expected {expected}, got {actual})")
+    return payload
 
-    return parse_kline_csv(_csv_from_zip(payload, filename), drop_identical_rows=True)
+
+def download_month(
+    symbol: str, interval: str, year: int, month: int, *, base_url: str, client: httpx.Client
+) -> pd.DataFrame | None:
+    """Fetch, checksum-verify, and parse one monthly kline zip. Returns ``None`` on 404.
+
+    Raises ``ValueError`` naming the file on a SHA-256 mismatch or a missing checksum, and
+    ``httpx.HTTPStatusError`` on other HTTP errors.
+    """
+    url = archive_url(base_url, symbol, interval, year, month)
+    filename = url.rsplit("/", 1)[-1]
+    payload = fetch_verified_zip(url, client)
+    if payload is None:
+        return None
+    return parse_kline_csv(csv_from_zip(payload, filename), drop_identical_rows=True)
 
 
-def _month_range(start: str, end: str) -> list[tuple[int, int]]:
+def month_range(start: str, end: str) -> list[tuple[int, int]]:
+    """``(year, month)`` pairs from ``start`` to ``end`` (``YYYY-MM``, inclusive)."""
     sy, sm = _parse_month(start, "start")
     ey, em = _parse_month(end, "end")
     if (ey, em) < (sy, sm):
@@ -206,9 +228,14 @@ def _month_range(start: str, end: str) -> list[tuple[int, int]]:
     return months
 
 
-def _month_is_complete(year: int, month: int, now: pd.Timestamp) -> bool:
+def month_is_complete(year: int, month: int, now: pd.Timestamp) -> bool:
+    """True once the whole UTC month has ended at ``now`` (the current/future month is not)."""
     next_start = pd.Timestamp(year=year, month=month, day=1, tz="UTC") + pd.offsets.MonthBegin(1)
     return next_start <= now
+
+
+_month_range = month_range  # older private names
+_month_is_complete = month_is_complete
 
 
 def month_path(out_dir: Path, symbol: str, interval: str, year: int, month: int) -> Path:
@@ -231,11 +258,15 @@ class RangeResult:
         return sorted(self.written + self.skipped)
 
 
-def _write_parquet(frame: pd.DataFrame, path: Path) -> None:
+def write_parquet(frame: pd.DataFrame, path: Path) -> None:
+    """Write ``frame`` (with its index) to ``path`` atomically via a ``.tmp`` sibling."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".parquet.tmp")
     frame.to_parquet(tmp, engine="pyarrow", index=True)
     tmp.replace(path)
+
+
+_write_parquet = write_parquet  # older private name
 
 
 def download_range_detailed(
@@ -252,7 +283,7 @@ def download_range_detailed(
     """Like ``download_range`` but returns a per-month breakdown (used by the CLI)."""
     _check_symbol(symbol)
     interval_seconds(interval)
-    months = _month_range(start, end)
+    months = month_range(start, end)
     now = _utc_now()
     result = RangeResult()
     own_client = client is None
@@ -260,7 +291,7 @@ def download_range_detailed(
     try:
         for year, month in months:
             label = f"{year:04d}-{month:02d}"
-            if not _month_is_complete(year, month, now):
+            if not month_is_complete(year, month, now):
                 result.incomplete.append(label)
                 continue
             path = month_path(out_dir, symbol, interval, year, month)
@@ -271,7 +302,7 @@ def download_range_detailed(
             if frame is None:
                 result.not_found.append(label)
                 continue
-            _write_parquet(frame, path)
+            write_parquet(frame, path)
             result.written.append(path)
             result.bars_written += len(frame)
     finally:

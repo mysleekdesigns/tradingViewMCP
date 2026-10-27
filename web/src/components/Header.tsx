@@ -36,6 +36,9 @@ interface HeaderProps {
   /** The hedgeFund regime ribbon is shown under the candles. */
   regimeOn: boolean
   onToggleRegime: () => void
+  /** Historical funding / open-interest panes are shown under the charts (from the lab). */
+  derivativesOn?: boolean
+  onToggleDerivatives?: () => void
   watchlistOpen: boolean
   onToggleWatchlist: () => void
   source: string
@@ -76,6 +79,8 @@ export function Header({
   replayDisabledReason,
   regimeOn,
   onToggleRegime,
+  derivativesOn = false,
+  onToggleDerivatives,
   watchlistOpen,
   onToggleWatchlist,
   source,
@@ -204,6 +209,24 @@ export function Header({
         <RegimeIcon />
         <span className="ind-btn__label">Regime</span>
       </button>
+
+      {onToggleDerivatives && (
+        <button
+          type="button"
+          className="ind-btn ind-btn--secondary"
+          onClick={onToggleDerivatives}
+          aria-pressed={derivativesOn}
+          aria-label="Funding and open interest panes"
+          title={
+            derivativesOn
+              ? 'Hide the funding and open-interest panes'
+              : "Funding / OI: historical funding rate and open interest panes from Binance's futures archive (needs the lab; no live stream)"
+          }
+        >
+          <DerivativesIcon />
+          <span className="ind-btn__label">Funding / OI</span>
+        </button>
+      )}
 
       <button
         type="button"
@@ -421,6 +444,27 @@ function RegimeIcon() {
       <rect x="3" y="14.2" width="4.4" height="2.4" rx=".5" fill="var(--down)" />
       <rect x="7.8" y="14.2" width="4.4" height="2.4" rx=".5" fill="currentColor" opacity=".45" />
       <rect x="12.6" y="14.2" width="4.4" height="2.4" rx=".5" fill="var(--up)" />
+    </svg>
+  )
+}
+
+function DerivativesIcon() {
+  // Funding bars either side of a zero line, with the open-interest line above.
+  return (
+    <svg className="ind-btn__icon" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+      <path
+        d="M3 7.5 7 5.5l3.5 1.5L17 4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M3 13.5h14" stroke="currentColor" strokeWidth="1" opacity=".45" />
+      <rect x="4" y="10" width="2.2" height="3.5" rx=".4" fill="var(--up)" />
+      <rect x="7.6" y="11" width="2.2" height="2.5" rx=".4" fill="var(--up)" />
+      <rect x="11.2" y="13.5" width="2.2" height="2.5" rx=".4" fill="var(--down)" />
+      <rect x="14.8" y="11.8" width="2.2" height="1.7" rx=".4" fill="var(--up)" />
     </svg>
   )
 }

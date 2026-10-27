@@ -151,9 +151,7 @@ def download_record_path(universe_dir: Path, quote: str, interval: str) -> Path:
     return Path(universe_dir) / f"download-{quote}-{interval}.json"
 
 
-def write_download_record(
-    report: DownloadReport, *, path: Path, interval: str
-) -> dict[str, Any]:
+def write_download_record(report: DownloadReport, *, path: Path, interval: str) -> dict[str, Any]:
     """Persist what the archive listed and what failed, so ``build`` can refuse partial data."""
     previous: dict[str, Any] = json.loads(path.read_text()) if path.is_file() else {}
     symbols: dict[str, Any] = dict(previous.get("symbols", {}))

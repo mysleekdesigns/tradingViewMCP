@@ -8,7 +8,8 @@ pairs and reuse tickers, so history before the hole is a different market. With
 than that factor away from the last close before it: a redenomination or token swap under the
 same ticker (BNX 1:100, COCOS 1000:1, QUICK 1:1000) or a quick reuse (LUNAUSDT was Terra Classic
 until 13 May 2022 and Terra 2.0 from 31 May). Both are known at the first bar after the hole.
-Everything is decided from rows at or before t, never from today's listing, so altering or removing data after t cannot change eligibility at t.
+Everything is decided from rows at or before t, never from today's listing, so altering or
+removing data after t cannot change eligibility at t.
 
 Liquidity ranking (:func:`trailing_dollar_volume`, :func:`liquidity_rank`) uses the same rule:
 the rank at t comes from bars in ``(t - window, t]`` only.

@@ -64,6 +64,18 @@ import {
   type ChartPalette,
 } from './theme'
 import { bindCrosshairSync, type CrosshairSync } from './crosshairSync'
+import {
+  DerivativesPanes,
+  FUNDING_TITLE,
+  OPEN_INTEREST_TITLE,
+  derivativesChartAdapter,
+  derivativesColorsFor,
+  derivativesValueAt,
+  formatCompactUsd,
+  formatFundingPct,
+  hasAnyValue,
+  type DerivativesOverlay,
+} from './derivativesPanes'
 import { RegimeRibbon, regimeColorsFor } from './regimeRibbon'
 import { composeScreenshot } from './screenshot'
 import { formatDateTime, timezoneLabel } from './timeFormat'
@@ -270,6 +282,12 @@ interface ChartProps {
   onTimeClick?: (time: number | null) => void
   /** True while bar replay drives `candles`: the chart must not auto-request older history (`onNearLeftEdge`/auto-older), and should keep the right edge in view as bars step forward. */
   replayActive?: boolean
+  /**
+   * Historical funding and open interest for the closed bars (lab archive): two panes after the
+   * indicator panes (before the backtest equity pane), drawn on plotted bars only.
+   * null/undefined removes both. Colours follow `appearance`.
+   */
+  derivatives?: DerivativesOverlay | null
 }
 
 const NO_INDICATORS: readonly IndicatorConfig[] = []
@@ -338,6 +356,7 @@ export function Chart({
   regime = null,
   onTimeClick,
   replayActive = false,
+  derivatives = null,
 }: ChartProps) {
   // Callers may pass a fresh object per render; only the fields matter.
   const { theme, upColor, downColor, timezone } = appearance
@@ -414,6 +433,12 @@ export function Chart({
   const pressConsumedRef = useRef(false)
   /** Regime strip at the bottom of the main pane; exists while `regime` is non-null. */
   const ribbonRef = useRef<RegimeRibbon | null>(null)
+  /** Funding + open-interest panes; drawn while `derivatives` is non-null. */
+  const [derivativesPanes] = useState(() => new DerivativesPanes(derivativesColorsFor(palette)))
+  const derivativesVersion = useSyncExternalStore(
+    derivativesPanes.subscribe,
+    derivativesPanes.getSnapshot,
+  )
 
   // Latest drawing callbacks, without re-binding DOM listeners.
   useEffect(() => {
@@ -530,6 +555,7 @@ export function Chart({
     coords.setChart(chart)
     indicatorManager.attach(chart)
     backtestOverlay.attachChart(backtestChartAdapter(chart))
+    derivativesPanes.attachChart(derivativesChartAdapter(chart))
     return () => {
       chart.unsubscribeCrosshairMove(onCrosshairMove)
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(onRangeChange)
@@ -539,6 +565,7 @@ export function Chart({
       indicatorManager.detach()
       // chart.remove() below takes the equity series and markers with it.
       backtestOverlay.detachChart(false)
+      derivativesPanes.detachChart(false)
       paneKeyRef.current = null
       chartRef.current = null
       coords.setChart(null, chart)
@@ -552,7 +579,7 @@ export function Chart({
       autoOlderRef.current = null
       expectedRangeRef.current = null
     }
-  }, [indicatorManager, coords, backtestOverlay])
+  }, [indicatorManager, coords, backtestOverlay, derivativesPanes])
 
   // (Re)create the main series for the chart type. On mount the data effect below fills it;
   // on a type switch the candles already shown are re-applied here. Volume is untouched.
@@ -709,8 +736,9 @@ export function Chart({
     }
     drawingsPrimitiveRef.current?.setHandleColors(handleColorsFor(palette))
     ribbonRef.current?.setColors(regimeColorsFor(palette))
+    derivativesPanes.setColors(derivativesColorsFor(palette))
     indicatorManager.setPalette(palette)
-  }, [palette, theme, upColor, downColor, timezone, indicatorManager])
+  }, [palette, theme, upColor, downColor, timezone, indicatorManager, derivativesPanes])
 
   // Latest header values for screenshots, read when the user exports (not per render).
   const shotRef = useRef({ symbol, interval, source, candles })
@@ -908,16 +936,22 @@ export function Chart({
 
   // Indicator configs changed: create / remove / recompute / recolour / hide series.
   // Runs after the candles effect on mount, so new indicators start from the applied candles.
-  // The equity pane is taken out while pane indicators change, then re-added as the last pane,
-  // so it never shares a pane with an indicator.
+  // The equity and derivatives panes are taken out while pane indicators change, then re-added
+  // after them (derivatives, then equity last), so they never share a pane with an indicator.
   useEffect(() => {
     const key = paneIndicatorKey(indicators)
     const panesChange = key !== paneKeyRef.current
-    if (panesChange) backtestOverlay.suspendPane()
+    if (panesChange) {
+      backtestOverlay.suspendPane()
+      derivativesPanes.suspend()
+    }
     indicatorManager.sync(indicators, appliedRef.current)
-    if (panesChange) backtestOverlay.resumePane()
+    if (panesChange) {
+      derivativesPanes.resume()
+      backtestOverlay.resumePane()
+    }
     paneKeyRef.current = key
-  }, [indicators, indicatorManager, backtestOverlay])
+  }, [indicators, indicatorManager, backtestOverlay, derivativesPanes])
 
   // Backtest overlay. Declared after the indicator effect so on mount the equity pane lands
   // below the indicator panes. Cleanup clears it (StrictMode re-runs re-add it).
@@ -953,6 +987,22 @@ export function Chart({
     const plotted = new Set((appliedRef.current ?? []).map((c) => c.time))
     ribbon.setPoints(regime, plotted)
   }, [regime, hasRegime, barsKey])
+
+  // Funding / open-interest panes, on plotted bars only. Re-applied when the values or the bar
+  // set change (live ticks keep `barsKey`). New panes go after the indicator panes: the equity
+  // pane steps out while they are added, so it stays the last pane. No cleanup per run (that
+  // would rebuild the panes on every bar close); null removes them, and so does unmount.
+  useEffect(() => {
+    if (derivatives === null) {
+      derivativesPanes.setData(null)
+      return
+    }
+    const plotted = new Set((appliedRef.current ?? []).map((c) => c.time))
+    const creating = derivativesPanes.wouldCreate()
+    if (creating) backtestOverlay.suspendPane()
+    derivativesPanes.setData(derivatives, plotted)
+    if (creating) backtestOverlay.resumePane()
+  }, [derivatives, barsKey, derivativesPanes, backtestOverlay])
 
   // One-shot scroll/zoom to a time range (e.g. the backtest window or one trade).
   const focusKey = focusRange?.key ?? null
@@ -1022,7 +1072,7 @@ export function Chart({
       if (frame) cancelAnimationFrame(frame)
       observer.disconnect()
     }
-  }, [indicatorSnapshot.paneVersion, backtestVersion])
+  }, [indicatorSnapshot.paneVersion, backtestVersion, derivativesVersion])
 
   const legend = useMemo(
     () => buildLegend(candles, selectLegendIndex(candles, hoveredTime)),
@@ -1036,6 +1086,17 @@ export function Chart({
   const equityTop = equityPane !== null ? paneTops[equityPane] : null
   const equityLegend =
     equityTop !== null && equityTop !== undefined ? backtestOverlay.legend(hoveredTime) : []
+  const derivativesPaneIndex = derivatives !== null ? derivativesPanes.paneIndices() : null
+  // Once per answer, not per tick: an all-null series is scanned end to end (up to 20 000 points).
+  const derivativesEmpty = useMemo(
+    () => ({
+      funding: derivatives === null || !hasAnyValue(derivatives.funding),
+      openInterest: derivatives === null || !hasAnyValue(derivatives.openInterest),
+    }),
+    [derivatives],
+  )
+  const lastPlotted = candles.length > 0 ? candles[candles.length - 1].time : undefined
+  const derivativesColors = derivativesColorsFor(palette)
   const legendActions = {
     onToggleVisible: onIndicatorToggleVisible,
     onRemove: onIndicatorRemove,
@@ -1076,6 +1137,74 @@ export function Chart({
             </span>
           ))}
         </div>
+      )}
+      {derivatives !== null && derivativesPaneIndex !== null && (
+        <>
+          <DerivativesPaneLegend
+            top={paneTops[derivativesPaneIndex.funding]}
+            title={FUNDING_TITLE}
+            points={derivatives.funding}
+            empty={derivativesEmpty.funding}
+            hoveredTime={hoveredTime}
+            lastPlotted={lastPlotted}
+            format={formatFundingPct}
+            colorOf={(v) => (v >= 0 ? derivativesColors.positive : derivativesColors.negative)}
+          />
+          <DerivativesPaneLegend
+            top={paneTops[derivativesPaneIndex.openInterest]}
+            title={OPEN_INTEREST_TITLE}
+            points={derivatives.openInterest}
+            empty={derivativesEmpty.openInterest}
+            hoveredTime={hoveredTime}
+            lastPlotted={lastPlotted}
+            format={formatCompactUsd}
+            colorOf={() => derivativesColors.line}
+          />
+        </>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Title and crosshair value of a derivatives pane, at the pane's top-left corner. "—" where the
+ * bar has no value (a gap, past the archive, or the forming bar); a note when the whole loaded
+ * range has none.
+ */
+function DerivativesPaneLegend({
+  top,
+  title,
+  points,
+  empty,
+  hoveredTime,
+  lastPlotted,
+  format,
+  colorOf,
+}: {
+  top: number | null | undefined
+  title: string
+  points: DerivativesOverlay['funding']
+  /** No point has a value (hasAnyValue, memoised by the caller per answer). */
+  empty: boolean
+  hoveredTime: number | undefined
+  lastPlotted: number | undefined
+  format: (value: number) => string
+  colorOf: (value: number) => string
+}) {
+  if (typeof top !== 'number') return null
+  const value = derivativesValueAt(points, hoveredTime, lastPlotted)
+  return (
+    <div className="bt-pane-legend" style={{ top: top + 6 }} aria-live="off">
+      <span className="bt-pane-legend__title">{title}</span>
+      {empty ? (
+        <span className="bt-pane-legend__item">no archive data for these bars</span>
+      ) : (
+        <span
+          className="bt-pane-legend__value"
+          style={value === null ? undefined : { color: colorOf(value) }}
+        >
+          {value === null ? '—' : format(value)}
+        </span>
       )}
     </div>
   )

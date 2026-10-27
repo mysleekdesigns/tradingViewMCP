@@ -6,7 +6,11 @@ import type { CrosshairSync } from '../chart/crosshairSync'
 import type { ChartContextMenuRequest, DrawingStyle, ToolMode } from '../chart/drawings/types'
 import type { ChartAppearance } from '../chart/theme'
 import type { Alert } from '../data/alertTypes'
-import { LAB_OFFLINE_MESSAGE, type LabRegimeClient } from '../data/labApi'
+import {
+  LAB_OFFLINE_MESSAGE,
+  type LabDerivativesClient,
+  type LabRegimeClient,
+} from '../data/labApi'
 import { MarketDataError } from '../data/provider'
 import type { CandleSource } from '../data/timeframeProvider'
 import { timeframeSeconds } from '../data/timeframes'
@@ -18,8 +22,16 @@ import { atHistoryLimit } from '../state/liveCandles'
 import { REGIME_THRESHOLD, REGIME_WINDOW_BARS, regimeParamsLabel } from '../state/regimePref'
 import { useLiveCandles, type UseLiveCandles } from '../state/useLiveCandles'
 import { regimeSupported, useRegime, type RegimeOverlay } from '../state/useRegime'
+import {
+  derivativesArchiveEnd,
+  derivativesUnsupportedReason,
+  quotedCommand,
+  useDerivatives,
+  type DerivativesState,
+} from '../state/useDerivatives'
 import type { Candle, Timeframe } from '../types'
 import './AppShell.css'
+import './Derivatives.css'
 import { MAX_HISTORY_BARS } from './backtestView'
 import { ConnectionIndicator } from './ConnectionStatus'
 import './Layout.css'
@@ -115,6 +127,15 @@ export interface ChartPanelProps {
   /** Draws hedgeFund regime labels under the candles (from the lab, closed bars only). */
   regimeEnabled: boolean
   regimeClient: LabRegimeClient
+  /**
+   * Draws historical funding and open-interest panes from the lab's futures archive (closed bars
+   * only; no live stream).
+   */
+  derivativesEnabled?: boolean
+  /** Required for the panes to load; without it they stay off. */
+  derivativesClient?: LabDerivativesClient
+  /** Why the panes are off on every chart of this venue (no requests), or null. */
+  derivativesBlocked?: string | null
   /** Replaces the "Loading older bars…" hint while set (e.g. the backtest history chip). */
   statusChip?: ReactNode
   /** The bar replay controls, on the replay panel only (a stable element). */
@@ -173,6 +194,9 @@ export const ChartPanel = memo(function ChartPanel({
   onTimeClick,
   regimeEnabled,
   regimeClient,
+  derivativesEnabled = false,
+  derivativesClient = NO_DERIVATIVES_CLIENT,
+  derivativesBlocked = null,
   statusChip,
   replayBar,
   children,
@@ -238,6 +262,22 @@ export const ChartPanel = memo(function ChartPanel({
     barSeconds: timeframeSeconds(interval),
   })
 
+  // Funding / OI for the same closed bars as the ribbon (live: all but the forming bar; replay:
+  // up to the cursor). Off on seconds charts, bars over a week, non-Binance symbols and venues.
+  const derivativesOff = derivativesBlocked ?? derivativesUnsupportedReason(interval, symbol)
+  const derivatives = useDerivatives(derivativesClient, {
+    enabled:
+      derivativesEnabled &&
+      derivativesClient !== NO_DERIVATIVES_CLIENT &&
+      derivativesOff === null &&
+      hasBars,
+    symbol,
+    timeframe: interval,
+    barSeconds: timeframeSeconds(interval),
+    candles: regimeSource.candles,
+    formingLast: regimeSource.formingLast,
+  })
+
   const cellClass = `chart-cell${multi ? ' chart-cell--multi' : ''}${
     multi && active ? ' chart-cell--active' : ''
   }${replaySession ? ' chart-cell--replay' : ''}`
@@ -295,6 +335,7 @@ export const ChartPanel = memo(function ChartPanel({
             crosshairSync={crosshairSync}
             crosshairSyncId={id}
             regime={regimeEnabled && regimeAllowed ? regime.points : null}
+            derivatives={derivativesEnabled && derivativesOff === null ? derivatives.overlay : null}
             onTimeClick={timeClick}
             replayActive={replaying}
           />
@@ -317,6 +358,13 @@ export const ChartPanel = memo(function ChartPanel({
         )}
         {hasBars && regimeEnabled && (
           <RegimeChip overlay={regime} unavailable={regimeAllowed ? null : REGIME_SECONDS_TEXT} />
+        )}
+        {hasBars && derivativesEnabled && (
+          <DerivativesChip
+            state={derivatives}
+            unavailable={derivativesOff}
+            stacked={regimeEnabled}
+          />
         )}
         {hasBars && replayBar}
         {hasBars && children}
@@ -350,6 +398,11 @@ export const ChartPanel = memo(function ChartPanel({
 })
 
 const NO_BARS: readonly Candle[] = []
+
+/** Stand-in when no client is passed: the panes are off, so it is never called. */
+const NO_DERIVATIVES_CLIENT: LabDerivativesClient = {
+  fetchDerivatives: () => Promise.reject(new Error('No lab client')),
+}
 
 const REGIME_LAB_COMMAND = 'uv run python -m lab.api'
 
@@ -413,6 +466,90 @@ function RegimeChip({
         points === null && (
           <span className="history-hint__spinner regime-chip__spinner" aria-hidden="true" />
         )
+      )}
+    </div>
+  )
+}
+
+/** UTC date of a UNIX-seconds time, e.g. "2026-10-25". */
+function utcDate(seconds: number): string {
+  return new Date(seconds * 1000).toISOString().slice(0, 10)
+}
+
+/**
+ * Small chip under the regime chip (or in its place) for the funding / OI panes: the archive's
+ * end date when loaded, the CLI that downloads the archive when the lab has none for the
+ * symbol, how to start the lab when it is offline, or why the panes are off on this chart.
+ */
+function DerivativesChip({
+  state,
+  unavailable,
+  stacked,
+}: {
+  state: DerivativesState
+  /** Why the panes are off on this chart (no requests are made), or null. */
+  unavailable: string | null
+  /** The regime chip is shown above. */
+  stacked: boolean
+}) {
+  const base = `regime-chip deriv-chip${stacked ? ' deriv-chip--stacked' : ''}`
+  if (unavailable !== null) {
+    return (
+      <div
+        className={`${base} regime-chip--off`}
+        title="Funding and open interest come from Binance's USDⓈ-M futures archive, aligned to bars of 1 minute to 1 week on Binance spot charts."
+      >
+        <span className="regime-chip__label">{unavailable}</span>
+      </div>
+    )
+  }
+  const { error, errorKind, loading, overlay, available } = state
+  const end = derivativesArchiveEnd(available)
+  const title =
+    error !== null
+      ? errorKind === 'offline'
+        ? `Funding / OI needs the lab: run \`${REGIME_LAB_COMMAND}\` in lab/ (or \`npm run dev\` at the repo root).`
+        : error
+      : "Historical funding rate (%, green ≥ 0, red < 0) and open interest (USD) from the lab's " +
+        "copy of Binance's USDⓈ-M archive. Each bar shows what was published by its close; blank " +
+        'bars have no data (a gap or past the downloaded range). No live futures stream.' +
+        (end !== null ? ` Archive ends ${utcDate(end)} (UTC).` : '') +
+        ' After downloading more of the archive, switch Funding / OI off and on to reload.'
+  const hint = errorKind === 'no-data' && error !== null ? quotedCommand(error) : null
+  return (
+    <div
+      className={`${base}${error !== null ? ' regime-chip--error' : ''}`}
+      title={title}
+      role={error !== null ? 'status' : undefined}
+    >
+      <span className="deriv-chip__icon" aria-hidden="true">
+        <span className="deriv-chip__bar deriv-chip__bar--pos" />
+        <span className="deriv-chip__bar deriv-chip__bar--neg" />
+        <span className="deriv-chip__line" />
+      </span>
+      <span className="regime-chip__label">Funding / OI</span>
+      {error !== null ? (
+        <span className="regime-chip__state">
+          {errorKind === 'offline' ? (
+            <>
+              needs the lab: <code>{REGIME_LAB_COMMAND}</code>
+            </>
+          ) : errorKind === 'no-data' ? (
+            hint !== null ? (
+              <>
+                no archive: <code>{hint}</code>
+              </>
+            ) : (
+              'no archive downloaded'
+            )
+          ) : (
+            'unavailable'
+          )}
+        </span>
+      ) : loading && overlay === null ? (
+        <span className="history-hint__spinner regime-chip__spinner" aria-hidden="true" />
+      ) : (
+        end !== null && <span className="deriv-chip__meta">to {utcDate(end)}</span>
       )}
     </div>
   )

@@ -205,3 +205,42 @@ export interface RegimeResponse {
   /** The hedgeFund function that labels the bars. */
   engine: string
 }
+
+/**
+ * One derivatives value per requested bar. `value` is null when nothing was visible at that
+ * bar's close (a gap, or outside the downloaded archive range): drawn as whitespace, never
+ * interpolated.
+ */
+export interface DerivativesPoint {
+  time: number
+  value: number | null
+}
+
+/**
+ * Historical USDⓈ-M funding and open interest aligned to spot bars (`POST /lab/derivatives`).
+ * Times: closed bar OPEN times (UNIX seconds), strictly ascending, at most MAX_DERIVATIVES_BARS.
+ */
+export interface DerivativesRequest {
+  symbol: string
+  times: number[]
+  /** Bar length, 60..604800 seconds. */
+  bar_seconds: number
+}
+
+/** First / last archive timestamp of a series (UNIX seconds), both null when none is downloaded. */
+export interface DerivativesRange {
+  first: number | null
+  last: number | null
+}
+
+export interface DerivativesResponse {
+  symbol: string
+  bar_seconds: number
+  /** Funding rate as a fraction (0.0001 = 0.01%); one point per requested time, same order. */
+  funding: DerivativesPoint[]
+  /** Open interest value in USD notional; one point per requested time, same order. */
+  open_interest: DerivativesPoint[]
+  available: { funding: DerivativesRange; open_interest: DerivativesRange }
+  /** e.g. "data.binance.vision futures/um archive (historical; no live stream)". */
+  source: string
+}

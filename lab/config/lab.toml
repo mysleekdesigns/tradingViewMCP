@@ -93,3 +93,10 @@ alpha_rolling_days = 60          # PLAN.md Phase 10: alpha/beta to BTC full peri
 null_paths = 500                 # random-selection null paths: a 95th-percentile bar resolves to 1/501
 null_liquidity_window = 5        # null draws each name from the 5 liquidity ranks centred on the strategy's (+/-2 of ~30, a sixth of the range): tight enough to match a tilt to the least liquid coins, loose enough to stay random
 neighbourhood_max_trials = 37    # base + 9 portfolio tunables (every safeguard on) x 4 non-base steps, so every +/-20% neighbour runs
+
+[derivatives]
+# USD-M futures public archive as risk-filter inputs (lab.data.derivatives). Historical only; no
+# futures account, no key, nothing trades.
+archive_base_url = "https://data.binance.vision/data/futures/um"  # Binance public USD-M archive (fundingRate, *Klines, metrics), no key
+stale_after_intervals = 2.0      # at a bar close, a value older than 2 of its own sampling intervals is a gap, not carried forward
+gap_factor = 1.5                 # manifest: spacing above 1.5x the expected step is recorded as a gap (one missed sample is 2x)

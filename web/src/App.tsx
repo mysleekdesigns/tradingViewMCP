@@ -148,6 +148,11 @@ import {
 } from './state/paperFeeds'
 import { savePrefs } from './state/prefs'
 import { loadRegimeOn, saveRegimeOn } from './state/regimePref'
+import {
+  derivativesVenueBlocked,
+  loadDerivativesOn,
+  saveDerivativesOn,
+} from './state/derivativesPref'
 import { replayKeyAction } from './state/replay'
 import {
   applyCandleColorsToDocument,
@@ -653,6 +658,14 @@ function App() {
     saveRegimeOn(regimeOn)
   }, [regimeOn])
   const toggleRegime = useCallback(() => setRegimeOn((on) => !on), [])
+
+  // ---- Funding / OI panes (all panels; remembered; Binance global spot charts only) ----
+  const [derivativesOn, setDerivativesOn] = useState(loadDerivativesOn)
+  useEffect(() => {
+    saveDerivativesOn(derivativesOn)
+  }, [derivativesOn])
+  const toggleDerivatives = useCallback(() => setDerivativesOn((on) => !on), [])
+  const derivativesBlocked = derivativesVenueBlocked(venue)
 
   // Memoised so React Compiler treats the result as immutable (it is never mutated).
   const live = useMemo(() => panelLive(lives, activeP), [lives, activeP])
@@ -1712,6 +1725,8 @@ function App() {
         replayDisabledReason={replayBlockedReason}
         regimeOn={regimeOn}
         onToggleRegime={toggleRegime}
+        derivativesOn={derivativesOn}
+        onToggleDerivatives={toggleDerivatives}
         watchlistOpen={panel === 'watchlist'}
         onToggleWatchlist={() => setPanel((p) => (p === 'watchlist' ? null : 'watchlist'))}
         source={SOURCE}
@@ -1800,6 +1815,9 @@ function App() {
                 onTimeClick={isReplay && replayStatus === 'picking' ? pickReplayBar : undefined}
                 regimeEnabled={regimeOn}
                 regimeClient={labClient}
+                derivativesEnabled={derivativesOn}
+                derivativesClient={labClient}
+                derivativesBlocked={derivativesBlocked}
                 statusChip={isBt ? historyChip : undefined}
                 replayBar={isReplay ? replayBarEl : undefined}
               >

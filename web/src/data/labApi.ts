@@ -3,11 +3,17 @@
  * same-origin `/lab/...`; the Vite dev/preview proxy forwards it.
  *
  * Read-only research calls: health, feature registry, plan validation, design-window backtests,
- * the trial ledger, and regime labels for the chart's regime ribbon. No keys, no exchange calls, no trading endpoints.
+ * the trial ledger, regime labels for the chart's regime ribbon, and historical funding / open
+ * interest from the lab's futures archive (the chart's derivatives panes). No keys, no exchange
+ * calls, no trading endpoints.
  */
 
 import type {
   BacktestReport,
+  DerivativesPoint,
+  DerivativesRange,
+  DerivativesRequest,
+  DerivativesResponse,
   EquityPoint,
   ExitReason,
   LabFeature,
@@ -77,6 +83,17 @@ export interface LabClientOptions {
 export interface LabRegimeClient {
   /** hedgeFund regime labels for closed bars (display only; nothing is written to the ledger). */
   regime(req: RegimeRequest, signal?: AbortSignal): Promise<RegimeResponse>
+}
+
+/** The chart's funding / open-interest panes need only this call (`useDerivatives` takes just this). */
+export interface LabDerivativesClient {
+  /**
+   * Historical funding and open interest aligned to the given closed bars (display only; nothing
+   * is written to the ledger). Rejects with LabError `no-data` (503: nothing downloaded for the
+   * symbol; the message names the CLI to run), `invalid` (422), `parse` (an answer that does not
+   * match the request one point per time), `offline`, …
+   */
+  fetchDerivatives(req: DerivativesRequest, signal?: AbortSignal): Promise<DerivativesResponse>
 }
 
 export interface LabClient extends LabRegimeClient {
@@ -367,6 +384,64 @@ export function parseRegimeResponse(v: unknown): RegimeResponse {
   }
 }
 
+function parseDerivativesPoints(v: unknown, what: string): DerivativesPoint[] {
+  const out: DerivativesPoint[] = []
+  for (const p of list(v, what)) {
+    if (!isRecord(p)) fail(what)
+    const time = num(p.time)
+    if (time === null || !Number.isInteger(time)) fail(what)
+    const value = numOrNull(p.value, what)
+    const prev = out.at(-1)
+    if (prev !== undefined && !(time > prev.time)) fail(what)
+    out.push({ time, value })
+  }
+  return out
+}
+
+/** A finite number or null; anything else is a parse error. */
+function numOrNull(v: unknown, what: string): number | null {
+  if (v === null) return null
+  if (typeof v !== 'number' || !Number.isFinite(v)) fail(what)
+  return v
+}
+
+function parseDerivativesRange(v: unknown, what: string): DerivativesRange {
+  const r = record(v, what)
+  return { first: numOrNull(r.first, what), last: numOrNull(r.last, what) }
+}
+
+/**
+ * Strict: the funding and open-interest lists must be well formed (finite integer times,
+ * strictly ascending; values finite or null) and the same length, and `available` must give
+ * first/last (number or null) for both series. Anything else is a `parse` LabError.
+ */
+export function parseDerivativesResponse(v: unknown): DerivativesResponse {
+  const r = record(v, 'derivatives answer')
+  if (typeof r.symbol !== 'string') fail('derivatives answer')
+  const barSeconds = num(r.bar_seconds)
+  if (barSeconds === null) fail('derivatives answer')
+  const funding = parseDerivativesPoints(r.funding, 'funding series')
+  const openInterest = parseDerivativesPoints(r.open_interest, 'open-interest series')
+  if (funding.length !== openInterest.length) fail('derivatives answer')
+  const available = record(r.available, 'derivatives availability')
+  return {
+    symbol: r.symbol,
+    bar_seconds: barSeconds,
+    funding,
+    open_interest: openInterest,
+    available: {
+      funding: parseDerivativesRange(available.funding, 'funding availability'),
+      open_interest: parseDerivativesRange(available.open_interest, 'open-interest availability'),
+    },
+    source: str(r.source),
+  }
+}
+
+/** True when `points` has exactly one point per requested time, in the same order. */
+function matchesTimes(points: readonly DerivativesPoint[], times: readonly number[]): boolean {
+  return points.length === times.length && points.every((p, i) => p.time === times[i])
+}
+
 // ---------------------------------------------------------------------------------------------
 // Requests
 // ---------------------------------------------------------------------------------------------
@@ -404,7 +479,11 @@ async function errorFor(res: Response): Promise<never> {
   throw new LabError('http', detail || `The lab service answered HTTP ${res.status}`, res.status)
 }
 
-export function createLabClient(opts: LabClientOptions = {}): LabClient {
+/**
+ * The full client. `fetchDerivatives` is on the returned object (LabDerivativesClient) but not
+ * part of `LabClient`, so pages that take a LabClient (and their test doubles) do not need it.
+ */
+export function createLabClient(opts: LabClientOptions = {}): LabClient & LabDerivativesClient {
   const base = (opts.basePath ?? LAB_BASE_PATH).replace(/\/+$/, '')
   const timeoutMs = opts.timeoutMs ?? LAB_TIMEOUT_MS
   const backtestTimeoutMs = opts.backtestTimeoutMs ?? LAB_BACKTEST_TIMEOUT_MS
@@ -521,6 +600,19 @@ export function createLabClient(opts: LabClientOptions = {}): LabClient {
       if (req.threshold !== undefined) payload.threshold = req.threshold
       const body = await request('/regime', { method: 'POST', body: payload, signal })
       return parseRegimeResponse(body)
+    },
+    async fetchDerivatives(req, signal) {
+      const payload: DerivativesRequest = {
+        symbol: req.symbol,
+        times: req.times,
+        bar_seconds: req.bar_seconds,
+      }
+      const body = await request('/derivatives', { method: 'POST', body: payload, signal })
+      const res = parseDerivativesResponse(body)
+      if (!matchesTimes(res.funding, req.times) || !matchesTimes(res.open_interest, req.times)) {
+        fail('derivatives answer (its bars do not match the request)')
+      }
+      return res
     },
   }
 }

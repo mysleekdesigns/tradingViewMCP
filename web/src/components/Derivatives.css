@@ -1,0 +1,49 @@
+/* ---------- Funding / open-interest chip (chart panels) ---------- */
+
+/* Shares the regime chip's frame; sits under it when both are on. */
+.deriv-chip--stacked {
+  top: 36px;
+}
+
+.deriv-chip__icon {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: flex-end;
+  gap: 2px;
+  width: 12px;
+  height: 11px;
+}
+
+.deriv-chip__bar {
+  width: 3px;
+  border-radius: 1px;
+}
+
+.deriv-chip__bar--pos {
+  height: 8px;
+  background: color-mix(in srgb, var(--up) 80%, transparent);
+}
+
+.deriv-chip__bar--neg {
+  height: 5px;
+  background: color-mix(in srgb, var(--down) 80%, transparent);
+}
+
+/* The open-interest line across the bars. */
+.deriv-chip__line {
+  position: absolute;
+  top: 2px;
+  left: 0;
+  width: 12px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: var(--accent, #2962ff);
+  transform: rotate(-12deg);
+}
+
+.deriv-chip__meta {
+  color: var(--text-muted);
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}

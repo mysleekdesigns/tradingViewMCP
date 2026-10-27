@@ -37,7 +37,7 @@ default-groups = ["dev", "crosscheck"]
 target-version = "py312"
 line-length = 100
 src = ["lab", "tests"]
-extend-exclude = [".venv", "data"]
+extend-exclude = [".venv", "./data"]  # the downloaded-data dir only, not the lab.data package
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "N", "SIM", "RUF"]

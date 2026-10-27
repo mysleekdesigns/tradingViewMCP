@@ -7,6 +7,7 @@ import {
   parseBacktestReport,
   parseEquity,
   parseLedgerItem,
+  parseDerivativesResponse,
   parseMetrics,
   parseRegimeResponse,
 } from './labApi'
@@ -456,5 +457,124 @@ describe('regime', () => {
       .catch((e: unknown) => e)
     expect((err as LabError).kind).toBe('offline')
     expect((err as LabError).message).toBe(LAB_OFFLINE_MESSAGE)
+  })
+})
+
+describe('derivatives', () => {
+  const H4 = 14_400
+  const T0 = 1_704_067_200
+  const answer = {
+    symbol: 'BTCUSDT',
+    bar_seconds: H4,
+    funding: [
+      { time: T0, value: 0.00037409 },
+      { time: T0 + H4, value: null },
+    ],
+    open_interest: [
+      { time: T0, value: 3_131_493_738.9 },
+      { time: T0 + H4, value: null },
+    ],
+    available: {
+      funding: { first: 1_577_836_800, last: 1_790_000_000 },
+      open_interest: { first: null, last: null },
+    },
+    source: 'data.binance.vision futures/um archive (historical; no live stream)',
+  }
+  const req = { symbol: 'BTCUSDT', times: [T0, T0 + H4], bar_seconds: H4 }
+
+  async function errorOf(body: unknown, status = 200): Promise<LabError> {
+    const { fetchImpl } = fakeFetch(() => jsonResponse(status, body))
+    const err = await createLabClient({ fetchImpl })
+      .fetchDerivatives(req)
+      .catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(LabError)
+    return err as LabError
+  }
+
+  it('posts symbol, closed bar times and bar length to /lab/derivatives and parses the answer', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => jsonResponse(200, answer))
+    const res = await createLabClient({ fetchImpl }).fetchDerivatives(req)
+    expect(calls[0]).toMatchObject({
+      url: '/lab/derivatives',
+      method: 'POST',
+      body: { symbol: 'BTCUSDT', times: [T0, T0 + H4], bar_seconds: H4 },
+    })
+    expect(res).toEqual(answer)
+  })
+
+  it('keeps null values as null (whitespace), never filling them in', () => {
+    const res = parseDerivativesResponse(answer)
+    expect(res.funding[1]).toEqual({ time: T0 + H4, value: null })
+    expect(res.open_interest[1].value).toBeNull()
+    expect(res.available.open_interest).toEqual({ first: null, last: null })
+  })
+
+  it('defaults a missing source to an empty string', () => {
+    const rest: Record<string, unknown> = { ...answer }
+    delete rest.source
+    expect(parseDerivativesResponse(rest).source).toBe('')
+  })
+
+  it.each([
+    ['no funding list', { ...answer, funding: undefined }],
+    ['a non-object point', { ...answer, funding: [null, answer.funding[1]] }],
+    ['a string value', { ...answer, funding: [{ time: T0, value: '0.0003' }, answer.funding[1]] }],
+    ['a point without a time', { ...answer, funding: [{ value: 0.1 }, answer.funding[1]] }],
+    [
+      'a fractional time',
+      { ...answer, funding: [{ time: T0 + 0.5, value: 0.1 }, answer.funding[1]] },
+    ],
+    ['descending times', { ...answer, funding: [...answer.funding].reverse() }],
+    ['lists of different lengths', { ...answer, open_interest: [answer.open_interest[0]] }],
+    ['no availability', { ...answer, available: undefined }],
+    [
+      'a string availability bound',
+      { ...answer, available: { ...answer.available, funding: { first: '1', last: null } } },
+    ],
+    ['no symbol', { ...answer, symbol: undefined }],
+    ['no bar length', { ...answer, bar_seconds: null }],
+  ])('rejects an answer with %s as a parse error', async (_name, body) => {
+    expect((await errorOf(body)).kind).toBe('parse')
+  })
+
+  it('rejects an answer whose bars do not match the requested times', async () => {
+    const shifted = {
+      ...answer,
+      funding: answer.funding.map((p) => ({ ...p, time: p.time + 60 })),
+      open_interest: answer.open_interest.map((p) => ({ ...p, time: p.time + 60 })),
+    }
+    expect((await errorOf(shifted)).kind).toBe('parse')
+    const short = {
+      ...answer,
+      funding: [answer.funding[0]],
+      open_interest: [answer.open_interest[0]],
+    }
+    expect((await errorOf(short)).kind).toBe('parse')
+  })
+
+  it('turns a 503 with a detail into a no-data LabError carrying the CLI hint', async () => {
+    const detail =
+      'No derivatives data for BTCUSDT: run `uv run python -m lab.data.archive derivatives BTCUSDT` in lab/'
+    const err = await errorOf({ detail }, 503)
+    expect(err.kind).toBe('no-data')
+    expect(err.status).toBe(503)
+    expect(err.message).toBe(detail)
+  })
+
+  it('turns a 422 into an invalid LabError', async () => {
+    const err = await errorOf(
+      { errors: [{ path: 'bar_seconds', message: 'must be between 60 and 604800' }] },
+      422,
+    )
+    expect(err.kind).toBe('invalid')
+    expect(err.message).toBe('bar_seconds: must be between 60 and 604800')
+  })
+
+  it('reports offline when the lab is not running', async () => {
+    const { fetchImpl } = fakeFetch(() => new Response('Bad Gateway', { status: 502 }))
+    const err = await createLabClient({ fetchImpl })
+      .fetchDerivatives(req)
+      .catch((e: unknown) => e)
+    expect((err as LabError).kind).toBe('offline')
   })
 })

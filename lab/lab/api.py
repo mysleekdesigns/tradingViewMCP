@@ -20,6 +20,15 @@ ribbon. It is a display feature, not a trial: nothing is written to the ledger. 
 only closes at or before its bar (``lab.registry.regime.regime_labels``), so appending bars never
 changes an earlier label.
 
+``POST /lab/derivatives`` serves the chart's optional funding and open-interest panes from the
+lab's USD-M futures archive Parquet (``lab.data.derivatives``; historical only, no live futures
+stream). Each value is the last archive row visible at the bar's close
+(``lab.data.derivatives_align``): a funding settlement counts only at bars whose close is at or
+after its own timestamp, an OI snapshot only from 5 minutes after its ``create_time`` (its
+window convention is unverified), and a value older than its staleness limit is a gap
+(null), never carried. Display only, like ``/lab/regime``: no ledger write and not a backtest, so
+the design-window restriction does not apply. 503 when nothing is downloaded for the symbol.
+
 Results are historical and not forward-looking.
 """
 
@@ -44,6 +53,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from lab.config import LabConfig, load_config
+from lab.data import derivatives as derivatives_data
+from lab.data.derivatives_align import METRICS_INTERVAL, METRICS_PUBLICATION_LAG, align_dataset
 from lab.engine import run_signals, run_weights
 from lab.ledger import Ledger
 from lab.plan import validate_plan
@@ -70,9 +81,11 @@ from lab.types import ZERO_COSTS
 
 __all__ = [
     "ALLOWED_HOSTS",
+    "MAX_DERIVATIVES_BARS",
     "MAX_REGIME_BARS",
     "app",
     "create_app",
+    "derivatives_series",
     "host_allowed",
     "main",
     "regime_points",
@@ -180,6 +193,105 @@ def regime_points(
         {"time": t, "state": _REGIME_STATE_VALUE[lab] if lab >= 0 else None}
         for t, lab in zip(times, labels.tolist(), strict=True)
     ]
+
+
+MAX_DERIVATIVES_BARS = MAX_REGIME_BARS
+SYMBOL_PATTERN = r"^[A-Z0-9]{2,30}$"
+MAX_UNIX_SECONDS = 4_102_444_800  # 2100-01-01; keeps bar times inside pandas' datetime range
+DERIVATIVES_SOURCE = "data.binance.vision futures/um archive (historical; no live stream)"
+FUNDING_DATASET, FUNDING_VALUE = "fundingRate", "funding_rate"
+OI_DATASET, OI_VALUE = "metrics", "sum_open_interest_value"
+# Load margin before the first bar: no funding interval exceeds a day; OI rows are 5-minute and
+# become visible METRICS_PUBLICATION_LAG after create_time, so their margin adds that lag.
+_FUNDING_MARGIN_PER_INTERVAL = pd.Timedelta(hours=24)
+
+BarTime = Annotated[int, Field(strict=True, ge=0, le=MAX_UNIX_SECONDS)]
+
+
+class DerivativesBody(BaseModel):
+    """Closed spot bars (open times, UNIX seconds, strictly ascending) to align funding and open
+    interest to."""
+
+    symbol: str = Field(strict=True, pattern=SYMBOL_PATTERN)
+    times: list[BarTime] = Field(max_length=MAX_DERIVATIVES_BARS)
+    bar_seconds: int = Field(strict=True, ge=60, le=604_800)
+
+    @field_validator("times")
+    @classmethod
+    def _ascending(cls, v: list[int]) -> list[int]:
+        if any(b <= a for a, b in pairwise(v)):
+            raise ValueError("times must be strictly ascending (unique UNIX seconds)")
+        return v
+
+
+def _extent(data_dir: Path, dataset: str, symbol: str, column: str) -> dict[str, int | None]:
+    """First / last archive timestamp (UNIX s) with a non-null ``column`` on disk, reading only
+    the files needed from each end (file names sort chronologically)."""
+    directory = derivatives_data.series_dir(data_dir, dataset, symbol)
+    files = (
+        sorted(p for p in directory.glob("*.parquet") if p.is_file()) if directory.is_dir() else []
+    )
+
+    def edge(paths: list[Path], last: bool) -> int | None:
+        for path in paths:
+            frame = pd.read_parquet(path, columns=[column], engine="pyarrow")
+            times = pd.DatetimeIndex(frame.index)[frame[column].notna().to_numpy()]
+            if len(times):
+                ts = times.max() if last else times.min()
+                return int(ts.tz_convert("UTC").floor("s").timestamp())
+        return None
+
+    return {"first": edge(files, last=False), "last": edge(files[::-1], last=True)}
+
+
+def _points(times: list[int], values: pd.Series) -> list[dict[str, int | float | None]]:
+    return [
+        {"time": t, "value": None if np.isnan(v) else float(v)}
+        for t, v in zip(times, values.to_numpy(dtype=np.float64).tolist(), strict=True)
+    ]
+
+
+def derivatives_series(
+    config: LabConfig, symbol: str, times: list[int], bar_seconds: int
+) -> dict[str, Any] | None:
+    """Funding rate and OI value (USD) at each bar's close; ``None`` when neither series has any
+    data on disk for ``symbol``. Point in time: see ``lab.data.derivatives_align``."""
+    data_dir = config.derivatives_dir
+    stale = config.derivatives.stale_after_intervals
+    available = {
+        "funding": _extent(data_dir, FUNDING_DATASET, symbol, FUNDING_VALUE),
+        "open_interest": _extent(data_dir, OI_DATASET, symbol, OI_VALUE),
+    }
+    if all(a["first"] is None for a in available.values()):
+        return None
+    bar_times = pd.DatetimeIndex(
+        pd.to_datetime(np.asarray(times, dtype=np.int64), unit="s", utc=True), name="time"
+    )
+    out: dict[str, Any] = {"symbol": symbol, "bar_seconds": bar_seconds}
+    for key, dataset, column, margin in (
+        ("funding", FUNDING_DATASET, FUNDING_VALUE, _FUNDING_MARGIN_PER_INTERVAL * stale),
+        (
+            "open_interest",
+            OI_DATASET,
+            OI_VALUE,
+            METRICS_INTERVAL * stale + METRICS_PUBLICATION_LAG,
+        ),
+    ):
+        if not times:
+            out[key] = []
+            continue
+        frame = derivatives_data.load_series(
+            dataset,
+            symbol,
+            data_dir=data_dir,
+            start=bar_times[0] - margin,
+            end=bar_times[-1] + pd.Timedelta(seconds=bar_seconds),  # last close, inclusive
+        )
+        aligned = align_dataset(dataset, frame, bar_times, bar_seconds, stale_after_intervals=stale)
+        out[key] = _points(times, aligned[column])
+    out["available"] = available
+    out["source"] = DERIVATIVES_SOURCE
+    return out
 
 
 def _warm_up() -> None:
@@ -315,6 +427,24 @@ def create_app(
             "threshold": body.threshold,
             "engine": REGIME_ENGINE,
         }
+
+    @app.post("/lab/derivatives")
+    def derivatives(body: DerivativesBody) -> Any:
+        # Display only: no ledger write, not a trial, historical archive only (no live stream).
+        # Not a backtest, so the design-window restriction does not apply.
+        result = derivatives_series(config, body.symbol, body.times, body.bar_seconds)
+        if result is None:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": (
+                        f"no derivatives data for {body.symbol}; run `uv run python -m "
+                        f"lab.data.derivatives download {body.symbol} --datasets "
+                        "fundingRate,metrics --start YYYY-MM --end YYYY-MM` first"
+                    )
+                },
+            )
+        return result
 
     def _run(fn: Any, body: RunBody) -> Any:
         try:
