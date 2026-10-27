@@ -18,7 +18,7 @@ On disk under ``data_dir`` (``LabConfig.derivatives_dir``)::
     fundingRate/{S}/{YYYY-MM}.parquet
     {kline dataset}/{S}/{interval}/{YYYY-MM}.parquet
     metrics/{S}/{YYYY-MM-DD}.parquet
-    <series dir>/_downloads.json      # download outcomes: source sha256, not_found, rejected
+    <series dir>/_downloads.json      # outcomes: source sha256 (+ daily fills), not_found, rejected
     manifest.json                      # build_manifest(): per series first/last, rows, gaps, ...
 
 Each frame's index is the archive's OWN timestamp (UTC, named ``time``); alignment to spot bars is
@@ -32,6 +32,11 @@ Byte-identical duplicate lines are dropped; rows sharing a timestamp but differi
 whole file (recorded, not written). Missing samples stay absent: nothing is forward-filled or
 synthesised. The current or a future UTC month (monthly) or
 day (daily) is never written.
+
+Monthly kline zips can lack bars that the archive's daily zips hold (2026-06 lost 2026-06-29 in
+every 4h kline dataset). ``download`` fills such holes from the checksum-verified
+``daily/{dataset}/{S}/{iv}/{S}-{iv}-{YYYY-MM-DD}.zip`` (rows in both must match exactly) and
+records each daily zip's sha256 in the sidecar; ``--no-daily-fill`` turns this off.
 
 CLI::
 
@@ -166,13 +171,32 @@ def series_key(dataset: str, symbol: str, interval: str | None = None) -> str:
 
 
 def derivatives_url(
-    dataset: str, symbol: str, label: str, *, base_url: str, interval: str | None = None
+    dataset: str,
+    symbol: str,
+    label: str,
+    *,
+    base_url: str,
+    interval: str | None = None,
+    daily: bool = False,
 ) -> str:
-    """Archive URL of one file; ``label`` is ``YYYY-MM`` (monthly) or ``YYYY-MM-DD`` (metrics)."""
+    """Archive URL of one file; ``label`` is ``YYYY-MM`` (monthly) or ``YYYY-MM-DD`` (metrics).
+
+    ``daily=True`` names a kline dataset's DAILY zip (``label`` ``YYYY-MM-DD``), used only to fill
+    holes in a monthly file; fundingRate has no daily files and metrics is daily already, so
+    ``daily=True`` on them is a ``ValueError``.
+    """
     _check_dataset(dataset, interval)
     archive.check_symbol(symbol)
-    _label_start(dataset, label)
     base = base_url.rstrip("/")
+    if daily:
+        if dataset not in KLINE_DATASETS:
+            raise ValueError(
+                f"dataset {dataset!r} has no daily kline files; daily=True needs one of "
+                f"{sorted(KLINE_DATASETS)}"
+            )
+        _day_start(label, dataset)
+        return f"{base}/daily/{dataset}/{symbol}/{interval}/{symbol}-{interval}-{label}.zip"
+    _label_start(dataset, label)
     if dataset == "fundingRate":
         return f"{base}/monthly/fundingRate/{symbol}/{symbol}-fundingRate-{label}.zip"
     if dataset == "metrics":
@@ -183,15 +207,20 @@ def derivatives_url(
 def _label_start(dataset: str, label: str) -> pd.Timestamp:
     """UTC start of the month/day a file label names; ``ValueError`` naming the label."""
     if dataset in DAILY_DATASETS:
-        try:
-            day = pd.Timestamp(label)
-        except ValueError:
-            day = None
-        if day is None or len(label) != 10 or day.strftime("%Y-%m-%d") != label:
-            raise ValueError(f"invalid day {label!r} for {dataset}; expected 'YYYY-MM-DD'")
-        return day.tz_localize("UTC")
+        return _day_start(label, dataset)
     year, month = archive.parse_month(label, "month")
     return pd.Timestamp(year=year, month=month, day=1, tz="UTC")
+
+
+def _day_start(label: str, dataset: str) -> pd.Timestamp:
+    """UTC midnight of a ``YYYY-MM-DD`` label; ``ValueError`` naming the label."""
+    try:
+        day = pd.Timestamp(label)
+    except ValueError:
+        day = None
+    if day is None or len(label) != 10 or day.strftime("%Y-%m-%d") != label:
+        raise ValueError(f"invalid day {label!r} for {dataset}; expected 'YYYY-MM-DD'")
+    return day.tz_localize("UTC")
 
 
 def _label_end(dataset: str, label: str) -> pd.Timestamp:
@@ -336,6 +365,11 @@ class DownloadResult:
     rejected: dict[str, str] = field(default_factory=dict)  # label -> reason; not written
     incomplete: list[str] = field(default_factory=list)  # current/future UTC period, not written
     rows_written: int = 0
+    # kline daily fill (month label -> UTC days): daily zips merged in, and daily zips that were
+    # 404 (those holes stay holes); rows_filled counts rows taken from daily zips only
+    daily_filled: dict[str, list[str]] = field(default_factory=dict)
+    daily_not_found: dict[str, list[str]] = field(default_factory=dict)
+    rows_filled: int = 0
 
     @property
     def paths(self) -> list[Path]:
@@ -360,6 +394,119 @@ def _write_json(payload: dict, path: Path) -> None:
     tmp.replace(path)
 
 
+def missing_kline_days(frame: pd.DataFrame, label: str, interval: str) -> dict[str, int]:
+    """UTC days (``YYYY-MM-DD`` -> count) holding expected kline open times absent from ``frame``.
+
+    The expected grid is every ``interval`` step from the month's first to its last bar (the
+    whole month ``label``). Intervals that do not divide a day evenly (``3d``, ``1w``) have no
+    daily grid to fill from, so nothing is reported for them.
+    """
+    step = interval_seconds(interval)
+    if step > 86_400 or 86_400 % step:
+        return {}
+    start = _label_start("premiumIndexKlines", label)
+    end = _label_end("premiumIndexKlines", label)
+    grid = pd.date_range(start, end, freq=pd.Timedelta(seconds=step), inclusive="left")
+    missing = grid.difference(pd.DatetimeIndex(frame.index).as_unit(grid.unit))
+    if missing.empty:
+        return {}
+    days = pd.Series(1, index=missing.strftime("%Y-%m-%d")).groupby(level=0).sum()
+    return {str(d): int(n) for d, n in days.items()}
+
+
+def _rows_equal(a: pd.DataFrame, b: pd.DataFrame) -> np.ndarray:
+    """Row-wise exact equality of two frames on the same index and columns (NaN == NaN)."""
+    same = np.ones(len(a), dtype=bool)
+    for col in a.columns:
+        if col == KLINE_CLOSE_TIME:
+            same &= pd.DatetimeIndex(a[col]).as_unit("ns").asi8 == (
+                pd.DatetimeIndex(b[col]).as_unit("ns").asi8
+            )
+        else:
+            x = a[col].to_numpy(dtype=np.float64)
+            y = b[col].to_numpy(dtype=np.float64)
+            same &= (x == y) | (np.isnan(x) & np.isnan(y))
+    return same
+
+
+def merge_daily_rows(
+    monthly: pd.DataFrame, daily: pd.DataFrame, *, day: str, monthly_file: str, daily_file: str
+) -> tuple[pd.DataFrame, int]:
+    """Merge one daily kline frame into its month; returns ``(merged, rows added)``.
+
+    Every daily row must fall inside UTC ``day``. A timestamp present in both must carry an
+    identical row; otherwise ``RejectedFileError`` naming both files. Rows only in the daily file
+    fill the month's holes. Nothing is synthesised.
+    """
+    lo = _day_start(day, "daily kline")
+    hi = lo + pd.Timedelta(days=1)
+    outside = daily.index[(daily.index < lo) | (daily.index >= hi)]
+    if len(outside):
+        raise RejectedFileError(
+            f"{daily_file}: {len(outside)} row(s) outside {day}, "
+            f"e.g. {[t.isoformat() for t in outside[:3]]}"
+        )
+    both = daily.index.intersection(monthly.index)
+    if len(both):
+        same = _rows_equal(monthly.loc[both], daily.loc[both])
+        if not same.all():
+            bad = both[~same]
+            raise RejectedFileError(
+                f"{monthly_file} and {daily_file}: {len(bad)} timestamp(s) with conflicting rows, "
+                f"e.g. {[t.isoformat() for t in bad[:3]]}"
+            )
+    extra = daily.loc[daily.index.difference(monthly.index)]
+    if extra.empty:
+        return monthly, 0
+    merged = pd.concat([monthly, extra[list(monthly.columns)]]).sort_index(kind="stable")
+    merged.index.name = "time"
+    return merged, len(extra)
+
+
+def _fill_from_daily(
+    frame: pd.DataFrame,
+    *,
+    dataset: str,
+    symbol: str,
+    label: str,
+    interval: str,
+    base_url: str,
+    http: httpx.Client,
+    monthly_file: str,
+) -> tuple[pd.DataFrame, dict[str, dict], list[str], int]:
+    """Fill a parsed month's holes from its daily zips (checksum-verified like monthly ones).
+
+    Returns ``(frame, daily sources {day: {file, sha256, rows_added}}, days 404, rows added)``.
+    Raises ``RejectedFileError`` when a daily zip conflicts with the month or cannot be parsed,
+    and ``ValueError`` naming the daily file on a checksum mismatch or missing ``.CHECKSUM``.
+    """
+    sources: dict[str, dict] = {}
+    absent: list[str] = []
+    added = 0
+    for day in sorted(missing_kline_days(frame, label, interval)):
+        url = derivatives_url(
+            dataset, symbol, day, base_url=base_url, interval=interval, daily=True
+        )
+        daily_file = url.rsplit("/", 1)[-1]
+        payload = archive.fetch_verified_zip(url, http)
+        if payload is None:
+            absent.append(day)
+            continue
+        daily = parse_csv(
+            dataset, archive.csv_from_zip(payload, daily_file), filename=daily_file, symbol=symbol
+        )
+        frame, n = merge_daily_rows(
+            frame, daily, day=day, monthly_file=monthly_file, daily_file=daily_file
+        )
+        added += n
+        sources[day] = {
+            "file": daily_file,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "rows_added": n,
+        }
+    return frame, sources, absent, added
+
+
 def download(
     dataset: str,
     symbol: str,
@@ -371,6 +518,7 @@ def download(
     interval: str | None = None,
     client: httpx.Client | None = None,
     refresh: bool = False,
+    daily_fill: bool = True,
 ) -> DownloadResult:
     """Download ``dataset`` for months ``start``..``end`` (``YYYY-MM``, inclusive) into Parquet.
 
@@ -380,6 +528,13 @@ def download(
     never written. A SHA-256 mismatch or a missing ``.CHECKSUM`` raises ``ValueError`` naming the
     file. Outcomes (source sha256 per file, not_found, rejected) persist in the series'
     ``_downloads.json`` for ``build_manifest``; call ``build_manifest`` afterwards (the CLI does).
+
+    Kline datasets with ``daily_fill`` (default): after parsing a month, every UTC day holding an
+    expected bar the month lacks is fetched from the archive's DAILY zip (checksum-verified the
+    same way) and merged: a row in both files must be identical (else the month is rejected as
+    conflicting), rows only in the daily zip fill the hole. Each daily zip's file and sha256 is
+    recorded under ``sources[month]["daily"][day]``; a daily 404 leaves the hole and is recorded
+    under ``sources[month]["daily_not_found"]``. Nothing is synthesised.
     """
     _check_dataset(dataset, interval)
     archive.check_symbol(symbol)
@@ -389,6 +544,7 @@ def download(
     sidecar_path = out / SIDECAR_NAME
     sidecar = _read_sidecar(sidecar_path)
     not_found = set(sidecar["not_found"])
+    fill = daily_fill and dataset in KLINE_DATASETS
     result = DownloadResult()
     own_client = client is None
     http = client or httpx.Client(timeout=archive.DEFAULT_TIMEOUT, follow_redirects=True)
@@ -409,10 +565,8 @@ def download(
                 not_found.add(label)
                 continue
             not_found.discard(label)
-            sidecar["sources"][label] = {
-                "file": filename,
-                "sha256": hashlib.sha256(payload).hexdigest(),
-            }
+            source: dict = {"file": filename, "sha256": hashlib.sha256(payload).hexdigest()}
+            sidecar["sources"][label] = source
             try:
                 frame = parse_csv(
                     dataset,
@@ -420,6 +574,24 @@ def download(
                     filename=filename,
                     symbol=symbol,
                 )
+                if fill and interval is not None:
+                    frame, daily_sources, absent, added = _fill_from_daily(
+                        frame,
+                        dataset=dataset,
+                        symbol=symbol,
+                        label=label,
+                        interval=interval,
+                        base_url=base_url,
+                        http=http,
+                        monthly_file=filename,
+                    )
+                    if daily_sources:
+                        source["daily"] = daily_sources
+                        result.daily_filled[label] = sorted(daily_sources)
+                    if absent:
+                        source["daily_not_found"] = absent
+                        result.daily_not_found[label] = absent
+                    result.rows_filled += added
             except RejectedFileError as exc:
                 result.rejected[label] = str(exc)
                 sidecar["rejected"][label] = str(exc)
@@ -617,7 +789,10 @@ def build_manifest(data_dir: Path, *, gap_factor: float) -> dict:
     empty), rows, files, gaps (``{from, to}`` where spacing exceeds ``gap_factor`` x the expected
     step), ``content_sha256`` (``content_sha256`` of the loaded frame, so editing a Parquet value
     changes the manifest even though the source zips did not), and from the download sidecar:
-    not_found and rejected labels and each source zip's sha256. Top level: ``schema_version``
+    not_found and rejected labels and each source zip's sha256, plus (klines) ``daily_sources``
+    ``{month: {day: sha256}}`` for daily zips merged into a month and ``daily_not_found``
+    ``{month: [days]}`` for holes whose daily zip was 404 (both empty for sidecars written before
+    daily fill). Top level: ``schema_version``
     (``SCHEMA_VERSION``) and ``gap_factor``. Deterministic (no wall-clock field), so its sha256
     changes only when the data does.
     """
@@ -648,6 +823,16 @@ def build_manifest(data_dir: Path, *, gap_factor: float) -> dict:
             "not_found": sorted(sidecar["not_found"]),
             "rejected": dict(sorted(sidecar["rejected"].items())),
             "sources": {k: v["sha256"] for k, v in sorted(sidecar["sources"].items())},
+            "daily_sources": {
+                k: {day: d["sha256"] for day, d in sorted(v["daily"].items())}
+                for k, v in sorted(sidecar["sources"].items())
+                if v.get("daily")
+            },
+            "daily_not_found": {
+                k: sorted(v["daily_not_found"])
+                for k, v in sorted(sidecar["sources"].items())
+                if v.get("daily_not_found")
+            },
         }
     manifest = {"schema_version": SCHEMA_VERSION, "gap_factor": gap_factor, "series": series}
     _write_json(manifest, Path(data_dir) / MANIFEST_NAME)
@@ -683,6 +868,11 @@ def main(argv: list[str] | None = None) -> int:
     dl.add_argument("--end", required=True, help="last month, YYYY-MM (inclusive)")
     dl.add_argument("--base-url", default=cfg.derivatives.archive_base_url)
     dl.add_argument("--refresh", action="store_true", help="re-download files on disk")
+    dl.add_argument(
+        "--no-daily-fill",
+        action="store_true",
+        help="klines: do not fill holes in a monthly zip from the archive's daily zips",
+    )
     sub.add_parser("manifest", help="rebuild manifest.json from the files on disk")
     args = parser.parse_args(argv)
     gap_factor = cfg.derivatives.gap_factor
@@ -708,6 +898,7 @@ def main(argv: list[str] | None = None) -> int:
                 base_url=args.base_url,
                 interval=interval,
                 refresh=args.refresh,
+                daily_fill=not args.no_daily_fill,
             )
             key = series_key(dataset, symbol, interval)
             print(
@@ -722,6 +913,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  rejected {label}: {reason}")
             if res.incomplete:
                 print(f"  not written (period not finished): {_compact(res.incomplete)}")
+            for label, days in res.daily_filled.items():
+                print(f"  {label} holes filled from daily zips: {_compact(days)}")
+            if res.rows_filled:
+                print(f"  {res.rows_filled} rows taken from daily zips")
+            for label, days in res.daily_not_found.items():
+                print(f"  {label} holes left (daily zip not in archive): {_compact(days)}")
     except (ValueError, httpx.HTTPError) as exc:
         print(f"error: {exc}")
         return 1

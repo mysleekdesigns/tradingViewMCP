@@ -100,3 +100,5 @@ neighbourhood_max_trials = 37    # base + 9 portfolio tunables (every safeguard 
 archive_base_url = "https://data.binance.vision/data/futures/um"  # Binance public USD-M archive (fundingRate, *Klines, metrics), no key
 stale_after_intervals = 2.0      # at a bar close, a value older than 2 of its own sampling intervals is a gap, not carried forward
 gap_factor = 1.5                 # manifest: spacing above 1.5x the expected step is recorded as a gap (one missed sample is 2x)
+gate_base_max_true_frac = 0.9    # refuse a gated plan whose price clause alone is true on >= 90% of scored bars (a real price signal like close > ema is true ~50-65%)
+warmup_days = 30                 # every derivatives plan on a symbol/interval is scored from the latest first timestamp of its 5 derivatives series + 30 days (room for look-backs of up to ~30 days, so warm-up NaN never decides the start); a derivatives feature's period x bar length must be <= this

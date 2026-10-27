@@ -4,6 +4,10 @@
 output at bar t uses candle rows at or before t only; ``tests/test_registry_lookahead.py``
 runs the perturbation test on every entry, so a new feature is covered the moment it is
 registered here.
+
+Derivatives features (``lab.registry.derivatives``) read aligned ``drv_*`` columns that the
+data layer attaches to the candles; they are risk filters, accepted by the plan validator only
+as gating ``and`` clauses of a spot long-only entry.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import difflib
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 
+from lab.registry.derivatives import DERIVATIVES_FEATURE_SPECS, DERIVATIVES_FEATURES
 from lab.registry.features import PRICE_FEATURES, fill_params
 from lab.registry.regime import REGIME_FEATURES
 from lab.types import FeatureSpec
@@ -26,7 +31,9 @@ def _build(specs: Iterable[FeatureSpec]) -> Mapping[str, FeatureSpec]:
     return MappingProxyType(table)
 
 
-REGISTRY: Mapping[str, FeatureSpec] = _build((*PRICE_FEATURES, *REGIME_FEATURES))
+REGISTRY: Mapping[str, FeatureSpec] = _build(
+    (*PRICE_FEATURES, *REGIME_FEATURES, *DERIVATIVES_FEATURE_SPECS)
+)
 
 
 def get_feature(name: str) -> FeatureSpec:
@@ -46,4 +53,4 @@ def get_feature(name: str) -> FeatureSpec:
     )
 
 
-__all__ = ["REGISTRY", "fill_params", "get_feature"]
+__all__ = ["DERIVATIVES_FEATURES", "REGISTRY", "fill_params", "get_feature"]

@@ -1,7 +1,8 @@
 """CLI: ``uv run python -m lab.crosscheck --plan plan.json [--run-id crosscheck-dev]
 [--tolerance 0.5]``.
 
-Re-runs the plan on the design window of the local data (``lab/data/klines``, holdout excluded)
+Re-runs the plan on the design window of the local data (``lab/data/klines`` plus the aligned
+``drv_*`` derivatives columns via ``lab.runner.default_loader``, holdout excluded)
 in nautilus_trader and compares it with the vectorbt engine, once with the configured costs and
 once with the same fees but no slippage (the mechanics pass), and attributes the configured
 gap to vectorbt's stop slippage. The configured vectorbt backtest is recorded in the trial
@@ -21,10 +22,10 @@ import numpy as np
 
 from lab.config import DEFAULT_CONFIG_PATH, load_config
 from lab.crosscheck.nautilus import CrossCheckResult, crosscheck
-from lab.data.store import load_candles
-from lab.engine.splits import design_view, design_window
+from lab.engine.splits import design_view
 from lab.ledger import Ledger, costs_to_json, metrics_to_json
 from lab.plan import parse_plan, plan_hash, plan_to_dict
+from lab.runner import default_loader, plan_design_window
 from lab.stats import compute_metrics, sharpe_per_bar
 from lab.types import CostModel, Plan, TrialRecord, Window
 
@@ -112,10 +113,14 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = load_config(args.config)
     plan = parse_plan(json.loads(args.plan.read_text()))
+    # default_loader: Parquet archive before the holdout, plus the aligned drv_* derivatives
+    # columns (derivatives plans need them); a missing download raises before any trial
     candles = design_view(
-        load_candles(plan.symbol, plan.interval, parquet_dir=cfg.parquet_dir), cfg.splits
+        default_loader(cfg)(plan.symbol, plan.interval, cfg.splits.holdout_start), cfg.splits
     )
-    window = design_window(cfg.splits)
+    # the plan's scored window: derivatives plans start where their inputs exist and pass the
+    # gate-base check; missing inputs raise before any trial (same rule as the MCP tools)
+    window, _ = plan_design_window(plan, candles, cfg)
     res = crosscheck(
         plan,
         candles,

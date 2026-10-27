@@ -77,6 +77,7 @@ from mcp.types import ToolAnnotations
 
 from lab import portfolio_runner as pr
 from lab.config import LabConfig, load_config
+from lab.data.derivatives_columns import plan_derivative_columns, require_plan_inputs
 from lab.engine.splits import design_view, design_window, walk_forward_folds
 from lab.ledger import SELECTION_SOURCES, Ledger
 from lab.plan import parse_plan, plan_hash, plan_to_dict, tunable_params
@@ -84,6 +85,7 @@ from lab.plan import portfolio as pf
 from lab.plan import validate_plan as _validate_plan
 from lab.plan.validator import PlanValidationError, format_errors
 from lab.registry import REGISTRY
+from lab.registry.derivatives import DERIVATIVES_FEATURES
 from lab.report import ledger_item, metrics_dict, num, seconds
 from lab.research.contract import (
     SUCCESS_CRITERIA_PATH,
@@ -115,6 +117,7 @@ from lab.research.portfolio import (
 )
 from lab.research.runs import (
     budget_status,
+    check_derivatives_snapshot,
     check_lab_fingerprint,
     check_universe_manifest,
     holdout_budget,
@@ -126,6 +129,11 @@ from lab.runner import (
     DataUnavailableError,
     archive_cli_hint,
     default_loader,
+    derivatives_lookback_errors,
+    derivatives_period_caps,
+    derivatives_series,
+    gate_base_trial_check,
+    plan_design_window,
 )
 from lab.search.optuna_search import optuna_search, walk_forward_optimize
 from lab.types import Plan, Window, interval_seconds
@@ -148,6 +156,11 @@ TOOL_NAMES: tuple[str, ...] = (
 )
 MAX_LEDGER_PAGE = 500
 MAX_LABEL_LEN = 200
+DERIVATIVES_GATE_NOTE = (
+    "exposure or crash-risk filter, not a direction signal: may only gate long_entry as an "
+    "`and` conjunct beside a price signal (e.g. close > ema_slow and funding_zscore < 2), never "
+    "in long_exit"
+)
 
 INSTRUCTIONS = """\
 strategy-lab: an honest crypto backtesting lab. Nothing here trades.
@@ -166,6 +179,22 @@ any plan whose design-window returns correlate with one of its plans at or above
 [research] literal_lineage_corr (0.95 by default; e.g. a no-op or cosmetic copy). A different
 logic that merely trends alike (below that bar) is not blocked by those literals.
 holdout_check needs a matched run_crosscheck first.
+Derivatives features (list_features role "gate": funding, premium, basis, open interest,
+long/short ratio) are exposure or crash-risk filters, not direction signals: they may only gate
+long_entry as an `and` conjunct beside a price signal (close > ema_slow and funding_zscore < 2),
+never in long_exit, and the price clause must select on its own (a plan whose price clauses
+alone are true on >= 90% of bars, e.g. close > 0, is refused before any trial; every
+run_sweep / walk_forward trial is checked the same way on its own params, and a trial that
+fails is a ledgered failed trial, never selected). run_backtest / get_report add an ungated
+baseline (the same plan without its derivatives clauses, same window and costs) and the gate's
+binding share as information only: not a criterion, not a trial, never holdout-checkable, so
+never submit a price-only twin to compare. Such plans are
+scored from ONE start per symbol/interval shared by every derivatives plan (the latest start of
+its derivatives archive series + [derivatives] warmup_days, frozen with the run; report
+"scoring" block; benchmarks and folds start there too), so a derivatives feature's period x bar
+length must fit in warmup_days (e.g. funding_zscore period <= 180 on 4h with 30 days).
+start_run freezes the derivatives archive per series; re-downloading or editing a series the
+plan reads, or a changed [derivatives] setting, needs a new run for such plans.
 Portfolio plans ({"kind": "portfolio", ...}; list_features shows the schema): long-only top
 quantile of the lab.toml [universe] (point-in-time top-N coins by trailing dollar volume), same
 tools and budgets; min_trades counts filled rebalances; benchmarks are the equal-weight
@@ -229,10 +258,20 @@ def _plan_or_error(raw: Mapping[str, Any]) -> tuple[Plan, str]:
     return plan, plan_hash(plan)
 
 
-def _design(plan: Plan, cfg: LabConfig, loader: CandleLoader) -> tuple[pd.DataFrame, Window]:
-    """Design-view candles (every bar < holdout_start) and the plan's design window, the same
-    window ``run_backtest_report`` uses: ``[max(design_start, first bar), min(holdout_start,
-    last bar end))``."""
+def _design(
+    plan: Plan,
+    cfg: LabConfig,
+    loader: CandleLoader,
+    series: Mapping[str, Any] | None = None,
+) -> tuple[pd.DataFrame, Window, dict[str, Any] | None]:
+    """Design-view candles (every bar < holdout_start), the plan's SCORED design window, and
+    its ``scoring`` block: the window ``run_backtest_report`` uses (``[max(design_start, first
+    bar), min(holdout_start, last bar end))``; for a derivatives plan from the one scored start
+    of its symbol/interval, from ``series`` (the run's frozen snapshot entries,
+    :func:`lab.runner.derivatives_series`), after the trivially-true-price-clause check,
+    :func:`lab.runner.plan_design_window`), computed once per call (a walk-forward's folds all
+    start from it, identical for every derivatives plan in the run). Every refusal is a
+    ToolError before any ledger row."""
     try:
         raw = loader(plan.symbol, plan.interval, cfg.splits.holdout_start)
     except DataUnavailableError as exc:
@@ -243,7 +282,15 @@ def _design(plan: Plan, cfg: LabConfig, loader: CandleLoader) -> tuple[pd.DataFr
         last_end = candles.index[-1] + pd.Timedelta(seconds=interval_seconds(plan.interval))
         end = min(cfg.splits.holdout_start, last_end)
         if end > start and int(((candles.index >= start) & (candles.index < end)).sum()) >= 2:
-            return candles, Window(start=start, end=end, kind="design")
+            try:
+                window, scoring = plan_design_window(plan, candles, cfg, series=series)
+            except DataUnavailableError as exc:
+                raise ToolError(str(exc)) from None
+            except PlanValidationError as exc:
+                raise ToolError(
+                    "plan is refused; fix these and resubmit:\n" + format_errors(exc.errors)
+                ) from None
+            return candles, window, scoring
     raise ToolError(
         f"no {plan.symbol} {plan.interval} bars in the design window "
         f"[{cfg.splits.design_start.date()}, {cfg.splits.holdout_start.date()}); the owner can "
@@ -267,12 +314,16 @@ def _window_json(w: Window) -> dict[str, Any]:
 
 
 def _space(
-    plan: Plan, space: Mapping[str, Mapping[str, Any]], criteria: SuccessCriteria
+    plan: Plan,
+    space: Mapping[str, Mapping[str, Any]],
+    criteria: SuccessCriteria,
+    caps: Mapping[str, int] | None = None,
 ) -> dict[str, tuple[float, float]]:
     """Validate a search space: tunable keys only, no step (except 1 for ints), ``low < high``,
-    and width ``high - low >= 2 * neighbourhood_pct * max(|mid|, tiny)`` with the run's FROZEN
+    width ``high - low >= 2 * neighbourhood_pct * max(|mid|, tiny)`` with the run's FROZEN
     ``neighbourhood_pct`` (a range narrower than the ±pct robustness band cannot show that the
-    surface around the chosen value is smooth)."""
+    surface around the chosen value is smooth), and a derivatives look-back's ``high`` within
+    ``caps`` (:func:`lab.runner.derivatives_period_caps`: ``[derivatives] warmup_days``)."""
     if not space:
         raise ToolError(
             "space must name at least one tunable param: {key: {low, high}}; validate_plan "
@@ -297,6 +348,14 @@ def _space(
         low, high = float(rng["low"]), float(rng["high"])
         if not low < high:
             raise ToolError(f"space[{key!r}] needs low < high, got low={low:g} high={high:g}")
+        cap = (caps or {}).get(key)
+        if cap is not None and high > cap:
+            raise ToolError(
+                f"space[{key!r}] high {high:g} is a derivatives look-back longer than lab.toml "
+                f"[derivatives] warmup_days allows on {plan.interval} bars; use high <= {cap} "
+                "(every derivatives plan is scored from one shared start that leaves that much "
+                "warm-up)"
+            )
         mid = (low + high) / 2.0
         need = 2.0 * pct * max(abs(mid), _TINY)
         if high - low < need:
@@ -431,6 +490,26 @@ def build_server(
         except ValueError as exc:
             raise ToolError(str(exc)) from None
 
+    def check_derivatives(led: Ledger, run_id: str, plan: Plan) -> None:
+        """Plans that read a derivatives column: the run's frozen derivatives snapshot of the
+        series this plan reads (manifest entries, content on disk, staleness rule) must match
+        the archive (:func:`lab.research.runs.check_derivatives_snapshot`). Checked before any
+        trial is recorded; plans without derivatives features skip it."""
+        if not plan_derivative_columns(plan):
+            return
+        try:
+            check_derivatives_snapshot(led, run_id, config, plan)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from None
+
+    def require_inputs(plan: Plan, candles: pd.DataFrame) -> None:
+        """A derivatives plan's ``drv_*`` inputs must be loaded (before anything is recorded):
+        a missing download is a ToolError naming the CLI, never an error trial."""
+        try:
+            require_plan_inputs(plan, candles, symbol=plan.symbol, interval=plan.interval)
+        except DataUnavailableError as exc:
+            raise ToolError(str(exc)) from None
+
     def guard(led: Ledger, run_id: str, h: str, cost: int, what: str) -> None:
         """Refuse (before anything runs or is recorded) when ``what`` would exceed the run's
         frozen budget. ``cost`` is the worst-case number of ledger trials it records."""
@@ -500,6 +579,12 @@ def build_server(
         manifest = universe_manifest(config)
         if manifest is not None:
             out["universe_manifest_sha256"] = manifest["sha256"]
+        with open_ledger() as led:
+            run = led.research_run(run_id)
+        frozen = run["config"].get("derivatives") if run is not None else None
+        out["derivatives_manifest_sha256"] = (
+            frozen.get("manifest_sha256") if isinstance(frozen, dict) else None
+        )
         return out
 
     # ------------------------------------------------------------------ free tools
@@ -507,12 +592,18 @@ def build_server(
     @server.tool(annotations=_READ_ONLY)
     def list_features() -> dict[str, Any]:
         """Every registry feature a plan may use: name, description, outputs, and params
-        (kind, default, inclusive low/high bounds)."""
+        (kind, default, inclusive low/high bounds). Derivatives features carry "role": "gate":
+        they may only gate long_entry (an `and` conjunct beside a price signal), never exits."""
         return {
             "features": [
                 {
                     "name": spec.name,
                     "description": spec.description,
+                    **(
+                        {"role": "gate", "note": DERIVATIVES_GATE_NOTE}
+                        if spec.name in DERIVATIVES_FEATURES
+                        else {}
+                    ),
                     "outputs": list(spec.outputs),
                     "params": [
                         {
@@ -593,11 +684,16 @@ def build_server(
                 ),
             }
         parsed, errors = _validate_plan(plan)
+        if parsed is not None:  # a derivatives look-back must fit in [derivatives] warmup_days
+            errors = derivatives_lookback_errors(parsed, config)
+            if errors:
+                parsed = None
         if parsed is None:
             return {
                 "valid": False,
                 "errors": [{"path": e.path, "message": e.message} for e in errors],
             }
+        caps = derivatives_period_caps(parsed, config)
         return {
             "valid": True,
             "errors": [],
@@ -607,7 +703,7 @@ def build_server(
                     "kind": s.kind,
                     "default": s.default,
                     "low": s.low,
-                    "high": s.high,
+                    "high": float(min(s.high, caps[k])) if k in caps else s.high,
                     "description": s.description,
                 }
                 for k, s in tunable_params(parsed).items()
@@ -654,11 +750,12 @@ def build_server(
                 out = _relabel_run_local_dsr(out)
                 out["budget"] = budget_status(led, run_id, config)
             return out
-        _, h = _plan_or_error(plan)
+        parsed, h = _plan_or_error(plan)
         with open_ledger() as led:
             check_run(led, run_id)
         with run_lock(run_id), open_ledger() as led:
             check_run(led, run_id)
+            check_derivatives(led, run_id, parsed)
             guard(led, run_id, h, backtest_cost(), "run_backtest")
             out = lab_call(
                 lambda: backtest_evidence(plan, run_id=run_id, cfg=config, ledger=led, loader=load)
@@ -690,11 +787,12 @@ def build_server(
                 )
                 out["budget"] = budget_status(led, run_id, config)
             return out
-        _, h = _plan_or_error(plan)
+        parsed, h = _plan_or_error(plan)
         with open_ledger() as led:
             check_run(led, run_id)
         with run_lock(run_id), open_ledger() as led:
             check_run(led, run_id)
+            check_derivatives(led, run_id, parsed)
             guard(led, run_id, h, adversarial_cost(), "run_adversarial")
             out = lab_call(
                 lambda: adversarial_evidence(
@@ -727,11 +825,12 @@ def build_server(
                 )
                 out["budget"] = budget_status(led, run_id, config)
             return out
-        _, h = _plan_or_error(plan)
+        parsed, h = _plan_or_error(plan)
         with open_ledger() as led:
             check_run(led, run_id)
         with run_lock(run_id), open_ledger() as led:
             check_run(led, run_id)
+            check_derivatives(led, run_id, parsed)
             guard(led, run_id, h, 1, "run_crosscheck")
             out = lab_call(
                 lambda: crosscheck_evidence(
@@ -780,9 +879,20 @@ def build_server(
             check_run(led, run_id)
         with run_lock(run_id), open_ledger() as led:
             check_run(led, run_id)
-            rng = _space(parsed, space, frozen_criteria(led, run_id))
+            check_derivatives(led, run_id, parsed)
+            rng = _space(
+                parsed,
+                space,
+                frozen_criteria(led, run_id),
+                derivatives_period_caps(parsed, config),
+            )
             guard(led, run_id, h, n_trials, f"run_sweep with n_trials={n_trials}")
-            candles, window = _design(parsed, config, load)
+            candles, window, scoring = _design(
+                parsed, config, load, derivatives_series(config, led, run_id)
+            )
+            require_inputs(parsed, candles)
+            # derivatives plans: every trial's price clause must still select bars
+            check = gate_base_trial_check(candles, window, config) if scoring else None
             res = lab_call(
                 lambda: optuna_search(
                     parsed,
@@ -796,6 +906,7 @@ def build_server(
                     space=rng,
                     min_trades=config.optuna_min_trades,
                     require_space=True,
+                    trial_check=check,
                 )
             )
             out: dict[str, Any] = {
@@ -823,6 +934,8 @@ def build_server(
                     f"fewer than {config.optuna_min_trades} trades are never selected."
                 ),
             }
+            if scoring is not None:
+                out["scoring"] = scoring
             record_report(led, run_id, h, "sweep", out)
             out = compact_report(out)
             out["budget"] = budget_status(led, run_id, config)
@@ -848,14 +961,26 @@ def build_server(
             check_run(led, run_id)
         with run_lock(run_id), open_ledger() as led:
             check_run(led, run_id)
-            rng = _space(parsed, space, frozen_criteria(led, run_id))
+            check_derivatives(led, run_id, parsed)
+            rng = _space(
+                parsed,
+                space,
+                frozen_criteria(led, run_id),
+                derivatives_period_caps(parsed, config),
+            )
+            candles, window, scoring = _design(
+                parsed, config, load, derivatives_series(config, led, run_id)
+            )
+            require_inputs(parsed, candles)  # a missing download first, before lineage advice
             lineage_notes = _lineage(led, parsed, h, rng, config, load)
-            candles, window = _design(parsed, config, load)
             try:
                 folds = _folds(window, config)
             except ValueError as exc:
                 raise ToolError(str(exc)) from None
             cost = (n_trials_per_fold + 1) * len(folds)
+            # derivatives plans: every train trial's price clause must still select bars on
+            # the scored design window (a failing trial is ledgered failed, never chosen)
+            check = gate_base_trial_check(candles, window, config) if scoring else None
             guard(
                 led,
                 run_id,
@@ -876,6 +1001,7 @@ def build_server(
                     space=rng,
                     min_trades=config.optuna_min_trades,
                     require_space=True,
+                    trial_check=check,
                 )
             )
             out: dict[str, Any] = {
@@ -910,6 +1036,8 @@ def build_server(
                     "net of costs; open positions are charged an exit at fold boundaries."
                 ),
             }
+            if scoring is not None:
+                out["scoring"] = scoring
             record_report(led, run_id, h, "walk_forward", out)
             out = compact_report(out)
             out["budget"] = budget_status(led, run_id, config)
@@ -1048,14 +1176,20 @@ def build_server(
                 "holdout_check is disabled on this server (STRATEGY_LAB_DISABLE_HOLDOUT=1): "
                 "the orchestrator runs holdout checks itself. Report the candidate instead."
             )
+        parsed: Plan | None = None
         if pf.is_portfolio_plan(plan):
             _portfolio_or_error(plan, config)
         else:
-            _plan_or_error(plan)
+            parsed, _ = _plan_or_error(plan)
         with open_ledger() as led:
             check_run(led, run_id)
         with run_lock(run_id), open_ledger() as led:
             check_run(led, run_id)
+            if parsed is not None:
+                try:
+                    check_derivatives(led, run_id, parsed)
+                except ToolError as exc:
+                    raise ToolError(f"holdout check refused (no check spent): {exc}") from None
             try:
                 return run_holdout_check(plan, run_id=run_id, cfg=config, ledger=led, loader=load)
             except HoldoutRefusedError as exc:

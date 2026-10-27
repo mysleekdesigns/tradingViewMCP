@@ -5,10 +5,32 @@ points at the offending key (``features.ema_fast.ema.period``, ``long_entry``,
 ``risk.stop_loss_pct``) and whose message says what is wrong, what is allowed, and how to fix
 it, so research agents can repair their own plans. Pure: the only parsing is ``json.loads`` of
 the string the caller passes in.
+
+Derivatives features (``lab.registry.derivatives``: funding, premium, basis, open interest,
+long/short ratio) are exposure or crash-risk filters, not direction signals. They are accepted
+only as gating clauses of a spot long-only entry:
+
+1. a derivatives alias may appear only in ``long_entry``, inside top-level ``and`` clauses that
+   reference no price input or non-derivatives feature (``close > ema_slow and
+   funding_zscore < 2`` is fine; ``close > ema_slow or funding_zscore < 2`` and
+   ``close > funding_rate`` are not);
+2. ``long_entry`` keeps at least one top-level ``and`` clause free of derivatives features, so a
+   filter is never the only entry signal;
+3. ``long_exit`` may not reference them: a missing derivatives value (an archive gap) makes the
+   whole expression False at that bar, which would silently suppress the price exit;
+4. the derivatives-free clauses must not all be statically always true (``high >= low``,
+   ``close >= close``): the gate would then be the de-facto signal. This is the cheap static
+   form; ``lab.runner.check_gate_base`` refuses data-dependent cases (``close > 0``,
+   ``rsi < 101``) on the design window before any ledger row.
+
+A gate fails CLOSED on a missing value: :mod:`lab.plan.expr` makes the whole ``long_entry``
+False at any bar where an operand is NaN, through ``not`` and ``or`` too, so
+``close > ema_slow and not (fz > 2)`` cannot enter on a bar without funding data.
 """
 
 from __future__ import annotations
 
+import ast
 import difflib
 import hashlib
 import json
@@ -19,7 +41,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
-from lab.plan.expr import FUNCTIONS, CheckedExpr, ExprScope, check_expression
+from lab.plan.expr import FUNCTIONS, MAX_EXPR_CHARS, CheckedExpr, ExprScope, check_expression
 from lab.plan.schema import (
     ALIAS_PATTERN,
     MAX_DESCRIPTION_CHARS,
@@ -37,6 +59,7 @@ from lab.plan.schema import (
     TOP_LEVEL_KEYS,
 )
 from lab.plan.units import output_scale
+from lab.registry.derivatives import DERIVATIVES_FEATURES, FILTER_NOTE
 from lab.types import (
     INTERVAL_SECONDS,
     PRICE_INPUTS,
@@ -520,6 +543,192 @@ def _check_risk(raw: Mapping[str, Any], errors: list[PlanError]) -> RiskSpec:
     )
 
 
+# --------------------------------------------------------------------------- derivatives gates
+
+# Example thresholds for error messages only (each feature's natural scale), not suggestions.
+_GATE_EXAMPLES: Mapping[str, str] = {
+    "funding_rate": "< 0.0003",
+    "funding_zscore": "< 2",
+    "premium_index": "< 0.001",
+    "basis_pct": "< 0.1",
+    "oi_change": "< 10",
+    "long_short_ratio": "< 2",
+}
+
+
+def _derivative_aliases(
+    raw: Mapping[str, Any], registry: Mapping[str, FeatureSpec]
+) -> dict[str, str]:
+    """alias -> derivatives feature name for every derivatives feature the plan defines."""
+    feats = raw.get("features")
+    if not isinstance(feats, Mapping):
+        return {}
+    out: dict[str, str] = {}
+    for alias, value in feats.items():
+        if not isinstance(alias, str) or not isinstance(value, Mapping) or len(value) != 1:
+            continue
+        ((fname, _params),) = value.items()
+        if isinstance(fname, str) and fname in DERIVATIVES_FEATURES and fname in registry:
+            out[alias] = fname
+    return out
+
+
+def _conjuncts(node: ast.expr) -> list[ast.expr]:
+    """Top-level ``and`` clauses of ``node`` (nested ``and`` groups flattened)."""
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+        out: list[ast.expr] = []
+        for value in node.values:
+            out.extend(_conjuncts(value))
+        return out
+    return [node]
+
+
+def _names(node: ast.AST) -> set[str]:
+    """Every variable name ``node`` reads (``macd.hist`` counts as ``macd``), not function
+    names."""
+    called = {id(n.func) for n in ast.walk(node) if isinstance(n, ast.Call)}
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and id(n) not in called}
+
+
+def _listing(aliases: set[str], drv: Mapping[str, str]) -> str:
+    return ", ".join(
+        f"`{a}`" if drv.get(a, a) == a else f"`{a}` ({drv[a]})" for a in sorted(aliases)
+    )
+
+
+def _gate_example(alias: str, drv: Mapping[str, str]) -> str:
+    return f"`close > ema_slow and {alias} {_GATE_EXAMPLES.get(drv[alias], '< 2')}`"
+
+
+def _parsed(checked: CheckedExpr | None, source: object) -> tuple[str, ast.expr] | None:
+    """``(text, body)`` of a rule: the checked tree, or (when the rule has other errors, such
+    as a unit mismatch) a plain parse of its source so the gating rules are still reported.
+    None when it does not parse."""
+    if checked is not None:
+        return checked.source, checked.tree.body
+    if not isinstance(source, str) or len(source) > MAX_EXPR_CHARS:
+        return None
+    text = source.strip()
+    try:
+        return text, ast.parse(text, mode="eval").body
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+
+
+def _check_derivative_gates(
+    entry: tuple[str, ast.expr] | None,
+    exit_: tuple[str, ast.expr] | None,
+    drv: Mapping[str, str],
+    errors: list[PlanError],
+) -> None:
+    """Rules 1-3 of the module docstring: derivatives features only gate a long entry.
+
+    ``entry`` / ``exit_`` are ``(source text, parsed body)`` from :func:`_parsed`."""
+    if not drv:
+        return
+    if exit_ is not None:
+        used = _names(exit_[1]) & drv.keys()
+        if used:
+            errors.append(
+                PlanError(
+                    "long_exit",
+                    f"uses derivatives feature(s) {_listing(used, drv)}; each is an "
+                    f"{FILTER_NOTE}, allowed only as a gating `and` clause of long_entry. In "
+                    "long_exit a missing derivatives value (an archive gap or a bar before its "
+                    "first record) makes the whole expression False at that bar, which would "
+                    "suppress the price exit and keep the position open. Write long_exit with "
+                    "price inputs and non-derivatives features only, and gate the entry instead, "
+                    f"e.g. {_gate_example(min(used), drv)}",
+                )
+            )
+    if entry is None:
+        return
+    signal_clause = False
+    mixed = False
+    source, body = entry
+    for clause in _conjuncts(body):
+        names = _names(clause)
+        used = names & drv.keys()
+        if not used:
+            signal_clause = True
+            continue
+        others = names - drv.keys()
+        if not others:
+            continue  # a pure derivatives gate: allowed
+        mixed = True
+        text = ast.get_source_segment(source, clause) or source
+        errors.append(
+            PlanError(
+                "long_entry",
+                f"`{text}` combines derivatives feature(s) {_listing(used, drv)} with "
+                f"{_listing(others, drv)} in one clause; a derivatives feature is an "
+                f"{FILTER_NOTE}, so it may appear only in its own top-level `and` clause, "
+                "compared with numbers or other derivatives features (not inside an `or`, and "
+                "not compared with or computed from prices or other features). Split it, e.g. "
+                f"{_gate_example(min(used), drv)}",
+            )
+        )
+    if signal_clause and not mixed:
+        trivial = _constant_true_clauses(source, body, drv)
+        if trivial is not None:
+            used = _names(body) & drv.keys()
+            errors.append(
+                PlanError(
+                    "long_entry",
+                    f"its price clause(s) {', '.join(f'`{t}`' for t in trivial)} are true on "
+                    "every bar, so the derivatives gate(s) "
+                    f"{_listing(used, drv)} would be the de-facto entry signal; each is an "
+                    f"{FILTER_NOTE}. Replace the always-true clause with a real price signal "
+                    f"that selects bars on its own, e.g. {_gate_example(min(used), drv)}",
+                )
+            )
+    if not signal_clause and not mixed:
+        used = _names(body) & drv.keys()
+        errors.append(
+            PlanError(
+                "long_entry",
+                f"uses only derivatives feature(s) {_listing(used, drv)}; each is an "
+                f"{FILTER_NOTE}, so it cannot be the entry signal on its own. Add a top-level "
+                "`and` clause built from price inputs or non-derivatives features, e.g. "
+                f"{_gate_example(min(used), drv)}",
+            )
+        )
+
+
+# Candle identities: ``high`` is at least every other price input and ``low`` at most, on every
+# bar (lab.types.validate_candles), so e.g. ``high >= low`` or ``close <= high`` is always true.
+_CANDLE_PRICES = frozenset({"open", "high", "low", "close"})
+
+
+def _always_true_compare(node: ast.expr) -> bool:
+    """A single ``a >= b`` / ``a <= b`` that is true on every bar where it is defined: the same
+    operand on both sides (``close >= close``), or a candle identity (``high >= low``,
+    ``close <= high``, ``low <= open``). Static and cheap; the runner's data check
+    (``lab.runner.check_gate_base``) is the real guard."""
+    if not isinstance(node, ast.Compare) or len(node.ops) != 1:
+        return False
+    op, left, right = node.ops[0], node.left, node.comparators[0]
+    if isinstance(op, ast.LtE):
+        left, right = right, left
+    elif not isinstance(op, ast.GtE):
+        return False
+    if ast.dump(left) == ast.dump(right):
+        return True
+    if isinstance(left, ast.Name) and isinstance(right, ast.Name):
+        big, small = left.id, right.id
+        return {big, small} <= _CANDLE_PRICES and (big == "high" or small == "low")
+    return False
+
+
+def _constant_true_clauses(source: str, body: ast.expr, drv: Mapping[str, str]) -> list[str] | None:
+    """The text of every derivatives-free top-level ``and`` clause of ``long_entry`` when ALL of
+    them are statically always true (so the gate is the only selector); None otherwise."""
+    free = [c for c in _conjuncts(body) if not (_names(c) & drv.keys())]
+    if not free or not all(_always_true_compare(c) for c in free):
+        return None
+    return [ast.get_source_segment(source, c) or ast.unparse(c) for c in free]
+
+
 # --------------------------------------------------------------------------- entry points
 
 
@@ -568,6 +777,12 @@ def _validate(raw: Mapping[str, Any] | str, registry: Mapping[str, FeatureSpec])
     if "long_exit" in obj:
         exit_, errs = check_expression(obj["long_exit"], scope, "long_exit")
         errors.extend(errs)
+    _check_derivative_gates(
+        _parsed(entry, obj.get("long_entry")),
+        _parsed(exit_, obj.get("long_exit")),
+        _derivative_aliases(obj, registry),
+        errors,
+    )
     risk = _check_risk(obj, errors)
     if entry is not None and exit_ is not None:
         used = {r.split(".", 1)[0] for r in entry.refs | exit_.refs}
@@ -647,6 +862,49 @@ def checked_expressions(
     if result.entry is None or result.exit is None:
         raise PlanValidationError(result.errors)
     return result.entry, result.exit
+
+
+def gate_base_expressions(
+    plan: Plan, registry: Mapping[str, FeatureSpec] | None = None
+) -> tuple[CheckedExpr, CheckedExpr] | None:
+    """``(base, not base)`` for a plan with derivatives gates: ``base`` is the conjunction of the
+    top-level ``and`` clauses of ``long_entry`` that read NO derivatives feature (the price
+    signal on its own), built from the already-checked entry tree (no new parse, no length
+    limit). Evaluate both with :func:`lab.plan.expr.evaluate_expression`: a bar where ``base``
+    is defined is True in exactly one of them (NaN makes both False). None when the plan uses no
+    derivatives feature or has no derivatives-free clause."""
+    reg = resolve_registry(registry)
+    drv = {
+        ref.alias: ref.feature
+        for ref in plan.features
+        if ref.feature in DERIVATIVES_FEATURES and ref.feature in reg
+    }
+    if not drv:
+        return None
+    entry, _ = checked_expressions(plan, reg)
+    clauses = [c for c in _conjuncts(entry.tree.body) if not (_names(c) & drv.keys())]
+    if not clauses:
+        return None
+    texts = [ast.get_source_segment(entry.source, c) or ast.unparse(c) for c in clauses]
+    if len(clauses) == 1:
+        body: ast.expr = clauses[0]
+        source = texts[0]
+    else:
+        body = ast.BoolOp(op=ast.And(), values=clauses)
+        source = " and ".join(f"({t})" for t in texts)
+    common = {
+        "lag": entry.lag,
+        "max_prev": entry.max_prev,
+        "uses_cross": entry.uses_cross,
+        "refs": entry.refs,
+    }
+    base = CheckedExpr(source=source, tree=ast.Expression(body=body), **common)
+    negated = CheckedExpr(
+        source=f"not ({source})",
+        tree=ast.Expression(body=ast.UnaryOp(op=ast.Not(), operand=body)),
+        **common,
+    )
+    return base, negated
 
 
 def tunable_params(

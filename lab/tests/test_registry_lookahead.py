@@ -3,8 +3,10 @@
 
 The pattern: change every candle strictly after bar t and assert that every output at or
 before t is bit-identical. It iterates ``REGISTRY``, so a feature added later is covered
-without editing this file. Like hedgeFund's version it also checks that the perturbation
-has teeth (later outputs do change) and that computation is deterministic.
+without editing this file. The candles carry the six aligned ``drv_*`` derivatives columns
+(with NaN gaps) so the derivatives features run the same test. Like hedgeFund's version it
+also checks that the perturbation has teeth (later outputs do change) and that computation
+is deterministic.
 
 Statistics cannot catch look-ahead, so this test is mandatory (.claude/rules/no-lookahead.md).
 """
@@ -17,7 +19,7 @@ import pytest
 
 from lab.registry import REGISTRY, fill_params
 from lab.types import FeatureSpec
-from tests.synthetic import make_candles, perturb_after
+from tests.synthetic import make_candles, perturb_after, with_derivatives
 
 N_BARS = 600
 SEED = 20261024
@@ -57,7 +59,15 @@ def cut_points(warmup: int) -> list[int]:
 
 @pytest.fixture(scope="module")
 def candles() -> pd.DataFrame:
-    return make_candles(N_BARS, seed=SEED, vol=0.02)
+    """Prices plus derivatives columns with archive gaps (NaN rows) in every drv_* column."""
+    return with_derivatives(make_candles(N_BARS, seed=SEED, vol=0.02), seed=SEED)
+
+
+@pytest.fixture(scope="module")
+def clean_candles() -> pd.DataFrame:
+    """The same frame without derivatives gaps, for the warm-up contract (NaN only in the
+    declared warm-up holds on gap-free data only)."""
+    return with_derivatives(make_candles(N_BARS, seed=SEED, vol=0.02), seed=SEED, gaps=False)
 
 
 @pytest.mark.parametrize(("name", "params"), CASES)
@@ -92,8 +102,9 @@ def test_perturbation_actually_changes_later_outputs(
 
 @pytest.mark.parametrize(("name", "params"), CASES)
 def test_output_shape_and_warmup_contract(
-    candles: pd.DataFrame, name: str, params: dict[str, float]
+    clean_candles: pd.DataFrame, name: str, params: dict[str, float]
 ) -> None:
+    candles = clean_candles
     spec = REGISTRY[name]
     out = spec.compute(candles, params)
     warmup = spec.warmup(params)
@@ -118,6 +129,24 @@ def test_compute_is_deterministic_and_does_not_mutate_input(
     b = spec.compute(candles.copy(), dict(params))
     pd.testing.assert_frame_equal(candles, snapshot)
     assert np.array_equal(a.to_numpy(), b.to_numpy(), equal_nan=True)
+
+
+def test_fixture_has_derivatives_gaps_before_and_after_the_midpoint(candles: pd.DataFrame) -> None:
+    drv = candles.filter(like="drv_")
+    assert drv.shape[1] == 6
+    assert drv.isna().any().all()  # every drv_* column has a gap ...
+    # ... before the midpoint, so trailing windows clear of them still exist at the cut points
+    assert drv.iloc[N_BARS // 2 :].notna().all().all()
+
+
+def test_perturbation_also_moves_future_derivatives(candles: pd.DataFrame) -> None:
+    t = N_BARS // 2
+    shocked = perturb_after(candles, t)
+    for col in candles.filter(like="drv_").columns:
+        before = candles[col].to_numpy()
+        after = shocked[col].to_numpy()
+        assert np.array_equal(before[: t + 1], after[: t + 1], equal_nan=True), col
+        assert not np.array_equal(before[t + 1 :], after[t + 1 :], equal_nan=True), col
 
 
 def test_truncated_history_matches_full_history_prefix(candles: pd.DataFrame) -> None:

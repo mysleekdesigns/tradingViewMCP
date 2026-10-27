@@ -112,8 +112,9 @@ class FakeFuturesArchive:
         interval: str | None = None,
         bad_sum: bool = False,
         no_sum: bool = False,
+        daily: bool = False,
     ) -> bytes:
-        url = derivatives_url(dataset, symbol, label, base_url=BASE, interval=interval)
+        url = derivatives_url(dataset, symbol, label, base_url=BASE, interval=interval, daily=daily)
         name = url.rsplit("/", 1)[-1]
         payload = to_zip(csv, name.replace(".zip", ".csv"))
         self.files[url] = payload
@@ -462,6 +463,299 @@ def test_download_validates_dataset_and_interval(tmp_path: Path) -> None:
                  base_url=BASE)  # fmt: skip
     with pytest.raises(ValueError, match="'nope'"):
         download("nope", "BTCUSDT", "2024-01", "2024-01", data_dir=tmp_path, base_url=BASE)
+
+
+# --------------------------------------------------------------------------- daily kline fill
+
+# June 2024: 30 days x 6 = 180 four-hour bars. Bars 168..173 are 2024-06-29 00:00..20:00, the
+# shape of the real 2026-06 hole (monthly zip had 174 rows; the daily zip for the 29th had 6).
+JUNE_BARS = 180
+HOLE = tuple(range(168, 174))
+KLINES = ("premiumIndexKlines", "markPriceKlines", "indexPriceKlines")
+
+
+@pytest.fixture
+def july_now(monkeypatch: pytest.MonkeyPatch) -> pd.Timestamp:
+    now = pd.Timestamp("2024-07-15 12:00", tz="UTC")
+    monkeypatch.setattr(archive, "_utc_now", lambda: now)
+    return now
+
+
+def daily_url(dataset: str, day: str, interval: str = "4h") -> str:
+    return derivatives_url(dataset, "BTCUSDT", day, base_url=BASE, interval=interval, daily=True)
+
+
+def june_rows(csv: bytes, rows: range | tuple[int, ...]) -> bytes:
+    """The header plus the given data rows of a full-June kline CSV (a daily zip's slice)."""
+    lines = csv.decode().strip().splitlines()
+    return ("\n".join([lines[0], *(lines[1 + i] for i in rows)]) + "\n").encode()
+
+
+def test_daily_kline_urls_match_the_archive_layout() -> None:
+    # verified live 2026-10-27: .../daily/premiumIndexKlines/BTCUSDT/4h/BTCUSDT-4h-2026-06-29.zip
+    for ds in KLINES:
+        assert (
+            derivatives_url(
+                ds, "BTCUSDT", "2026-06-29", base_url=BASE + "/", interval="4h", daily=True
+            )
+            == f"{BASE}/daily/{ds}/BTCUSDT/4h/BTCUSDT-4h-2026-06-29.zip"
+        )
+    for ds in ("fundingRate", "metrics"):
+        with pytest.raises(ValueError, match="no daily kline files"):
+            derivatives_url(ds, "BTCUSDT", "2026-06-29", base_url=BASE, daily=True)
+    with pytest.raises(ValueError, match="'2026-06'"):
+        derivatives_url(
+            "markPriceKlines", "BTCUSDT", "2026-06", base_url=BASE, interval="4h", daily=True
+        )
+
+
+def test_missing_kline_days_counts_holes_on_the_month_grid() -> None:
+    full = parse_csv("markPriceKlines", kline_csv("2024-06-01", JUNE_BARS))
+    assert derivatives.missing_kline_days(full, "2024-06", "4h") == {}
+    holed = parse_csv("markPriceKlines", kline_csv("2024-06-01", JUNE_BARS, skip=HOLE))
+    assert derivatives.missing_kline_days(holed, "2024-06", "4h") == {"2024-06-29": 6}
+    # a missing first and last bar are holes too (the grid is the whole month)
+    edges = parse_csv("markPriceKlines", kline_csv("2024-06-01", JUNE_BARS, skip=(0, 179)))
+    assert derivatives.missing_kline_days(edges, "2024-06", "4h") == {
+        "2024-06-01": 1,
+        "2024-06-30": 1,
+    }
+    # the grid follows the interval: on 1d only each day's 00:00 bar is expected
+    assert derivatives.missing_kline_days(holed, "2024-06", "1d") == {"2024-06-29": 1}
+
+
+@pytest.mark.parametrize("dataset", KLINES)
+def test_monthly_kline_hole_is_filled_from_the_daily_zip(
+    tmp_path: Path, fake: FakeFuturesArchive, july_now: pd.Timestamp, dataset: str
+) -> None:
+    full = kline_csv("2024-06-01", JUNE_BARS)
+    fake.add(dataset, "2024-06", kline_csv("2024-06-01", JUNE_BARS, skip=HOLE), interval="4h")
+    daily_payload = fake.add(
+        dataset, "2024-06-29", june_rows(full, range(168, 174)), interval="4h", daily=True
+    )
+    res = run(fake, dataset, "2024-06", "2024-06", tmp_path, interval="4h")
+    assert res.daily_filled == {"2024-06": ["2024-06-29"]} and not res.daily_not_found
+    assert res.rows_written == JUNE_BARS and res.rows_filled == 6 and not res.rejected
+    # only the day with the hole was fetched from the daily archive
+    assert [u for u in fake.requests if "/daily/" in u and not u.endswith("CHECKSUM")] == [
+        daily_url(dataset, "2024-06-29")
+    ]
+    df = load_series(dataset, "BTCUSDT", data_dir=tmp_path, interval="4h")
+    pd.testing.assert_frame_equal(df, parse_csv(dataset, full))  # exactly the archive rows
+
+    side = json.loads(
+        (tmp_path / dataset / "BTCUSDT" / "4h" / derivatives.SIDECAR_NAME).read_text()
+    )
+    daily = side["sources"]["2024-06"]["daily"]
+    assert daily == {
+        "2024-06-29": {
+            "file": "BTCUSDT-4h-2024-06-29.zip",
+            "sha256": hashlib.sha256(daily_payload).hexdigest(),
+            "rows_added": 6,
+        }
+    }
+    entry = build_manifest(tmp_path, gap_factor=1.5)["series"][f"{dataset}/BTCUSDT/4h"]
+    assert entry["gaps"] == [] and entry["rows"] == JUNE_BARS
+    assert entry["daily_sources"] == {
+        "2024-06": {"2024-06-29": hashlib.sha256(daily_payload).hexdigest()}
+    }
+    assert entry["daily_not_found"] == {}
+    assert set(entry["sources"]) == {"2024-06"}  # monthly sha256 map keeps its old shape
+
+
+def test_daily_zip_rows_already_in_the_month_must_match_and_are_kept_once(
+    tmp_path: Path, fake: FakeFuturesArchive, july_now: pd.Timestamp
+) -> None:
+    # the real daily zip holds the whole day: 2 rows the month lacks and 4 it already has
+    full = kline_csv("2024-06-01", JUNE_BARS)
+    fake.add(
+        "markPriceKlines", "2024-06", kline_csv("2024-06-01", JUNE_BARS, skip=(170, 171)),
+        interval="4h",
+    )  # fmt: skip
+    fake.add("markPriceKlines", "2024-06-29", june_rows(full, HOLE), interval="4h", daily=True)
+    res = run(fake, "markPriceKlines", "2024-06", "2024-06", tmp_path, interval="4h")
+    assert res.rows_filled == 2 and res.rows_written == JUNE_BARS
+    df = load_series("markPriceKlines", "BTCUSDT", data_dir=tmp_path, interval="4h")
+    pd.testing.assert_frame_equal(df, parse_csv("markPriceKlines", full))
+
+
+def test_daily_404_leaves_the_gap_and_records_it(
+    tmp_path: Path, fake: FakeFuturesArchive, july_now: pd.Timestamp
+) -> None:
+    fake.add(
+        "premiumIndexKlines", "2024-06", kline_csv("2024-06-01", JUNE_BARS, skip=HOLE),
+        interval="4h",
+    )  # fmt: skip
+    res = run(fake, "premiumIndexKlines", "2024-06", "2024-06", tmp_path, interval="4h")
+    assert res.daily_not_found == {"2024-06": ["2024-06-29"]} and not res.daily_filled
+    assert res.rows_written == JUNE_BARS - 6 and res.rows_filled == 0
+    side = json.loads(
+        (tmp_path / "premiumIndexKlines/BTCUSDT/4h" / derivatives.SIDECAR_NAME).read_text()
+    )
+    assert side["sources"]["2024-06"]["daily_not_found"] == ["2024-06-29"]
+    assert "daily" not in side["sources"]["2024-06"]
+    entry = build_manifest(tmp_path, gap_factor=1.5)["series"]["premiumIndexKlines/BTCUSDT/4h"]
+    assert entry["gaps"] == [
+        {"from": "2024-06-28T20:00:00+00:00", "to": "2024-06-30T00:00:00+00:00"}
+    ]
+    assert entry["daily_not_found"] == {"2024-06": ["2024-06-29"]}
+    assert entry["daily_sources"] == {}
+    assert entry["not_found"] == []  # the month itself was found
+
+
+def test_daily_row_conflicting_with_the_month_rejects_the_month(
+    tmp_path: Path, fake: FakeFuturesArchive, july_now: pd.Timestamp
+) -> None:
+    full = kline_csv("2024-06-01", JUNE_BARS)
+    fake.add(
+        "indexPriceKlines", "2024-06", kline_csv("2024-06-01", JUNE_BARS, skip=(170, 171)),
+        interval="4h",
+    )  # fmt: skip
+    lines = june_rows(full, HOLE).decode().strip().splitlines()
+    cells = lines[1].split(",")  # 2024-06-29 00:00, also in the monthly zip
+    cells[4] = "0.12345678"  # a different close
+    lines[1] = ",".join(cells)
+    fake.add(
+        "indexPriceKlines", "2024-06-29", ("\n".join(lines) + "\n").encode(), interval="4h",
+        daily=True,
+    )  # fmt: skip
+    path = tmp_path / "indexPriceKlines" / "BTCUSDT" / "4h" / "2024-06.parquet"
+    archive.write_parquet(parse_csv("indexPriceKlines", full), path)  # a stale copy is removed
+    res = run(fake, "indexPriceKlines", "2024-06", "2024-06", tmp_path, interval="4h", refresh=True)
+    reason = res.rejected["2024-06"]
+    assert "BTCUSDT-4h-2024-06.zip and BTCUSDT-4h-2024-06-29.zip" in reason
+    assert "conflicting rows" in reason and "2024-06-29T00:00:00+00:00" in reason
+    assert not res.written and not path.exists()
+    entry = build_manifest(tmp_path, gap_factor=1.5)["series"]["indexPriceKlines/BTCUSDT/4h"]
+    assert "conflicting rows" in entry["rejected"]["2024-06"]
+
+
+def test_daily_row_outside_its_day_rejects_the_month(
+    tmp_path: Path, fake: FakeFuturesArchive, july_now: pd.Timestamp
+) -> None:
+    full = kline_csv("2024-06-01", JUNE_BARS)
+    fake.add(
+        "markPriceKlines", "2024-06", kline_csv("2024-06-01", JUNE_BARS, skip=HOLE), interval="4h"
+    )
+    fake.add(
+        "markPriceKlines", "2024-06-29", june_rows(full, (*HOLE, 174)), interval="4h", daily=True
+    )
+    res = run(fake, "markPriceKlines", "2024-06", "2024-06", tmp_path, interval="4h")
+    assert "outside 2024-06-29" in res.rejected["2024-06"] and not res.written
+
+
+def test_daily_checksum_mismatch_raises_naming_the_daily_file(
+    tmp_path: Path, fake: FakeFuturesArchive, july_now: pd.Timestamp
+) -> None:
+    full = kline_csv("2024-06-01", JUNE_BARS)
+    fake.add(
+        "markPriceKlines", "2024-06", kline_csv("2024-06-01", JUNE_BARS, skip=HOLE), interval="4h"
+    )
+    fake.add(
+        "markPriceKlines", "2024-06-29", june_rows(full, HOLE), interval="4h", daily=True,
+        bad_sum=True,
+    )  # fmt: skip
+    with pytest.raises(ValueError, match=r"BTCUSDT-4h-2024-06-29\.zip: SHA-256 mismatch"):
+        run(fake, "markPriceKlines", "2024-06", "2024-06", tmp_path, interval="4h")
+    assert not (tmp_path / "markPriceKlines" / "BTCUSDT" / "4h" / "2024-06.parquet").exists()
+
+
+def test_daily_missing_checksum_raises_naming_the_daily_file(
+    tmp_path: Path, fake: FakeFuturesArchive, july_now: pd.Timestamp
+) -> None:
+    full = kline_csv("2024-06-01", JUNE_BARS)
+    fake.add(
+        "markPriceKlines", "2024-06", kline_csv("2024-06-01", JUNE_BARS, skip=HOLE), interval="4h"
+    )
+    fake.add(
+        "markPriceKlines", "2024-06-29", june_rows(full, HOLE), interval="4h", daily=True,
+        no_sum=True,
+    )  # fmt: skip
+    with pytest.raises(ValueError, match=r"BTCUSDT-4h-2024-06-29\.zip: \.CHECKSUM not found"):
+        run(fake, "markPriceKlines", "2024-06", "2024-06", tmp_path, interval="4h")
+
+
+def test_complete_month_and_funding_never_touch_the_daily_archive(
+    tmp_path: Path, fake: FakeFuturesArchive, july_now: pd.Timestamp
+) -> None:
+    fake.add("markPriceKlines", "2024-06", kline_csv("2024-06-01", JUNE_BARS), interval="4h")
+    res = run(fake, "markPriceKlines", "2024-06", "2024-06", tmp_path, interval="4h")
+    assert res.rows_written == JUNE_BARS and not res.daily_filled and not res.daily_not_found
+    # funding with a missing settlement: no daily files exist, nothing is fetched or filled
+    fake.add("fundingRate", "2024-06", funding_csv("2024-06-01", 90, skip=(40,)))
+    res = run(fake, "fundingRate", "2024-06", "2024-06", tmp_path)
+    assert res.rows_written == 89 and not res.daily_filled and not res.daily_not_found
+    assert not any("/daily/" in u for u in fake.requests)
+    side = json.loads((tmp_path / "fundingRate/BTCUSDT" / derivatives.SIDECAR_NAME).read_text())
+    assert set(side["sources"]["2024-06"]) == {"file", "sha256"}
+    entry = build_manifest(tmp_path, gap_factor=1.5)["series"]["fundingRate/BTCUSDT"]
+    assert len(entry["gaps"]) == 1 and entry["daily_sources"] == {}
+
+
+def test_no_daily_fill_leaves_the_gap(
+    tmp_path: Path, fake: FakeFuturesArchive, july_now: pd.Timestamp
+) -> None:
+    full = kline_csv("2024-06-01", JUNE_BARS)
+    fake.add(
+        "markPriceKlines", "2024-06", kline_csv("2024-06-01", JUNE_BARS, skip=HOLE), interval="4h"
+    )
+    fake.add("markPriceKlines", "2024-06-29", june_rows(full, HOLE), interval="4h", daily=True)
+    res = run(
+        fake, "markPriceKlines", "2024-06", "2024-06", tmp_path, interval="4h", daily_fill=False
+    )
+    assert res.rows_written == JUNE_BARS - 6 and not res.daily_filled
+    assert not any("/daily/" in u for u in fake.requests)
+    entry = build_manifest(tmp_path, gap_factor=1.5)["series"]["markPriceKlines/BTCUSDT/4h"]
+    assert len(entry["gaps"]) == 1 and entry["daily_sources"] == {}
+
+
+def test_cli_no_daily_fill_flag(
+    tmp_path: Path,
+    fake: FakeFuturesArchive,
+    july_now: pd.Timestamp,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    full = kline_csv("2024-06-01", JUNE_BARS)
+    fake.add(
+        "markPriceKlines", "2024-06", kline_csv("2024-06-01", JUNE_BARS, skip=HOLE), interval="4h"
+    )
+    fake.add("markPriceKlines", "2024-06-29", june_rows(full, HOLE), interval="4h", daily=True)
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        derivatives.httpx,
+        "Client",
+        lambda **kw: real_client(transport=httpx.MockTransport(fake.handler)),
+    )
+    args = [
+        "--data-dir", str(tmp_path), "download", "BTCUSDT", "--datasets", "markPriceKlines",
+        "--interval", "4h", "--start", "2024-06", "--end", "2024-06", "--base-url", BASE,
+    ]  # fmt: skip
+    assert derivatives.main([*args, "--no-daily-fill"]) == 0
+    assert "1 gaps" in capsys.readouterr().out
+    assert not any("/daily/" in u for u in fake.requests)
+    assert derivatives.main([*args, "--refresh"]) == 0  # default: fill on
+    out = capsys.readouterr().out
+    assert "2024-06 holes filled from daily zips: 2024-06-29" in out and "0 gaps" in out
+
+
+def test_manifest_reads_sidecars_written_before_daily_fill(tmp_path: Path) -> None:
+    directory = tmp_path / "markPriceKlines" / "BTCUSDT" / "4h"
+    archive.write_parquet(
+        parse_csv("markPriceKlines", kline_csv("2024-06-01", 6)), directory / "2024-06.parquet"
+    )
+    (directory / derivatives.SIDECAR_NAME).write_text(
+        json.dumps(
+            {
+                "sources": {"2024-06": {"file": "x.zip", "sha256": "ab" * 32}},
+                "not_found": [],
+                "rejected": {},
+            }
+        )
+    )
+    entry = build_manifest(tmp_path, gap_factor=1.5)["series"]["markPriceKlines/BTCUSDT/4h"]
+    assert entry["sources"] == {"2024-06": "ab" * 32}
+    assert entry["daily_sources"] == {} and entry["daily_not_found"] == {}
 
 
 # --------------------------------------------------------------------------- load_series

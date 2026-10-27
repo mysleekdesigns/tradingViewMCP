@@ -105,6 +105,13 @@ class DerivativesConfig:
     stale_after_intervals: float = 2.0
     # manifest: spacing above this multiple of the expected step is recorded as a gap
     gap_factor: float = 1.5
+    # a gated plan is refused when its derivatives-free entry clauses alone are true on at least
+    # this share of the scored design bars (the price clause is then not doing the selecting)
+    gate_base_max_true_frac: float = 0.9
+    # derivatives plans on a (symbol, interval) are all scored from ONE start: the latest first
+    # timestamp of its derivatives series plus this many days (room for look-backs; a
+    # derivatives feature's period x bar length must fit inside it)
+    warmup_days: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -261,6 +268,13 @@ def _derivatives(d: dict) -> DerivativesConfig:
             "derivatives.stale_after_intervals",
         ),
         gap_factor=_at_least_one(d.get("gap_factor", default.gap_factor), "derivatives.gap_factor"),
+        gate_base_max_true_frac=_unit_interval(
+            d.get("gate_base_max_true_frac", default.gate_base_max_true_frac),
+            "derivatives.gate_base_max_true_frac",
+        ),
+        warmup_days=_at_least_one(
+            d.get("warmup_days", default.warmup_days), "derivatives.warmup_days"
+        ),
     )
 
 

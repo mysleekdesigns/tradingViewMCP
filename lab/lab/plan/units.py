@@ -12,7 +12,8 @@ A dimension is ``(price exponent, volume exponent)``:
   units (moving averages, bands, channels, ATR, MACD lines, which are price differences);
 * ``VOLUME`` ``(0, 1)``: ``volume`` and its moving average;
 * ``DIMENSIONLESS`` ``(0, 0)``: bounded or normalised features (RSI, ROC in percent, z-score,
-  realised volatility of log returns, regime outputs) and nonzero numeric literals.
+  realised volatility of log returns, regime outputs, the derivatives risk filters: funding,
+  premium, basis %, OI % change, long/short ratio) and nonzero numeric literals.
 
 Arithmetic: ``+``/``-`` need equal dimensions; ``*`` adds and ``/`` subtracts exponents, so
 ``close / ema_slow`` is dimensionless and ``4 * volume_sma`` is volume-scale. The literal
@@ -40,7 +41,8 @@ INPUT_SCALES: Mapping[str, Dim] = MappingProxyType(
     {"open": PRICE, "high": PRICE, "low": PRICE, "close": PRICE, "volume": VOLUME}
 )
 
-# registry feature -> output -> dimension (lab/lab/registry/features.py, regime.py)
+# registry feature -> output -> dimension (lab/lab/registry/features.py, regime.py,
+# derivatives.py)
 FEATURE_SCALES: Mapping[str, Mapping[str, Dim]] = MappingProxyType(
     {
         "sma": {"value": PRICE},  # rolling mean of close
@@ -56,6 +58,13 @@ FEATURE_SCALES: Mapping[str, Mapping[str, Dim]] = MappingProxyType(
         "volume_sma": {"value": VOLUME},  # rolling mean of volume
         "regime_state": {"value": DIMENSIONLESS},  # -1 / 0 / +1
         "regime_signal": {"value": DIMENSIONLESS},  # P(Bull) - P(Bear) in [-1, 1]
+        # derivatives risk filters (lab/lab/registry/derivatives.py): rates, ratios, percents
+        "funding_rate": {"value": DIMENSIONLESS},  # fraction per funding settlement
+        "funding_zscore": {"value": DIMENSIONLESS},  # (funding - mean) / stdev
+        "premium_index": {"value": DIMENSIONLESS},  # (perp - index) / index, a fraction
+        "basis_pct": {"value": DIMENSIONLESS},  # 100 * (mark - index) / index
+        "oi_change": {"value": DIMENSIONLESS},  # 100 * (oi / past oi - 1)
+        "long_short_ratio": {"value": DIMENSIONLESS},  # long accounts / short accounts
     }
 )
 

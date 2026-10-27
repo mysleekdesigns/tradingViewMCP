@@ -19,7 +19,7 @@ import pytest
 
 from lab.registry import REGISTRY, fill_params, get_feature
 from lab.types import CANDLE_COLUMNS
-from tests.synthetic import candles_from_rows, make_candles
+from tests.synthetic import candles_from_rows, make_candles, with_derivatives
 
 TIGHT = 1e-12
 
@@ -374,8 +374,9 @@ def test_warmup_uses_defaults_for_missing_params() -> None:
 
 
 def gapped_candles() -> pd.DataFrame:
-    """Absent bars (dropped rows) plus zero-volume tradable=False rows."""
-    candles = make_candles(400, seed=21)
+    """Absent bars (dropped rows) plus zero-volume tradable=False rows; derivatives columns
+    are attached first (gap-free), so their rows vanish with the dropped bars."""
+    candles = with_derivatives(make_candles(400, seed=21), seed=21, gaps=False)
     drop = np.r_[50:58, 200:230, 301]
     candles = candles.drop(candles.index[drop])
     flag = candles.index[[10, 11, 120, 250]]
@@ -405,8 +406,8 @@ def test_windows_count_rows_not_wall_clock_time() -> None:
 
 
 def test_features_on_empty_and_short_frames() -> None:
-    empty = make_candles(5).iloc[:0]
-    short = make_candles(5)
+    short = with_derivatives(make_candles(5), seed=5)
+    empty = short.iloc[:0]
     for name, spec in REGISTRY.items():
         out = spec.compute(empty, {})
         assert list(out.columns) == list(spec.outputs) and len(out) == 0, name

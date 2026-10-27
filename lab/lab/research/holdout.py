@@ -5,7 +5,9 @@ ever reads. :func:`run_holdout_check` is the single place that touches it, and i
 
 1. the plan must validate;
 2. the run must exist and have frozen the current lab.toml fingerprint
-   (:func:`lab.research.runs.check_lab_fingerprint`);
+   (:func:`lab.research.runs.check_lab_fingerprint`), and, for a plan that uses a derivatives
+   feature, a derivatives snapshot equal to the archive on disk
+   (:func:`lab.research.runs.check_derivatives_snapshot`);
 3. no plan of the plan's *behaviour family* (:mod:`lab.research.family`: its logic hash, with
    cosmetics, aliases, tuned numbers, and the interval removed, plus every logic with a
    submitted design-window trial whose returns correlate with it at or above ``[research]
@@ -23,7 +25,13 @@ ever reads. :func:`run_holdout_check` is the single place that touches it, and i
    (:func:`lab.research.criteria.evaluate_plan`), INCLUDING a matched event-driven cross-check
    (with nautilus_trader unavailable that row is "missing" and the holdout stays refused), so a
    check is never spent on a plan that would fail anyway;
-6. data must reach past ``holdout_start`` (checked before spending, nothing is computed);
+6. data must reach past ``holdout_start``; a derivatives plan's ``drv_*`` inputs must be
+   loaded IN THE HOLDOUT, have a value from its first bar and reach its last bar (each within
+   the column's staleness limit), and no archive gap in the run's frozen snapshot may cover more
+   than that limit of the holdout (:func:`lab.data.derivatives_columns.require_holdout_coverage`:
+   an archive that starts late, stops early or has a hole would keep the gate NaN, i.e. the
+   plan flat); its price clause must select on the design window
+   (:func:`lab.runner.check_gate_base`). All checked before spending;
 7. one check is spent through :meth:`Ledger.record_holdout_check` (``BEGIN IMMEDIATE``, the
    server-side budget ``min(frozen run budget, lab.toml holdout_budget)`` and the logic-hash +
    family refusal, both race-free); an exhausted budget refuses here. Only then are signals computed
@@ -36,7 +44,9 @@ ever reads. :func:`run_holdout_check` is the single place that touches it, and i
 Pass rule: net annualised Sharpe >= the run's ``wf_oos_sharpe_min``, max drawdown <=
 ``max_drawdown_max``, net total return > 0, and at least
 ``max(5, ceil(min_trades * holdout_bars / design_bars))`` trades (see
-:func:`holdout_min_trades`).
+:func:`holdout_min_trades`), where ``design_bars`` counts the plan's SCORED design bars (a
+derivatives plan's design window starts at the one scored start of its symbol/interval,
+:func:`lab.runner.plan_design_window`).
 
 Results are historical and not forward-looking.
 """
@@ -51,7 +61,12 @@ from typing import Any
 import pandas as pd
 
 from lab.config import LabConfig
-from lab.engine.splits import holdout_window, slice_window
+from lab.data.derivatives_columns import (
+    manifest_series,
+    plan_derivative_columns,
+    require_holdout_coverage,
+)
+from lab.engine.splits import design_view, holdout_window, slice_window
 from lab.ledger import (
     HoldoutAlreadyCheckedError,
     HoldoutBudgetExceededError,
@@ -61,12 +76,20 @@ from lab.ledger import (
 )
 from lab.plan import parse_plan, plan_hash, plan_to_dict
 from lab.plan.portfolio import is_portfolio_plan
+from lab.plan.validator import PlanValidationError, format_errors
 from lab.report import num
 from lab.research.criteria import PRE_HOLDOUT_EXCLUDED, evaluate_plan, frozen_criteria
 from lab.research.family import behaviour_family, family_holdout_conflict
 from lab.research.logic import logic_hash
-from lab.research.runs import check_lab_fingerprint, holdout_budget
-from lab.runner import CandleLoader, DataUnavailableError, archive_cli_hint, default_loader
+from lab.research.runs import check_derivatives_snapshot, check_lab_fingerprint, holdout_budget
+from lab.runner import (
+    CandleLoader,
+    DataUnavailableError,
+    archive_cli_hint,
+    default_loader,
+    derivatives_series,
+    plan_design_window,
+)
 from lab.search.optuna_search import evaluate_on_window
 from lab.stats import compute_metrics, sharpe_per_bar
 from lab.types import Plan, TrialRecord, interval_seconds
@@ -132,9 +155,20 @@ def _failed_crosscheck(ledger: Ledger, h: str) -> str | None:
     return None
 
 
-def _load_full(plan: Plan, cfg: LabConfig, loader: CandleLoader) -> tuple[pd.DataFrame, Any]:
+def _load_full(
+    plan: Plan,
+    cfg: LabConfig,
+    loader: CandleLoader,
+    series: Mapping[str, Any] | None = None,
+) -> tuple[pd.DataFrame, Any]:
     """Candles through the last closed bar, and the holdout window. Raises
-    :class:`DataUnavailableError` when there are fewer than 2 bars after ``holdout_start``."""
+    :class:`DataUnavailableError` when there are fewer than 2 bars after ``holdout_start``, and
+    :class:`HoldoutRefusedError` when a derivatives plan's ``drv_*`` inputs are not loaded in
+    the holdout, start after its first bar or stop before its last bar (beyond the column's
+    staleness limit), or an archive gap recorded in ``series`` (the run's frozen snapshot
+    entries; None reads the current manifest) covers more than that limit of the holdout
+    (:func:`lab.data.derivatives_columns.require_holdout_coverage`); all before any check is
+    spent."""
     step = pd.Timedelta(seconds=interval_seconds(plan.interval))
     end = pd.Timestamp.now(tz="UTC").floor(step)  # bars opening before this have closed
     candles = loader(plan.symbol, plan.interval, end)
@@ -146,7 +180,44 @@ def _load_full(plan: Plan, cfg: LabConfig, loader: CandleLoader) -> tuple[pd.Dat
             f"download recent months with `{archive_cli_hint(plan.symbol, plan.interval)}`"
         )
     window = holdout_window(cfg.splits, candles.index[-1] + step)
+    if series is None and plan_derivative_columns(plan):
+        series = manifest_series(cfg.derivatives_dir)
+    try:
+        require_holdout_coverage(
+            plan,
+            slice_window(candles, window),
+            symbol=plan.symbol,
+            interval=plan.interval,
+            stale_after_intervals=cfg.derivatives.stale_after_intervals,
+            series=series,
+            start=window.start,
+            end=window.end,
+        )
+    except DataUnavailableError as exc:
+        raise HoldoutRefusedError(f"{exc}; no holdout check was spent") from exc
     return candles, window
+
+
+def _scored_design_bars(
+    plan: Plan,
+    candles: pd.DataFrame,
+    cfg: LabConfig,
+    series: Mapping[str, Any] | None = None,
+) -> tuple[int, dict[str, Any] | None]:
+    """Bars in the plan's SCORED design window (``lab.runner.plan_design_window`` on the design
+    part of ``candles``) and its scoring block; for a derivatives plan this also runs the
+    price-clause check. Raises :class:`HoldoutRefusedError` (nothing spent) when the design
+    window cannot be built or the plan is refused."""
+    history = design_view(candles, cfg.splits)
+    try:
+        window, scoring = plan_design_window(plan, history, cfg, series=series)
+    except PlanValidationError as exc:
+        raise HoldoutRefusedError(
+            f"{format_errors(exc.errors)}\nno holdout check was spent"
+        ) from exc
+    except DataUnavailableError as exc:
+        raise HoldoutRefusedError(f"{exc}; no holdout check was spent") from exc
+    return len(slice_window(history, window)), scoring
 
 
 def run_holdout_check(
@@ -182,6 +253,11 @@ def run_holdout_check(
         check_lab_fingerprint(ledger, run_id, cfg)
     except ValueError as exc:
         raise HoldoutRefusedError(f"{exc}; no check was spent") from exc
+    if plan_derivative_columns(plan):
+        try:
+            check_derivatives_snapshot(ledger, run_id, cfg, plan)
+        except ValueError as exc:
+            raise HoldoutRefusedError(f"{exc}; no check was spent") from exc
     if ledger.holdout_logic_checked(lh) or _already_checked(ledger, run_id, h):
         raise HoldoutRefusedError(
             f"plan {h[:12]} (logic {lh[:12]}) was already holdout-checked; a hypothesis gets "
@@ -224,7 +300,10 @@ def run_holdout_check(
             f"plan {h[:12]} does not pass the pre-holdout success criteria yet, so no holdout "
             f"check was spent: {', '.join(blocking)}.{extra} See get_report for details."
         )
-    candles, window = _load_full(plan, cfg, load)
+    # the run's frozen derivatives series (scored start, holdout gaps); None for price plans
+    series = derivatives_series(cfg, ledger, run_id) if plan_derivative_columns(plan) else None
+    candles, window = _load_full(plan, cfg, load, series)
+    design_bars, _ = _scored_design_bars(plan, candles, cfg, series)
     budget = holdout_budget(ledger, run_id, cfg)
     try:
         used = ledger.record_holdout_check(
@@ -254,7 +333,6 @@ def run_holdout_check(
         "window_end": window.end,
         "costs_json": costs_to_json(cfg.costs),
     }
-    design = (candles.index >= cfg.splits.design_start) & (candles.index < cfg.splits.holdout_start)
     passed = False
     try:
         holdout_bars = len(slice_window(candles, window))
@@ -286,7 +364,7 @@ def run_holdout_check(
             )
         )
         sharpe, dd, ret = num(metrics.sharpe), num(metrics.max_drawdown), num(metrics.total_return)
-        need = holdout_min_trades(crit.min_trades, holdout_bars, int(design.sum()))
+        need = holdout_min_trades(crit.min_trades, holdout_bars, design_bars)
         passed = (
             sharpe is not None
             and sharpe >= crit.wf_oos_sharpe_min

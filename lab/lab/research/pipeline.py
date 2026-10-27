@@ -30,7 +30,8 @@ import pandas as pd
 
 from lab.config import LabConfig
 from lab.crosscheck.nautilus import crosscheck
-from lab.engine.splits import design_view
+from lab.data.derivatives_columns import require_plan_inputs
+from lab.engine.splits import design_view, slice_window
 from lab.ledger import Ledger
 from lab.plan import parse_plan, plan_hash
 from lab.report import num
@@ -41,6 +42,8 @@ from lab.research.logic import logic_hash
 from lab.runner import (
     CandleLoader,
     DataUnavailableError,
+    derivatives_series,
+    plan_design_window,
     run_adversarial_report,
     run_backtest_report,
 )
@@ -163,8 +166,10 @@ def crosscheck_evidence(
 
     ``matched`` is True only when nautilus_trader is available and the engines agree. Raises
     ``ValueError`` (nothing recorded) when the run never started or the plan has no backtest
-    evidence in the run (the cross-check confirms an existing backtest; it is not a new one).
-    Only design-window bars are loaded."""
+    evidence in the run (the cross-check confirms an existing backtest; it is not a new one),
+    ``DataUnavailableError`` (nothing recorded) when derivatives columns the plan reads are
+    missing, and ``GateBaseRefusedError`` (a ``PlanValidationError``, nothing recorded) when a
+    gated plan's price clause does not select. Only design-window bars are loaded."""
     plan = parse_plan(raw_plan)
     h = plan_hash(plan)
     frozen_criteria(ledger, run_id)  # the run must exist
@@ -189,6 +194,14 @@ def crosscheck_evidence(
     if window.end > cfg.splits.holdout_start:
         raise ValueError(f"backtest window of plan {h[:12]} reaches the locked holdout")
     candles = design_view(loader(plan.symbol, plan.interval, cfg.splits.holdout_start), cfg.splits)
+    # a plan whose derivatives inputs are gone raises here, before anything is recorded
+    require_plan_inputs(
+        plan, slice_window(candles, window), symbol=plan.symbol, interval=plan.interval
+    )
+    # a derivatives plan must still be scorable and its price clause must select (raises
+    # GateBaseRefusedError / DataUnavailableError, nothing recorded); the window itself is the
+    # backtest evidence's, which already starts at the plan's scored start
+    plan_design_window(plan, candles, cfg, series=derivatives_series(cfg, ledger, run_id))
     res = crosscheck(plan, candles, costs=cfg.costs, init_cash=cfg.init_cash, window=window)
     out: dict[str, Any] = {
         "matched": bool(res.available and res.agree),

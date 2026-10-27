@@ -629,3 +629,180 @@ def test_json_schema_lists_registry_features_and_limits() -> None:
     names = {next(iter(b["properties"])) for b in feats["additionalProperties"]["oneOf"]}
     assert names == set(FAKE_REGISTRY)
     json.dumps(schema)
+
+
+# --------------------------------------------------------------------------- derivatives gates
+# Real registry: funding/premium/basis/OI/long-short features are exposure or crash-risk
+# filters, accepted only as gating `and` clauses of long_entry (PLAN.md Phase 12).
+
+
+def drv_plan(entry: str, exit_: str = "close < ema_slow") -> dict[str, Any]:
+    return {
+        "name": "ema_trend_funding_gate",
+        "symbol": "BTCUSDT",
+        "interval": "4h",
+        "features": {
+            "ema_slow": {"ema": {"period": 100}},
+            "rsi": {"rsi": {"period": 14}},
+            "funding_zscore": {"funding_zscore": {"period": 180}},
+            "basis": {"basis_pct": {}},
+        },
+        "long_entry": entry,
+        "long_exit": exit_,
+    }
+
+
+def real_errors(raw: Mapping[str, Any]) -> list[PlanError]:
+    plan, errors = validate_plan(raw)
+    assert plan is None, "expected the plan to be rejected"
+    return errors
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "close > ema_slow and rsi < 70 and funding_zscore < 2 and basis < 0.1",
+        "(close > ema_slow and rsi < 70) and funding_zscore < 2 and basis > 0.1",
+        "close > ema_slow and rsi < 70 and (funding_zscore < 2 or basis < 0.1)",
+        "funding_zscore < 2 and close > ema_slow and rsi < 70 and not basis > 0.5",
+        "close > ema_slow and rsi < 70 and prev(funding_zscore, 1) < 2 and basis < 0.1",
+        "(close > ema_slow or rsi < 30) and -1 < funding_zscore < 2 and basis < 0.1",
+    ],
+)
+def test_derivatives_features_are_accepted_as_gating_and_clauses(entry: str) -> None:
+    plan, errors = validate_plan(drv_plan(entry))
+    assert errors == [] and plan is not None
+
+
+def test_plan_md_gating_example_validates() -> None:
+    raw = drv_plan("close > ema_slow and funding_zscore < 2")
+    raw["features"] = {
+        "ema_slow": {"ema": {"period": 100}},
+        "funding_zscore": {"funding_zscore": {}},
+    }
+    plan, errors = validate_plan(raw)
+    assert errors == [] and plan is not None
+    assert plan.features[1].params == {"period": 180}
+
+
+@pytest.mark.parametrize(
+    ("entry", "clause", "others"),
+    [
+        (
+            "(close > ema_slow or funding_zscore < 2) and rsi < 70 and basis < 0.1",
+            "close > ema_slow or funding_zscore < 2",
+            "`close`, `ema_slow`",
+        ),
+        (
+            "close > ema_slow and rsi > funding_zscore and basis < 0.1",
+            "rsi > funding_zscore",
+            "`rsi`",
+        ),
+        (
+            "close > ema_slow and rsi / 70 < 1 + basis and funding_zscore < 2",
+            "rsi / 70 < 1 + basis",
+            "`rsi`",
+        ),
+        (
+            "not (close > ema_slow and funding_zscore < 2) and rsi < 70 and basis < 0.1",
+            "not (close > ema_slow and funding_zscore < 2)",
+            "`close`, `ema_slow`",
+        ),
+    ],
+)
+def test_a_derivatives_feature_mixed_into_a_price_clause_is_rejected(
+    entry: str, clause: str, others: str
+) -> None:
+    errors = real_errors(drv_plan(entry))
+    assert [e.path for e in errors] == ["long_entry"], errors
+    msg = errors[0].message
+    assert f"`{clause}`" in msg
+    assert others in msg
+    assert "its own top-level `and` clause" in msg
+    assert "not a direction signal" in msg
+    assert "e.g. `close > ema_slow and" in msg
+
+
+def test_comparing_a_price_with_a_derivatives_feature_is_rejected() -> None:
+    raw = drv_plan("close > ema_slow and rsi < 70 and close > funding_zscore and basis < 0.1")
+    errors = real_errors(raw)
+    gate = [e for e in errors if "combines derivatives feature(s)" in e.message]
+    assert len(gate) == 1 and gate[0].path == "long_entry"
+    assert "`close > funding_zscore`" in gate[0].message
+
+
+def test_derivatives_only_entry_is_rejected() -> None:
+    raw = drv_plan("funding_zscore < 2 and basis < 0.1")
+    raw["features"] = {
+        "ema_slow": {"ema": {"period": 100}},
+        "funding_zscore": {"funding_zscore": {}},
+        "basis": {"basis_pct": {}},
+    }
+    errors = real_errors(raw)
+    assert [e.path for e in errors] == ["long_entry"], errors
+    msg = errors[0].message
+    assert "uses only derivatives feature(s) `basis` (basis_pct), `funding_zscore`" in msg
+    assert "cannot be the entry signal on its own" in msg
+    assert "e.g. `close > ema_slow and basis < 0.1`" in msg
+
+
+def test_a_single_derivatives_comparison_cannot_be_the_whole_entry() -> None:
+    raw = drv_plan("funding_zscore < 2")
+    raw["features"] = {
+        "ema_slow": {"ema": {"period": 100}},
+        "funding_zscore": {"funding_zscore": {}},
+    }
+    errors = real_errors(raw)
+    assert [e.path for e in errors] == ["long_entry"], errors
+    assert "cannot be the entry signal on its own" in errors[0].message
+
+
+@pytest.mark.parametrize(
+    "exit_",
+    [
+        "close < ema_slow or funding_zscore > 3",
+        "close < ema_slow and basis < 0.5",
+        "funding_zscore > 3",
+    ],
+)
+def test_derivatives_features_in_long_exit_are_rejected_with_the_reason(exit_: str) -> None:
+    raw = drv_plan("close > ema_slow and rsi < 70 and funding_zscore < 2 and basis < 0.1", exit_)
+    errors = real_errors(raw)
+    assert [e.path for e in errors] == ["long_exit"], errors
+    msg = errors[0].message
+    assert "uses derivatives feature(s)" in msg
+    assert "makes the whole expression False" in msg
+    assert "suppress the price exit" in msg
+    assert "gating `and` clause of long_entry" in msg
+
+
+def test_derivatives_rules_are_inert_for_plans_without_derivatives_features() -> None:
+    plan, errors = validate_plan(example_plan(), FAKE_REGISTRY)
+    assert errors == [] and plan is not None
+
+
+def test_portfolio_plans_cannot_use_derivatives_features() -> None:
+    from lab.plan.portfolio import validate_portfolio_plan
+
+    base: dict[str, Any] = {
+        "kind": "portfolio",
+        "name": "xs_funding",
+        "interval": "1d",
+        "score": {"trailing_return": {"lookback": 28}},
+        "rebalance": {"every": 7, "offset": 0},
+        "selection": {"quantile": 0.2, "exit_quantile": 0.3, "min_names": 3},
+        "weighting": {"equal": {}},
+        "max_weight": 0.25,
+        "dispersion_gate": None,
+    }
+    assert validate_portfolio_plan(base, interval="1d").ok
+    as_score = validate_portfolio_plan(
+        {**base, "score": {"funding_zscore": {"lookback": 28}}}, interval="1d"
+    )
+    assert not as_score.ok
+    assert any("unknown score feature `funding_zscore`" in e for e in as_score.errors)
+    as_feature = validate_portfolio_plan(
+        {**base, "features": {"fz": {"funding_zscore": {}}}}, interval="1d"
+    )
+    assert not as_feature.ok
+    assert any(e.startswith("features:") for e in as_feature.errors)

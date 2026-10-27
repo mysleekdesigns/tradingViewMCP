@@ -9,6 +9,21 @@ tuned out-of-sample result), trades, equity curves, warnings, and a disclaimer.
 * Window = ``[max(design_start, first bar), holdout_start)`` (or up to the last bar if the
   data ends earlier). Candles are loaded with ``end = holdout_start`` so holdout rows are never
   even read; ``assert_no_holdout`` guards the frame anyway.
+* Derivatives plans (a ``drv_*`` input, PLAN.md Phase 12) are SCORED from ONE start per
+  (symbol, interval), shared by every derivatives plan (:func:`derivatives_scored_start`): the
+  latest ``first`` timestamp across the five derivatives archive series of that symbol/interval
+  (fundingRate, metrics, premium/mark/index klines; from the run's frozen snapshot inside a
+  research run, else the current manifest) plus ``[derivatives] warmup_days``, snapped to the
+  first bar at or after it, never before ``design_start``. Which derivatives features a plan
+  uses, and their periods, never move it: a derivatives look-back must fit inside
+  ``warmup_days`` (:func:`derivatives_lookback_errors`), and any NaN left inside the window
+  (archive gaps) scores flat. Like portfolio plans scored from their first decision, the plan,
+  every benchmark and null, the neighbourhood, adversarial variants and walk-forward folds all
+  use that window, so years of forced-flat bars before the archive cannot flatter drawdown. The
+  report's ``scoring`` block states the start (UTC). Before any ledger row,
+  :func:`check_gate_base` refuses a plan whose derivatives-free entry clauses alone are true on
+  ``>= [derivatives] gate_base_max_true_frac`` of those bars. Plans without derivatives
+  features are unaffected.
 * Signals are computed on the history through the window end (earlier bars = warm-up), then
   candles and signals are sliced to the window and the engine runs on the slice. The same
   history is the engine's ``cost_history`` so vol-scaled slippage is warmed up as well.
@@ -22,6 +37,9 @@ Ledger policy (every backtest is recorded; the ledger is append-only):
 * each adversarial variant (delays, sign flip, cost stress) -> ``"adversarial"``;
 * each benchmark / null (buy-and-hold, vol-target, random-entry, permutation null) -> ONE
   summary row per report with source ``"benchmark"``.
+* derivatives plans also get ``benchmarks.ungated`` (:func:`ungated_plan`: the same plan
+  without its derivatives entry clauses, same costs and scored window, plus the gate's binding
+  share): informational only and NOT recorded in the ledger (not a trial, not a candidate).
 * every engine row stores ``costs_json`` (the cost model it ran with; cost-stress variants
   store the scaled model).
 * **DSR's N** = number of DISTINCT ``plan_hash`` in the run among sources {manual, api, optuna,
@@ -38,12 +56,13 @@ Results are historical and not forward-looking.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import math
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +70,18 @@ import numpy as np
 import pandas as pd
 
 from lab.config import LabConfig
+from lab.data.derivatives import manifest_sha256
+from lab.data.derivatives_columns import (
+    DataUnavailableError,
+    DerivativeColumns,
+    attach_columns,
+    derivative_columns,
+    derivatives_start_floor,
+    manifest_series,
+    max_derivatives_period,
+    plan_derivative_columns,
+    require_plan_inputs,
+)
 from lab.data.store import load_candles
 from lab.engine import run_signals, run_weights
 from lab.engine.splits import (
@@ -67,8 +98,19 @@ from lab.evaluate.benchmarks import (
     vol_target_weights,
 )
 from lab.ledger import SELECTION_SOURCES, Ledger, costs_to_json, metrics_to_json
-from lab.plan import compile_plan, parse_plan, plan_hash, plan_to_dict, tunable_params, with_params
-from lab.plan.validator import PlanValidationError
+from lab.plan import (
+    compile_plan,
+    compute_features,
+    evaluate_expression,
+    parse_plan,
+    plan_hash,
+    plan_to_dict,
+    tunable_params,
+    with_params,
+)
+from lab.plan.validator import PlanValidationError, gate_base_expressions
+from lab.registry import REGISTRY
+from lab.registry.derivatives import DERIVATIVES_FEATURES
 from lab.report import (
     equity_points,
     metrics_dict,
@@ -86,11 +128,13 @@ from lab.stats import (
     stationary_bootstrap_ci,
 )
 from lab.types import (
+    PRICE_INPUTS,
     BacktestResult,
     CostModel,
     Metrics,
     ParamSpec,
     Plan,
+    PlanError,
     TrialRecord,
     TrialSource,
     Window,
@@ -101,12 +145,25 @@ from lab.types import (
 __all__ = [
     "CandleLoader",
     "DataUnavailableError",
+    "DerivativesLookbackError",
+    "GateBaseRefusedError",
+    "GateBaseTrialError",
     "archive_cli_hint",
+    "check_gate_base",
     "default_loader",
+    "derivatives_lookback_errors",
+    "derivatives_period_caps",
+    "derivatives_scored_start",
+    "derivatives_series",
+    "gate_base_share",
+    "gate_base_trial_check",
     "neighbourhood_overrides",
     "pbo_split_count",
+    "plan_design_window",
     "run_adversarial_report",
     "run_backtest_report",
+    "scoring_json",
+    "ungated_plan",
 ]
 
 CandleLoader = Callable[[str, str, pd.Timestamp], pd.DataFrame]
@@ -131,8 +188,9 @@ DEFAULT_SEED = 7  # explicit seed for bootstrap / random-entry / permutation dra
 DISCLAIMER_HEAD = "Historical simulation on Binance spot data; not forward-looking."
 
 
-class DataUnavailableError(RuntimeError):
-    """No candles for the plan's symbol/interval in the design window; ``str()`` names the CLI."""
+# ``DataUnavailableError`` (no candles in the design window, or derivatives inputs a plan needs
+# are missing; ``str()`` names the CLI) lives in ``lab.data.derivatives_columns`` and is
+# re-exported here so every existing ``from lab.runner import DataUnavailableError`` still works.
 
 
 # --------------------------------------------------------------------------- data
@@ -154,7 +212,22 @@ def archive_cli_hint(symbol: str, interval: str, now: pd.Timestamp | None = None
 
 def default_loader(cfg: LabConfig) -> CandleLoader:
     """Parquet-only loader (the verified Binance.com archive). The server's SQLite cache holds
-    live Binance bars without checksums and is deliberately never mixed in for research."""
+    live Binance bars without checksums and is deliberately never mixed in for research.
+
+    Every load also attaches the ``drv_*`` derivatives columns whose archive series exist under
+    ``cfg.derivatives_dir`` (``lab.data.derivatives_columns.attach_derivatives``: aligned to each
+    bar's close, loaded only up to the last bar's close, never forward-filled). The aligned
+    columns are cached per closure, keyed on ``(symbol, interval, end, manifest sha256)`` and
+    checked against the bar index, so a sweep does not re-read ~2,000 daily metrics files per
+    call; rebuilding the manifest (the download CLI does) invalidates the cache. Without a
+    manifest nothing is cached. Candles themselves are re-read every call, as before.
+
+    Archive rows stamped at or after ``end`` are dropped (``stamped_before=end``), so a
+    design-window load (``end = holdout_start``) uses no derivatives row stamped in the holdout,
+    even one visible exactly at the last design bar's close."""
+    cache: dict[tuple[str, str, pd.Timestamp, str], DerivativeColumns] = {}
+    data_dir = Path(cfg.derivatives_dir)
+    stale = cfg.derivatives.stale_after_intervals
 
     def load(symbol: str, interval: str, end: pd.Timestamp) -> pd.DataFrame:
         folder = Path(cfg.parquet_dir) / symbol / interval
@@ -163,9 +236,34 @@ def default_loader(cfg: LabConfig) -> CandleLoader:
                 f"no archive data for {symbol} {interval}; download it with "
                 f"`{archive_cli_hint(symbol, interval)}`"
             )
-        return load_candles(symbol, interval, parquet_dir=cfg.parquet_dir, end=end)
+        candles = load_candles(symbol, interval, parquet_dir=cfg.parquet_dir, end=end)
+        sha = manifest_sha256(data_dir)
+        key = (symbol, interval, pd.Timestamp(end), sha) if sha is not None else None
+        cols = cache.get(key) if key is not None else None
+        if cols is None or not cols.bar_times.equals(candles.index):
+            cols = derivative_columns(
+                pd.DatetimeIndex(candles.index),
+                symbol,
+                interval,
+                data_dir=data_dir,
+                stale_after_intervals=stale,
+                # rows stamped at/after the load's end never reach it (Note in
+                # lab.data.derivatives_columns: design loads end at holdout_start)
+                stamped_before=pd.Timestamp(end),
+            )
+            if key is not None:
+                cache[key] = cols
+        return attach_columns(candles, cols)
 
     return load
+
+
+class GateBaseRefusedError(PlanValidationError):
+    """A gated plan whose derivatives-free ``long_entry`` clauses are true on at least
+    ``[derivatives] gate_base_max_true_frac`` of the scored design bars: the price clause does
+    not select, so the derivatives filter would be the de-facto signal. Raised before any
+    ledger row; a :class:`PlanValidationError` (path ``long_entry``), so the MCP server and the
+    API report it as a plan error the agent must fix, never as an error trial."""
 
 
 @dataclass(frozen=True)
@@ -174,8 +272,9 @@ class _Prepared:
     plan_hash: str
     plan_dict: dict[str, Any]
     history: pd.DataFrame  # design view: every bar < holdout_start (and < window end)
-    window: Window
+    window: Window  # the SCORED window (a derivatives plan's effective start, see below)
     candles: pd.DataFrame  # history sliced to the window
+    scoring: dict[str, Any] | None = None  # derivatives plans: scoring_json(...)
 
 
 def _design_window(history: pd.DataFrame, cfg: LabConfig, interval: str) -> Window | None:
@@ -189,11 +288,247 @@ def _design_window(history: pd.DataFrame, cfg: LabConfig, interval: str) -> Wind
     return Window(start=start, end=end, kind="design")
 
 
-def _prepare(raw_plan: Mapping[str, Any] | str, cfg: LabConfig, loader: CandleLoader) -> _Prepared:
-    plan = parse_plan(raw_plan)  # PlanValidationError lists every problem
-    raw = loader(plan.symbol, plan.interval, cfg.splits.holdout_start)
-    history = design_view(raw, cfg.splits)
-    assert_no_holdout(history, cfg.splits)
+class DerivativesLookbackError(PlanValidationError):
+    """A derivatives feature looks back further than ``[derivatives] warmup_days``: the shared
+    scored start leaves room for that much warm-up only (:func:`derivatives_scored_start`).
+    Raised before any ledger row; a :class:`PlanValidationError` the agent must fix."""
+
+
+def derivatives_period_caps(plan: Plan, cfg: LabConfig) -> dict[str, int]:
+    """``{"alias.period": max bars}`` for every derivatives feature ``period`` param of ``plan``:
+    the longest look-back on its interval that fits in ``[derivatives] warmup_days``."""
+    cap = max_derivatives_period(plan.interval, cfg.derivatives.warmup_days)
+    out: dict[str, int] = {}
+    for ref in plan.features:
+        if ref.feature not in DERIVATIVES_FEATURES:
+            continue
+        for p in REGISTRY[ref.feature].params:
+            if p.name == "period":
+                out[f"{ref.alias}.{p.name}"] = cap
+    return out
+
+
+def derivatives_lookback_errors(plan: Plan, cfg: LabConfig) -> list[PlanError]:
+    """One error per derivatives feature whose ``period x bar length`` exceeds
+    ``[derivatives] warmup_days`` (empty for plans without derivatives features)."""
+    warm = cfg.derivatives.warmup_days
+    bar_days = interval_seconds(plan.interval) / 86_400
+    cap = max_derivatives_period(plan.interval, warm)
+    errors: list[PlanError] = []
+    for ref in plan.features:
+        if ref.feature not in DERIVATIVES_FEATURES:
+            continue
+        for p in REGISTRY[ref.feature].params:
+            if p.name != "period":
+                continue
+            period = int(ref.params.get(p.name, p.default))
+            if period > cap:
+                errors.append(
+                    PlanError(
+                        f"features.{ref.alias}.{ref.feature}.period",
+                        f"{ref.feature} period {period} on {plan.interval} = "
+                        f"{period * bar_days:.1f} days > [derivatives] warmup_days {warm:g}; "
+                        f"use <= {cap} (every derivatives plan on {plan.symbol} "
+                        f"{plan.interval} is scored from one shared start that leaves "
+                        f"{warm:g} days of derivatives warm-up)",
+                    )
+                )
+    return errors
+
+
+def derivatives_series(
+    cfg: LabConfig, ledger: Ledger | None = None, run_id: str | None = None
+) -> Mapping[str, Any] | None:
+    """The per-series derivatives entries the scored start (and the holdout's gap check) read:
+    ``run_id``'s FROZEN snapshot series when it is a research run that froze them (so the start
+    cannot move mid-run), else the current manifest's series (None without a manifest)."""
+    if ledger is not None and run_id is not None:
+        run = ledger.research_run(run_id)
+        config = run["config"] if run is not None else None
+        frozen = config.get("derivatives") if isinstance(config, dict) else None
+        if isinstance(frozen, dict) and isinstance(frozen.get("series"), Mapping):
+            return frozen["series"]
+    return manifest_series(cfg.derivatives_dir)
+
+
+def derivatives_scored_start(
+    symbol: str,
+    interval: str,
+    history: pd.DataFrame,
+    cfg: LabConfig,
+    series: Mapping[str, Any] | None,
+) -> pd.Timestamp:
+    """The ONE scored start of every derivatives plan on (``symbol``, ``interval``): the first
+    bar of ``history`` at or after ``max(design_start,``
+    :func:`lab.data.derivatives_columns.derivatives_start_floor` ``)`` (latest series ``first``
+    in ``series`` + ``warmup_days``). Raises :class:`DataUnavailableError` when a series is
+    missing or no bar of ``history`` is that late."""
+    floor = derivatives_start_floor(
+        symbol,
+        interval,
+        series,
+        warmup_days=cfg.derivatives.warmup_days,
+        cli_start=cfg.splits.design_start.strftime("%Y-%m"),
+        cli_end=last_full_month(),
+    )
+    at = max(floor, cfg.splits.design_start)
+    idx = pd.DatetimeIndex(history.index)
+    hits = np.flatnonzero(idx >= at)
+    if not hits.size:
+        raise DataUnavailableError(
+            f"no {symbol} {interval} bar at or after the derivatives scored start "
+            f"{_iso(at)} (latest derivatives series start + [derivatives] warmup_days "
+            f"{cfg.derivatives.warmup_days:g}); nothing was recorded in the ledger"
+        )
+    return pd.Timestamp(idx[hits[0]])
+
+
+def gate_base_share(plan: Plan, history: pd.DataFrame, window: Window) -> dict[str, Any] | None:
+    """``{"price_clause", "price_clause_true_share", "bars"}``: the share of the bars of
+    ``window`` (where it is defined) on which the conjunction of ``long_entry``'s
+    derivatives-FREE top-level ``and`` clauses (:func:`lab.plan.validator.gate_base_expressions`)
+    is true, evaluated on ``history``; None for plans without derivatives gates, or whose price
+    clause is never defined in the window. Features only, no backtest."""
+    exprs = gate_base_expressions(plan)
+    if exprs is None:
+        return None
+    base, negated = exprs
+    n = len(history)
+    features = compute_features(plan, history)
+    cols: dict[str, np.ndarray] = {c: history[c].to_numpy(dtype=np.float64) for c in PRICE_INPUTS}
+    cols.update({c: features[c].to_numpy(dtype=np.float64) for c in features.columns})
+    true = evaluate_expression(base, cols, n)
+    false = evaluate_expression(negated, cols, n)
+    idx = pd.DatetimeIndex(history.index)
+    defined = (true | false) & (idx >= window.start) & (idx < window.end)
+    bars = int(defined.sum())
+    if bars == 0:
+        return None
+    share = float(true[defined].mean())
+    return {"price_clause": base.source, "price_clause_true_share": share, "bars": bars}
+
+
+def check_gate_base(
+    plan: Plan, history: pd.DataFrame, window: Window, cfg: LabConfig
+) -> dict[str, Any] | None:
+    """Refuse a gated plan whose price clause does not select (PLAN.md Phase 12).
+
+    Evaluates the conjunction of ``long_entry``'s derivatives-FREE top-level ``and`` clauses
+    (:func:`lab.plan.validator.gate_base_expressions`) on ``history`` and, over the bars of
+    ``window`` where it is defined, raises :class:`GateBaseRefusedError` when it is true on at
+    least ``cfg.derivatives.gate_base_max_true_frac`` of them (``close > 0``, ``rsi < 101``,
+    ``volume >= 0``: always true, so the gate alone would select). Returns ``{"price_clause",
+    "price_clause_true_share", "bars"}``, or None for plans without derivatives gates (or whose
+    price clause is never defined in the window)."""
+    info = gate_base_share(plan, history, window)
+    if info is None:
+        return None
+    share, bars = info["price_clause_true_share"], info["bars"]
+    limit = cfg.derivatives.gate_base_max_true_frac
+    if share >= limit:
+        gates = sorted(r.alias for r in plan.features if r.feature in DERIVATIVES_FEATURES)
+        raise GateBaseRefusedError(
+            [
+                PlanError(
+                    "long_entry",
+                    f"the price clause `{info['price_clause']}` (the long_entry clauses without "
+                    f"derivatives features) is true on {share:.1%} of the {bars} scored design "
+                    f"bars from {window.start.date()}, at or above lab.toml [derivatives] "
+                    f"gate_base_max_true_frac {limit:g}: it does not select bars, so the "
+                    f"derivatives gate(s) {', '.join(f'`{g}`' for g in gates)} would be the "
+                    "de-facto entry signal, and a derivatives feature is an exposure or "
+                    "crash-risk filter, not a direction signal. Replace it with a price signal "
+                    "that selects bars on its own (e.g. `close > ema_slow`, true on roughly half "
+                    "the bars, or a crossover) and keep the gate as an extra `and` clause. "
+                    "Nothing was recorded in the ledger",
+                )
+            ]
+        )
+    return info
+
+
+class GateBaseTrialError(ValueError):
+    """A sweep / walk-forward trial's parameters make the price clause ~always true
+    (:func:`gate_base_trial_check`); the search records the trial as a failed (``error``) ledger
+    row, so it counts in DSR's N and is never selected."""
+
+
+def gate_base_trial_check(
+    history: pd.DataFrame, window: Window, cfg: LabConfig
+) -> Callable[[Plan], None]:
+    """Per-trial gate-base check for Optuna sweeps and walk-forward folds
+    (:func:`lab.search.optuna_search.optuna_search` ``trial_check``): the same rule as
+    :func:`check_gate_base`, applied to each trial's concrete parameters on the plan's SCORED
+    design ``window`` (``history`` = the design view), so tuning a price period cannot turn the
+    price clause into an always-true one and let the derivatives gate become the entry signal.
+    Raises :class:`GateBaseTrialError`; a no-op for plans without derivatives gates."""
+    limit = cfg.derivatives.gate_base_max_true_frac
+
+    def check(plan: Plan) -> None:
+        info = gate_base_share(plan, history, window)
+        if info is None:
+            return
+        share = info["price_clause_true_share"]
+        if share >= limit:
+            raise GateBaseTrialError(
+                f"gate-base check failed for these params: the price clause "
+                f"`{info['price_clause']}` is true on {share:.1%} of the {info['bars']} scored "
+                f"design bars from {window.start.date()}, at or above lab.toml [derivatives] "
+                f"gate_base_max_true_frac {limit:g}, so the derivatives gate would be the "
+                "de-facto entry signal; the trial is failed (never selectable), no backtest run"
+            )
+
+    return check
+
+
+def _iso(ts: pd.Timestamp) -> str:
+    return pd.Timestamp(ts).tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def scoring_json(
+    design_start: pd.Timestamp, window: Window, gate: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """The report's ``scoring`` block for a derivatives plan: where scoring starts and why."""
+    out: dict[str, Any] = {
+        "scored_from": seconds(window.start),
+        "scored_from_utc": _iso(window.start),
+        "design_start": seconds(design_start),
+        "design_start_utc": _iso(design_start),
+        "note": (
+            "derivatives plan: scored from the one start shared by every derivatives plan on "
+            "this symbol/interval (latest derivatives series start + [derivatives] "
+            "warmup_days, frozen with the run's snapshot); the plan, buy-and-hold, vol-target, "
+            "the random-entry and permutation nulls, the neighbourhood (PBO), adversarial "
+            "variants, sweeps and walk-forward folds all start there"
+        ),
+    }
+    if gate is not None:
+        out.update(gate)
+    return out
+
+
+def plan_design_window(
+    plan: Plan,
+    history: pd.DataFrame,
+    cfg: LabConfig,
+    *,
+    series: Mapping[str, Any] | None = None,
+) -> tuple[Window, dict[str, Any] | None]:
+    """The window ``plan`` is scored on, from its design view ``history`` (every bar before
+    ``holdout_start``, warm-up included), and its ``scoring`` block (None for plans without
+    derivatives features).
+
+    ``[max(design_start, first bar), min(holdout_start, last bar end))``; for a plan that reads a
+    derivatives column the start is :func:`derivatives_scored_start` (one start per symbol and
+    interval, from ``series``: pass :func:`derivatives_series` inside a research run; None reads
+    the current manifest), and :func:`check_gate_base` runs on that window. Raises
+    :class:`DerivativesLookbackError` (a look-back longer than ``warmup_days``),
+    :class:`DataUnavailableError` (no bars, missing inputs or series) or
+    :class:`GateBaseRefusedError`, all before any ledger row. Plans without derivatives get
+    exactly the window they always had."""
+    lookback = derivatives_lookback_errors(plan, cfg)
+    if lookback:
+        raise DerivativesLookbackError(lookback)
     window = _design_window(history, cfg, plan.interval)
     candles = slice_window(history, window) if window is not None else history.iloc[:0]
     if window is None or len(candles) < 2:
@@ -202,8 +537,40 @@ def _prepare(raw_plan: Mapping[str, Any] | str, cfg: LabConfig, loader: CandleLo
             f"[{cfg.splits.design_start.date()}, {cfg.splits.holdout_start.date()}); download "
             f"them with `{archive_cli_hint(plan.symbol, plan.interval)}`"
         )
+    # before any trial is recorded: a missing derivatives download must not spend a ledger row
+    require_plan_inputs(plan, candles, symbol=plan.symbol, interval=plan.interval)
+    if not plan_derivative_columns(plan):
+        return window, None
+    if series is None:
+        series = manifest_series(cfg.derivatives_dir)
+    start = derivatives_scored_start(plan.symbol, plan.interval, candles, cfg, series)
+    scored = Window(start=max(window.start, start), end=window.end, kind="design")
+    if int(((history.index >= scored.start) & (history.index < scored.end)).sum()) < 2:
+        raise DataUnavailableError(
+            f"fewer than 2 {plan.symbol} {plan.interval} design bars from the derivatives "
+            f"scored start {_iso(scored.start)} to {scored.end.date()}; nothing was recorded "
+            "in the ledger"
+        )
+    gate = check_gate_base(plan, history, scored, cfg)
+    return scored, scoring_json(window.start, scored, gate)
+
+
+def _prepare(
+    raw_plan: Mapping[str, Any] | str,
+    cfg: LabConfig,
+    loader: CandleLoader,
+    ledger: Ledger | None = None,
+    run_id: str | None = None,
+) -> _Prepared:
+    plan = parse_plan(raw_plan)  # PlanValidationError lists every problem
+    raw = loader(plan.symbol, plan.interval, cfg.splits.holdout_start)
+    history = design_view(raw, cfg.splits)
+    assert_no_holdout(history, cfg.splits)
+    series = derivatives_series(cfg, ledger, run_id) if plan_derivative_columns(plan) else None
+    window, scoring = plan_design_window(plan, history, cfg, series=series)
+    candles = slice_window(history, window)
     history = history.loc[history.index < window.end]
-    return _Prepared(plan, plan_hash(plan), plan_to_dict(plan), history, window, candles)
+    return _Prepared(plan, plan_hash(plan), plan_to_dict(plan), history, window, candles, scoring)
 
 
 # --------------------------------------------------------------------------- engine helpers
@@ -372,6 +739,11 @@ def _run_neighbourhood(
 ) -> list[_Neighbour]:
     out: list[_Neighbour] = []
     tunables = tunable_params(prep.plan)
+    # a derivatives look-back never grows past [derivatives] warmup_days (the shared scored
+    # start leaves room for that much only): its neighbours are clipped there like at a bound
+    for key, cap in derivatives_period_caps(prep.plan, cfg).items():
+        if key in tunables:
+            tunables[key] = replace(tunables[key], high=float(min(tunables[key].high, cap)))
     for ov in neighbourhood_overrides(
         tunables, cfg.stats.neighbourhood_steps, cfg.stats.neighbourhood_max_trials
     ):
@@ -576,6 +948,89 @@ def _warnings(
     return out
 
 
+# --------------------------------------------------------------------------- ungated baseline
+
+UNGATED_NOTE = (
+    "informational only: the same plan with every long_entry `and` clause that reads a "
+    "derivatives feature removed (the price clause alone), run with the same costs on the same "
+    "scored window. It is not a ledger trial, not a candidate, never holdout-checkable, and does "
+    "not change DSR's N; it adds no pass/fail criterion. gate_binding_share = bars where the "
+    "price clause wanted an entry but the gate blocked it (gate false or undefined) / bars "
+    "where the price clause wanted an entry (entry signals, whether or not already in a "
+    "position). plan_minus_ungated: max_drawdown is negative, so a positive difference means "
+    "the gate reduced the drawdown"
+)
+
+
+def _expr_names(expr: str) -> set[str]:
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return set()
+    return {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+
+
+def ungated_plan(plan: Plan) -> Plan | None:
+    """``plan`` with every top-level ``and`` clause of ``long_entry`` that reads a derivatives
+    feature removed (:func:`lab.plan.validator.gate_base_expressions`, the same price clause
+    :func:`check_gate_base` judges), features no rule uses any more dropped, ``long_exit`` and
+    risk unchanged. None when the plan has no derivatives feature or no derivatives-free entry
+    clause. Raises :class:`PlanValidationError` if the stripped plan does not validate."""
+    exprs = gate_base_expressions(plan)
+    if exprs is None:
+        return None
+    entry = exprs[0].source
+    used = _expr_names(entry) | _expr_names(plan.long_exit)
+    raw = plan_to_dict(plan)
+    raw["long_entry"] = entry
+    raw["features"] = {a: spec for a, spec in raw["features"].items() if a in used}
+    return parse_plan(raw)
+
+
+def _ungated_benchmark(prep: _Prepared, cfg: LabConfig, net: Metrics) -> dict[str, Any] | None:
+    """The report's ``benchmarks.ungated`` block (:data:`UNGATED_NOTE`) for a single-symbol
+    plan with derivatives features, or None for price-only plans. Never touches the ledger."""
+    if prep.scoring is None:
+        return None
+    gates = sorted(r.alias for r in prep.plan.features if r.feature in DERIVATIVES_FEATURES)
+    try:
+        stripped = ungated_plan(prep.plan)
+    except PlanValidationError as exc:
+        return {"error": f"the ungated plan does not validate: {exc}", "note": UNGATED_NOTE}
+    if stripped is None:
+        return {
+            "error": "long_entry has no derivatives-free clause, so there is no price-only "
+            "baseline to compare with",
+            "gate_features": gates,
+            "note": UNGATED_NOTE,
+        }
+    try:
+        res = _run_plan(stripped, prep, cfg)
+    except ValueError as exc:
+        return {"error": f"the ungated plan failed to run: {exc}", "note": UNGATED_NOTE}
+    um = compute_metrics(res, prep.plan.interval)
+    gated_entries, _ = _signals(prep.plan, prep.history, prep.candles.index)
+    price_entries, _ = _signals(stripped, prep.history, prep.candles.index)
+    wanted = price_entries.to_numpy(dtype=bool)
+    blocked = wanted & ~gated_entries.to_numpy(dtype=bool)
+    n_wanted, n_blocked = int(wanted.sum()), int(blocked.sum())
+    return {
+        "plan": plan_to_dict(stripped),
+        "price_clause": stripped.long_entry,
+        "gate_features": gates,
+        "metrics": metrics_dict(um),
+        "price_clause_entry_bars": n_wanted,
+        "gate_binding_bars": n_blocked,
+        "gate_binding_share": (n_blocked / n_wanted) if n_wanted else None,
+        "plan_minus_ungated": {
+            "sharpe": num(net.sharpe - um.sharpe),
+            "max_drawdown": num(net.max_drawdown - um.max_drawdown),
+            "total_return": num(net.total_return - um.total_return),
+        },
+        "note": UNGATED_NOTE,
+    }
+
+
 def _random_entry_json(rnd: RandomEntryResult, real_sharpe: float) -> dict[str, Any]:
     return {
         "n_paths": int(rnd.n_paths),
@@ -607,7 +1062,7 @@ def run_backtest_report(
     when the candles are missing. Engine failures are recorded as error trials and re-raised.
     """
     t0 = time.perf_counter()
-    prep = _prepare(raw_plan, cfg, loader or default_loader(cfg))
+    prep = _prepare(raw_plan, cfg, loader or default_loader(cfg), ledger, run_id)
     plan, interval = prep.plan, prep.plan.interval
     ppy = bars_per_year(interval)
     plan_json = json.dumps(prep.plan_dict, sort_keys=True)
@@ -839,6 +1294,11 @@ def run_backtest_report(
         "disclaimer": _disclaimer(cfg),
         "elapsed_ms": 0,
     }
+    if prep.scoring is not None:  # derivatives plans only: other reports are unchanged
+        report["scoring"] = prep.scoring
+        ungated = _ungated_benchmark(prep, cfg, net)  # informational, no ledger row
+        if ungated is not None:
+            report["benchmarks"]["ungated"] = ungated
     report = to_jsonable(report)
     report["elapsed_ms"] = round((time.perf_counter() - t0) * 1000)
     return report
@@ -900,7 +1360,7 @@ def run_adversarial_report(
     status "error" and reported, never raised.
     """
     t0 = time.perf_counter()
-    prep = _prepare(raw_plan, cfg, loader or default_loader(cfg))
+    prep = _prepare(raw_plan, cfg, loader or default_loader(cfg), ledger, run_id)
     plan_json = json.dumps(prep.plan_dict, sort_keys=True)
     rep: AdversarialReport = adversarial_checks(
         prep.plan, prep.history, prep.window, cfg=cfg, seed=seed
@@ -1001,6 +1461,8 @@ def run_adversarial_report(
         "disclaimer": _disclaimer(cfg),
         "elapsed_ms": 0,
     }
+    if prep.scoring is not None:  # derivatives plans only: other reports are unchanged
+        out["scoring"] = prep.scoring
     out = to_jsonable(out)
     out["elapsed_ms"] = round((time.perf_counter() - t0) * 1000)
     return out

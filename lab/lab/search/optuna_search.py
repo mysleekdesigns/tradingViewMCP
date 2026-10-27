@@ -9,6 +9,9 @@ PBO return matrix see everything that was tried:
   trades, zero variance) or that made fewer than ``min_trades`` trades is still an ``ok``
   backtest in the ledger with its real metrics, but Optuna sees the failure sentinel, the trial
   counts as failed in :class:`SearchResult`, and it can never be selected as the best.
+* An optional ``trial_check`` (the derivatives gate-base check,
+  :func:`lab.runner.gate_base_trial_check`) runs on each trial's concrete plan before its
+  backtest; a trial it rejects is an ``error`` row with the reason, like any exception below.
 * Any exception while building, compiling, or running a trial's plan is recorded as an
   ``error`` row with the suggested params, then reported to Optuna as the failure sentinel.
 * Every row's ``params_json`` carries the study's design under the reserved key ``"_study"``:
@@ -31,7 +34,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -69,6 +72,10 @@ MIN_TRADES = 30
 STUDY_KEY = "_study"  # reserved params_json key holding the study's design (never a param)
 
 SearchSpace = Mapping[str, tuple[float, float]]
+
+# A per-trial admissibility check on the concrete plan: raise (any Exception) to fail the trial
+# before its backtest (recorded as an ``error`` row with the message, never selected).
+TrialCheck = Callable[[Plan], None]
 
 
 # --------------------------------------------------------------------------- results
@@ -405,6 +412,7 @@ def optuna_search(
     require_space: bool = False,
     objective: Literal["sharpe"] = "sharpe",
     window_kind: WindowKind = "design",
+    trial_check: TrialCheck | None = None,
 ) -> SearchResult:
     """Maximise the annualised net Sharpe of ``plan`` on ``window`` with a seeded TPE sampler.
 
@@ -414,6 +422,11 @@ def optuna_search(
     real metrics in the ledger but is failed for Optuna and never selected. With
     ``require_space=True`` a missing ``space`` is a ``ValueError`` (Phase 8 research must state
     its ranges). The same ``seed`` and inputs give the same trials and the same best params.
+
+    ``trial_check`` (e.g. :func:`lab.runner.gate_base_trial_check` for a derivatives-gated plan)
+    runs on each trial's concrete plan BEFORE its backtest; if it raises, the trial is an
+    ``error`` ledger row carrying the reason (it counts in DSR's N), Optuna sees the failure
+    sentinel, and the trial is never selected.
     """
     assert_no_holdout(candles, cfg.splits)
     _check_window_before_holdout(window, cfg, "window")
@@ -448,6 +461,8 @@ def optuna_search(
         try:
             params = _suggest(trial, resolved)
             concrete = with_params(plan, params)
+            if trial_check is not None:
+                trial_check(concrete)  # raises: an error row, no backtest
             result = evaluate_on_window(concrete, candles, window, cfg)
             metrics = compute_metrics(result, concrete.interval)
         except Exception as exc:  # every failure becomes an error row, never a lost trial
@@ -561,12 +576,15 @@ def walk_forward_optimize(
     space: SearchSpace | None = None,
     min_trades: int = MIN_TRADES,
     require_space: bool = False,
+    trial_check: TrialCheck | None = None,
 ) -> WalkForwardResult:
     """Walk-forward optimisation: per fold, search on the TRAIN window only (trials recorded as
     ``walk_forward_train``), then evaluate the chosen params once on the TEST window (recorded
     as ``walk_forward_test``). Fold ``i`` uses sampler seed ``seed + i``. ``min_trades`` and
     ``require_space`` apply to every fold's search (see :func:`optuna_search`); the test
-    evaluation itself is never filtered.
+    evaluation itself is never filtered. ``trial_check`` applies to every fold's train trials
+    (a failing trial is never chosen for the test); the fallback when no train trial is
+    selectable is the plan's own values, which the caller has already checked.
 
     The test evaluation computes signals on history through the test end (train bars serve as
     warm-up) and starts flat. ``candles`` must exclude the locked holdout. See
@@ -599,6 +617,7 @@ def walk_forward_optimize(
             space=space,
             min_trades=min_trades,
             window_kind="walk_forward_train",
+            trial_check=trial_check,
         )
         selected = search.best_plan is not None and search.best_params is not None
         if search.best_plan is not None and search.best_params is not None:

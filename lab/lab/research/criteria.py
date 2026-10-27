@@ -47,9 +47,10 @@ Where each row comes from:
 ``neighbourhood_pct``           the ledger's ``neighbourhood`` trials of this plan (same costs);
                                 missing unless every neighbour of the full grid was run and
                                 every tunable has its -pct and +pct neighbour (a side clipped
-                                at a validator bound is noted; a side that rounds back to the
-                                integer base value is missing); rule literals are not perturbed
-                                (the note lists them)
+                                at a validator bound, or a derivatives look-back clipped at the
+                                ``[derivatives] warmup_days`` cap the runner applies, is noted;
+                                a side that rounds back to the integer base value is missing);
+                                rule literals are not perturbed (the note lists them)
 ``require_holdout_pass``        ``holdout`` evidence ``{"passed": bool}``; fail if another
                                 plan of the behaviour family used the (single) holdout check
 ``require_crosscheck_match``    ``crosscheck`` evidence ``{"matched", "available", ...}``:
@@ -82,13 +83,14 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping
-from dataclasses import fields
-from typing import Any, Literal, TypedDict
+from dataclasses import fields, replace
+from typing import Any, Literal, NotRequired, TypedDict
 
 import numpy as np
 import pandas as pd
 
 from lab.config import LabConfig
+from lab.data.derivatives_columns import plan_derivative_columns
 from lab.evaluate.adversarial import DELAY_UNCHANGED_RATIO, DELAY_VANISH_RATIO
 from lab.ledger import SELECTION_SOURCES, Ledger, costs_to_json
 from lab.plan import parse_plan, plan_hash, tunable_params, with_params
@@ -103,8 +105,13 @@ from lab.research.family import (
     family_holdout_conflict,
 )
 from lab.research.logic import literal_vector, logic_hash
-from lab.research.runs import budget_status, check_lab_fingerprint
-from lab.runner import CandleLoader, neighbourhood_overrides, pbo_split_count
+from lab.research.runs import budget_status, check_derivatives_snapshot, check_lab_fingerprint
+from lab.runner import (
+    CandleLoader,
+    derivatives_period_caps,
+    neighbourhood_overrides,
+    pbo_split_count,
+)
 from lab.stats import deflated_sharpe, pbo_cscv
 from lab.types import TrialRecord, bars_per_year, interval_seconds
 
@@ -162,6 +169,8 @@ class CriteriaReport(TypedDict):
     missing: list[str]  # criteria with status "missing"
     ledger_n: int  # DSR N: distinct plans tried in every run of the ledger (global)
     budget: dict[str, Any]
+    # derivatives plans only: facts that are NOT criteria (the ungated price-only baseline)
+    informational: NotRequired[dict[str, Any]]
 
 
 # --------------------------------------------------------------------------- regimes
@@ -305,6 +314,25 @@ def _plan_logic(
         lh = _get(row["payload"], "logic_hash")
         if isinstance(lh, str) and lh:
             return lh
+    return None
+
+
+def _derivatives_plan(
+    ledger: Ledger, run_id: str, plan_hash_: str, bt: dict[str, Any] | None
+) -> Mapping[str, Any] | str | None:
+    """The plan (dict, or plan JSON) when it reads a derivatives column, else None: its plan
+    from the backtest evidence, else from any evidence row of ``plan_hash_`` in the run, else
+    from its newest design trial. The snapshot check compares the series THIS plan reads."""
+    candidates: list[Any] = [_get(bt, "plan") if bt is not None else None]
+    candidates += [
+        _get(row["payload"], "plan") for row in ledger.evidence(run_id, plan_hash=plan_hash_)
+    ]
+    for plan_dict in candidates:
+        if isinstance(plan_dict, Mapping):
+            return plan_dict if plan_derivative_columns(plan_dict) else None
+    base = ledger.latest_research_base_trial(plan_hash_)
+    if base is not None and plan_derivative_columns(base.plan_json):
+        return base.plan_json
     return None
 
 
@@ -801,7 +829,18 @@ def _neighbourhood_row(
         return _missing(name, pct, "plan has no tunable parameters; robustness is untestable")
     steps = tuple(s for s in cfg.stats.neighbourhood_steps if abs(s - 1.0) <= pct + 1e-9)
     reach = max((abs(s - 1.0) for s in cfg.stats.neighbourhood_steps), default=0.0)
-    lost, clipped = _side_gaps(tunables, steps)
+    # a derivatives look-back never grows past lab.toml [derivatives] warmup_days: the runner
+    # clips those neighbours there (lab.runner._run_neighbourhood), so the EXPECTED grid is
+    # built with the same caps (expected == run); a side clipped by the cap is labelled as such
+    capped = dict(tunables)
+    for key, cap in derivatives_period_caps(plan, cfg).items():
+        if key in capped:
+            capped[key] = replace(capped[key], high=float(min(capped[key].high, cap)))
+    lost, clipped = _side_gaps(capped, steps)
+    _, bound_clipped = _side_gaps(tunables, steps)
+    cap_clipped = [side for side in clipped if side not in bound_clipped]
+    clipped = [side for side in clipped if side in bound_clipped]
+    tunables = capped
     if lost:
         return _missing(
             name,
@@ -858,6 +897,11 @@ def _neighbourhood_row(
     )
     if clipped:
         note += f"; clipped at a validator bound (no neighbour beyond it): {', '.join(clipped)}"
+    if cap_clipped:
+        note += (
+            "; clipped at the [derivatives] warmup_days look-back cap (no neighbour beyond it): "
+            + ", ".join(cap_clipped)
+        )
     if reach + 1e-9 < pct:
         note += f"; the lab's grid only reaches ±{reach:.0%}"
     literals = literal_vector(plan)
@@ -952,7 +996,9 @@ def evaluate_plan(
     :func:`lab.research.portfolio_criteria.evaluate_portfolio_plan`, which adds its rows).
     ``loader`` rebuilds bar times when the behaviour family compares trials across intervals
     or windows (default: the lab's parquet loader). Raises ``ValueError`` if the run was never
-    started or its frozen lab.toml fingerprint is missing or differs from ``cfg``."""
+    started or its frozen lab.toml fingerprint is missing or differs from ``cfg``, and, for a
+    plan that uses a derivatives feature, when the run froze no derivatives snapshot or it
+    differs from the archive on disk (:func:`lab.research.runs.check_derivatives_snapshot`)."""
     c = frozen_criteria(ledger, run_id)
     check_lab_fingerprint(ledger, run_id, cfg)
     bt = _latest(ledger, run_id, plan_hash, "backtest")
@@ -960,6 +1006,11 @@ def evaluate_plan(
 
     if pc.is_portfolio_evidence(ledger, run_id, plan_hash, bt):
         return pc.evaluate_portfolio_plan(ledger, run_id, plan_hash, cfg, c, loader=loader)
+    drv_plan = _derivatives_plan(ledger, run_id, plan_hash, bt)
+    if drv_plan is not None:
+        # the run's frozen snapshot of the series this plan reads must still be the data on
+        # disk (see runs.py)
+        check_derivatives_snapshot(ledger, run_id, cfg, drv_plan)
     adv = _latest(ledger, run_id, plan_hash, "adversarial")
     cross = _latest(ledger, run_id, plan_hash, "crosscheck")
     family = _family(ledger, run_id, plan_hash, bt, cfg, loader)
@@ -988,7 +1039,7 @@ def evaluate_plan(
         "require_crosscheck_match": _crosscheck_row(c, cross),
     }
     rows = [by_name[f.name] for f in fields(SuccessCriteria) if f.name not in CRITERION_PARAMS]
-    return CriteriaReport(
+    out = CriteriaReport(
         run_id=run_id,
         plan_hash=plan_hash,
         pre_holdout_passed=all(
@@ -1000,3 +1051,41 @@ def evaluate_plan(
         ledger_n=ledger.count_distinct_plans_research(sources=SELECTION_SOURCES),
         budget=budget_status(ledger, run_id, cfg),
     )
+    ungated = ungated_baseline(bt)
+    if ungated is not None:  # derivatives plans only; never a row, never pass/fail
+        out["informational"] = {"ungated_baseline": ungated}
+    return out
+
+
+_BASELINE_KEYS = ("sharpe", "total_return", "max_drawdown", "n_trades", "exposure")
+
+
+def ungated_baseline(bt: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The backtest evidence's ``benchmarks.ungated`` block (:func:`lab.runner.ungated_plan`)
+    as an informational comparison: the plan's and the ungated baseline's net Sharpe, total
+    return, max drawdown, trades and exposure side by side, the gate's binding share and the
+    plan-minus-ungated differences. None when the evidence has no such block (price-only
+    plans). It is never a criterion row and never changes pass/fail."""
+    block = _get(bt, "benchmarks", "ungated")
+    if not isinstance(block, Mapping):
+        return None
+    note = (
+        "informational, NOT a success criterion (the run's frozen criteria are unchanged): "
+        "the same plan without its derivatives entry clauses, same costs and scored window; "
+        "not a ledger trial, not a candidate, never holdout-checkable"
+    )
+    if "error" in block:
+        return {"error": block["error"], "note": note}
+    net = _get(bt, "metrics", "net")
+    ungated = block.get("metrics")
+    return {
+        "price_clause": block.get("price_clause"),
+        "gate_features": block.get("gate_features"),
+        "plan": {k: _get(net, k) for k in _BASELINE_KEYS},
+        "ungated": {k: _get(ungated, k) for k in _BASELINE_KEYS},
+        "gate_binding_share": block.get("gate_binding_share"),
+        "gate_binding_bars": block.get("gate_binding_bars"),
+        "price_clause_entry_bars": block.get("price_clause_entry_bars"),
+        "plan_minus_ungated": block.get("plan_minus_ungated"),
+        "note": note,
+    }

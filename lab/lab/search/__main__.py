@@ -1,7 +1,8 @@
 """CLI: ``uv run python -m lab.search --plan plan.json --run-id my-run [--trials 50]
 [--seed 7] [--min-trades 30] [--walk-forward]``.
 
-Loads the plan's candles from ``lab/data/klines``, drops the locked holdout, and runs an Optuna
+Loads the plan's candles from ``lab/data/klines`` (with the aligned ``drv_*`` derivatives
+columns, via ``lab.runner.default_loader``), drops the locked holdout, and runs an Optuna
 search on the design window (or walk-forward optimisation on the configured folds). Every trial
 is written to ``lab/data/ledger.db``. The CLI searches every tunable param over its full
 validation bounds (dev use); Phase 8 research calls the API with an explicit space.
@@ -18,10 +19,15 @@ from pathlib import Path
 import optuna
 
 from lab.config import DEFAULT_CONFIG_PATH, load_config
-from lab.data.store import load_candles
-from lab.engine.splits import design_view, design_window, walk_forward_folds
+from lab.engine.splits import design_view, walk_forward_folds
 from lab.ledger import Ledger
-from lab.plan import parse_plan
+from lab.plan import parse_plan, tunable_params
+from lab.runner import (
+    default_loader,
+    derivatives_period_caps,
+    gate_base_trial_check,
+    plan_design_window,
+)
 from lab.search.optuna_search import optuna_search, walk_forward_optimize
 
 
@@ -52,10 +58,28 @@ def main(argv: list[str] | None = None) -> int:
     seed = cfg.optuna_seed if args.seed is None else args.seed
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+    # default_loader: Parquet archive before the holdout, plus the aligned drv_* derivatives
+    # columns (derivatives plans need them); a missing download raises before any trial
     candles = design_view(
-        load_candles(plan.symbol, plan.interval, parquet_dir=cfg.parquet_dir), cfg.splits
+        default_loader(cfg)(plan.symbol, plan.interval, cfg.splits.holdout_start), cfg.splits
     )
-    design = design_window(cfg.splits)
+    # the plan's scored window: derivatives plans start where their inputs exist and pass the
+    # gate-base check; missing inputs raise before any trial (same rule as the MCP tools)
+    design, scoring = plan_design_window(plan, candles, cfg)
+    # every trial of a derivatives plan must keep a selective price clause (same rule as MCP
+    # run_sweep / walk_forward): a failing trial is ledgered as an error and never selected
+    trial_check = gate_base_trial_check(candles, design, cfg) if scoring is not None else None
+    # a derivatives look-back never searches past [derivatives] warmup_days (the shared scored
+    # start leaves room for that much only); price-only plans keep the full default space
+    caps = derivatives_period_caps(plan, cfg)
+    space = (
+        {
+            k: (s.low, float(min(s.high, caps[k])) if k in caps else s.high)
+            for k, s in tunable_params(plan).items()
+        }
+        if caps
+        else None
+    )
     with Ledger(cfg.ledger_path) as ledger:
         if args.walk_forward:
             s = cfg.splits
@@ -75,7 +99,9 @@ def main(argv: list[str] | None = None) -> int:
                 cfg=cfg,
                 n_trials_per_fold=trials,
                 seed=seed,
+                space=space,
                 min_trades=min_trades,
+                trial_check=trial_check,
             )
             print(f"walk-forward {plan.name} {plan.symbol} {plan.interval}: {len(wf.folds)} folds")
             for f in wf.folds:
@@ -109,7 +135,9 @@ def main(argv: list[str] | None = None) -> int:
                 cfg=cfg,
                 n_trials=trials,
                 seed=seed,
+                space=space,
                 min_trades=min_trades,
+                trial_check=trial_check,
             )
             print(
                 f"optuna {res.study_name}: {res.n_trials} trials ({res.n_failed} failed, "
