@@ -38,6 +38,7 @@ from typing import Any, Literal
 
 from lab.research.contract import (
     JOURNAL_DIR,
+    REPO_ROOT,
     BudgetUsage,
     CandidateSummary,
     ResearchConfig,
@@ -45,7 +46,10 @@ from lab.research.contract import (
 )
 
 __all__ = [
+    "CHECKLIST_HEADING",
     "HOLDOUT_WORD",
+    "NOT_RECORDED",
+    "REPORTING_CHECKLIST",
     "CandidateReport",
     "HoldoutLeakError",
     "IdeaOutcome",
@@ -53,6 +57,7 @@ __all__ = [
     "RunSummary",
     "guard_holdout",
     "neutralise_untrusted",
+    "render_checklist",
     "render_report",
 ]
 
@@ -106,6 +111,14 @@ class RunSummary:
     started_at: str
     finished_at: str
     notes: list[str] = field(default_factory=list)
+    # ``Ledger.verify_chain(run_id)``: {run_id, ok, n_trials, head, first_bad_trial_id, error};
+    # None means the chain was not verified for this report.
+    ledger_chain: Mapping[str, Any] | None = None
+    # The run's frozen ``research_runs.config_json`` (``Ledger.research_run(run_id)["config"]``:
+    # criteria, budget, ``lab`` fingerprint + values, universe manifest, derivatives snapshot).
+    # None renders the checklist values that live only there as "not recorded".
+    run_config: Mapping[str, Any] | None = None
+    ledger_path: str | None = None  # the ledger file, preferably relative to the repo root
 
 
 # --------------------------------------------------------------------------- holdout guard
@@ -389,8 +402,288 @@ def _criteria_table(rows: Sequence[Mapping[str, Any]]) -> list[str]:
     return out
 
 
-def render_report(summary: RunSummary) -> str:
-    """The end-of-run report (Markdown, starting with ``## End-of-run report``)."""
+# --------------------------------------------------------------------------- reporting checklist
+#
+# The "Agentic Trading" survey (arXiv 2605.19337) found few closed-loop studies report a
+# time-consistent split or a cost model and proposes this seven-item checklist. Every line
+# states the fact and names the ledger / run fields that prove it. Values come only from the
+# RunSummary (never invented): a missing one renders as NOT_RECORDED.
+
+REPORTING_CHECKLIST: tuple[tuple[str, str], ...] = (
+    ("data_universe", "Data and universe"),
+    ("time_split", "Time split and leakage"),
+    ("action_semantics", "Action semantics"),
+    ("execution_costs", "Execution and costs"),
+    ("leakage_audit", "Leakage audit"),
+    ("artifacts", "Artifacts"),
+    ("adaptation", "Adaptation"),
+)
+CHECKLIST_HEADING = "### Reporting checklist"
+NOT_RECORDED = "not recorded"
+_CFG = "research_runs.config_json"
+_LAB = f"{_CFG}.lab.values"
+_MIDNIGHT = re.compile(r"^(\d{4}-\d{2}-\d{2})T00:00:00(?:\.0+)?(?:Z|\+00:00)?$")
+_INVALID_NOTE = re.compile(r"invalid (?:plan|output)", re.IGNORECASE)
+
+
+def _dig(data: Mapping[str, Any] | None, path: str) -> Any:
+    """``data["a"]["b"]...`` for ``path`` "a.b...", or None when any step is missing."""
+    cur: Any = data
+    for part in path.split("."):
+        if not isinstance(cur, Mapping) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def _show(value: object) -> str:
+    """One inline value: NOT_RECORDED when missing, single line, no links or HTML."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return NOT_RECORDED
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, float):
+        return f"{value:g}"
+    if isinstance(value, list | tuple):
+        return ", ".join(_show(v) for v in value) if value else NOT_RECORDED
+    text = " ".join(str(value).split())
+    midnight = _MIDNIGHT.match(text)
+    if midnight:
+        text = midnight.group(1)
+    return _escape_links(html.escape(text, quote=False)).replace("`", "'")
+
+
+def _code(value: object) -> str:
+    """A value in backticks, or NOT_RECORDED (never backticked, so it reads as missing)."""
+    text = _show(value)
+    return text if text == NOT_RECORDED else f"`{text}`"
+
+
+def _pct(value: object) -> str:
+    """A fraction with its percentage, e.g. ``0.001 (0.1%)``."""
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return f"{value:g} ({value * 100:g}%)"
+    return NOT_RECORDED
+
+
+def _fields(*names: str) -> str:
+    return "fields: " + ", ".join(f"`{n}`" for n in names)
+
+
+def _repo_relative(path: str | Path | None) -> str | None:
+    if path is None:
+        return None
+    p = Path(path)
+    if not p.is_absolute():
+        return p.as_posix()
+    try:
+        return p.resolve().relative_to(REPO_ROOT.resolve()).as_posix()
+    except ValueError:
+        return p.name  # never write a home-directory path into a committed file
+
+
+def _chain_status(chain: Mapping[str, Any] | None) -> str:
+    """Integers and hex only: this text sits on a line that names the holdout guard."""
+    if chain is None:
+        return "ledger hash chain not verified for this report"
+    if chain.get("ok") is True:
+        return (
+            f"ledger hash chain verified over {_show(chain.get('n_trials'))} trial(s), head "
+            f"{_code(chain.get('head'))}"
+        )
+    bad = chain.get("first_bad_trial_id")
+    where = f"trial {int(bad)}" if isinstance(bad, int) else f"trial {_show(bad)}"
+    return f"**CHAIN BROKEN at {where}**: the ledger was altered after it was written"
+
+
+def _chain_error(chain: Mapping[str, Any] | None) -> str | None:
+    """The verifier's error text for the Artifacts line, withheld if the leak guard trips."""
+    if chain is None or chain.get("ok") is True or not chain.get("error"):
+        return None
+    text = _show(chain.get("error"))[:200]
+    return "withheld by the journal leak guard" if _LEAK.search(text) else text
+
+
+def _checklist_lines(s: RunSummary, journal_path: str | Path | None) -> dict[str, str]:
+    cfg = s.run_config
+    budget = asdict(s.research.budget)
+    used: Mapping[str, Any] = s.used
+    chain = s.ledger_chain
+
+    # Data and universe
+    universe = _dig(cfg, "universe_manifest.sha256")
+    derivs = _dig(cfg, "derivatives.manifest_sha256")
+    series = _dig(cfg, "derivatives.series")
+    rule = [_dig(cfg, f"lab.values.universe.{k}") for k in ("top_n", "quote", "volume_window_days")]
+    rule_txt = (
+        f"point-in-time top {_show(rule[0])} {_show(rule[1])} coins by trailing "
+        f"{_show(rule[2])}-day dollar volume"
+        if all(v is not None for v in rule)
+        else f"selection rule {NOT_RECORDED}"
+    )
+    n_series = f"{len(series)} series" if isinstance(series, Mapping) else f"series {NOT_RECORDED}"
+    data = (
+        f"{', '.join(_show(x) for x in s.symbols)} on {_show(s.interval)} bars; multi-coin "
+        f"universe: {rule_txt}, manifest sha256 {_code(universe)}; derivatives snapshot "
+        f"manifest sha256 {_code(derivs)} ({n_series} frozen) — "
+        + _fields(
+            "RunSummary.symbols",
+            "RunSummary.interval",
+            "trials.symbol",
+            "trials.interval",
+            f"{_CFG}.universe_manifest.sha256",
+            f"{_LAB}.universe",
+            f"{_CFG}.derivatives.manifest_sha256",
+        )
+    )
+
+    # Time split and leakage: dates and integers only (the line names the holdout).
+    design_start = _dig(cfg, "lab.values.splits.design_start")
+    holdout_start = _dig(cfg, "lab.values.splits.holdout_start")
+    anchored = _dig(cfg, "lab.values.splits.wf_anchored")
+    wf_kind = NOT_RECORDED if anchored is None else ("anchored" if anchored else "rolling")
+    time_split = (
+        f"design window from {_code(design_start)} up to {_code(holdout_start)}; the holdout "
+        f"from {_code(holdout_start)} on is locked, and only that a check was spent is recorded "
+        f"here (holdout checks used {_show(used.get('holdout_checks'))} of "
+        f"{_show(budget.get('max_holdout_checks'))}); walk-forward {wf_kind}, train "
+        f"{_show(_dig(cfg, 'lab.values.splits.wf_train_months'))} / test "
+        f"{_show(_dig(cfg, 'lab.values.splits.wf_test_months'))} / step "
+        f"{_show(_dig(cfg, 'lab.values.splits.wf_step_months'))} months — "
+        + _fields(
+            f"{_LAB}.splits.design_start",
+            f"{_LAB}.splits.holdout_start",
+            f"{_LAB}.splits.wf_train_months",
+            f"{_LAB}.splits.wf_test_months",
+            "trials.window_kind",
+            "trials.window_start",
+            "trials.window_end",
+            "holdout_checks",
+        )
+    )
+
+    # Action semantics: an engine rule, not a config value.
+    action = (
+        "spot, long-only, no leverage or shorting: single-symbol plans are long/flat "
+        "(`long_entry` / `long_exit`), portfolio plans hold a long-only top quantile; a signal "
+        "uses bar t's close and fills at bar t+1's open (engine rule, not a config field) — "
+        + _fields("trials.plan_json", "trials.params_json", "trials.n_trades")
+    )
+
+    # Execution and costs
+    stress = _dig(cfg, "lab.values.stress_factors")
+    stress_txt = (
+        ", ".join(f"x{_show(x)}" for x in stress)
+        if isinstance(stress, list) and stress
+        else NOT_RECORDED
+    )
+    impact = _dig(cfg, "lab.values.universe.portfolio.impact_coef")
+    costs = (
+        f"fee {_pct(_dig(cfg, 'lab.values.costs.fee_rate'))} per side; slippage "
+        f"{_pct(_dig(cfg, 'lab.values.costs.slippage_rate'))} per side, widened by "
+        f"{_show(_dig(cfg, 'lab.values.costs.slippage_vol_mult'))} x excess bar range, capped at "
+        f"{_pct(_dig(cfg, 'lab.values.costs.slippage_cap'))}; cost stress {stress_txt}; "
+        f"portfolio square-root impact coefficient {_show(impact)} — "
+        + _fields(
+            f"{_LAB}.costs",
+            f"{_LAB}.stress_factors",
+            f"{_LAB}.universe.portfolio.impact_coef",
+            "trials.costs_json",
+        )
+    )
+
+    # Leakage audit: integers and hex only (the line names the holdout guard).
+    leakage = (
+        "every registry feature ships a perturbation test (changing future bars must not change "
+        "past signals) in the lab test suite; the journal refuses any metric next to the "
+        f"holdout and keeps only spent checks; {_chain_status(chain)} — "
+        + _fields(
+            "ledger_chain.ok",
+            "ledger_chain.n_trials",
+            "ledger_chain.head",
+            "ledger_chain.first_bad_trial_id",
+            "holdout_checks",
+        )
+    )
+
+    # Artifacts
+    error = _chain_error(chain)
+    artifacts = (
+        f"run {_code(s.run_id)}; ledger {_code(_repo_relative(s.ledger_path))}; chain head "
+        f"{_code(_dig(chain, 'head'))}"
+        + (f" (verifier error: {error})" if error else "")
+        + f"; journal {_code(_repo_relative(journal_path))}; criteria sha256 "
+        f"{_code(s.research.sha256)}; lab.toml fingerprint "
+        f"{_code(_dig(cfg, 'lab.fingerprint'))} — "
+        + _fields(
+            "research_runs.run_id",
+            "research_runs.config_sha256",
+            f"{_CFG}.lab.fingerprint",
+            "ledger_chain.head",
+            "RunState.journal_path",
+        )
+    )
+
+    # Adaptation: no holdout wording on this line (it carries the decimal spend).
+    plans = sum(len(i.plan_hashes) for i in s.ideas)
+    redesigns = sum(max(0, len(i.plan_hashes) - 1) for i in s.ideas)
+    invalid_keys = sorted(k for k in used if "invalid" in str(k))
+    invalid_used = sum(int(used[k] or 0) for k in invalid_keys)
+    invalid_notes = sum(1 for n in s.notes if _INVALID_NOTE.search(n))
+    invalid_fields = ", ".join(f"`used.{k}`" for k in invalid_keys)
+    invalid_txt = (
+        f"{invalid_used} invalid designer output(s) ({invalid_fields})"
+        if invalid_keys
+        else f"{invalid_notes} invalid designer output(s) named in the notes"
+    )
+    usd_used, usd_max = used.get("usd"), budget.get("max_usd")
+    adaptation = (
+        f"{len(s.ideas)} idea(s), {plans} plan(s) designed ({redesigns} beyond each idea's "
+        f"first); {invalid_txt}; hypotheses {_show(used.get('hypotheses'))} of "
+        f"{_show(budget.get('max_hypotheses'))}, LLM proposals {_show(used.get('proposals'))} of "
+        f"{_show(budget.get('max_proposals'))}, backtests {_show(used.get('backtests'))} of "
+        f"{_show(budget.get('max_backtests'))}, model spend USD "
+        f"{f'{usd_used:.2f}' if isinstance(usd_used, int | float) else NOT_RECORDED} of "
+        f"{f'{usd_max:.2f}' if isinstance(usd_max, int | float) else NOT_RECORDED}; DSR N "
+        f"{_show(s.ledger_n)} across every research run; Python drives the loop and the "
+        "criteria and budget were frozen at start_run — "
+        + _fields(
+            "ideas.plan_hashes",
+            "RunState.used",
+            f"{_CFG}.budget",
+            "research_runs.config_sha256",
+            "trials.plan_hash",
+        )
+    )
+    return {
+        "data_universe": data,
+        "time_split": time_split,
+        "action_semantics": action,
+        "execution_costs": costs,
+        "leakage_audit": leakage,
+        "artifacts": artifacts,
+        "adaptation": adaptation,
+    }
+
+
+def render_checklist(summary: RunSummary, *, journal_path: str | Path | None = None) -> str:
+    """The reporting checklist block: one bullet per :data:`REPORTING_CHECKLIST` item, each a
+    single line (the leak guard checks rendered reports line by line)."""
+    lines = _checklist_lines(summary, journal_path)
+    out = [
+        CHECKLIST_HEADING,
+        "",
+        "Each line states what this run did and names the ledger / run fields that prove it. "
+        f'"{NOT_RECORDED}" means the value was not passed to the journal; nothing is inferred.',
+        "",
+    ]
+    out += [f"- **{title}**: {lines[key]}" for key, title in REPORTING_CHECKLIST]
+    return "\n".join(out)
+
+
+def render_report(summary: RunSummary, *, journal_path: str | Path | None = None) -> str:
+    """The end-of-run report (Markdown, starting with ``## End-of-run report``). Its first
+    section is the reporting checklist (:func:`render_checklist`)."""
     if summary.outcome not in _OUTCOME_TEXT:
         raise ValueError(f"cannot report outcome {summary.outcome!r}; finish the run first")
     s = summary
@@ -399,6 +692,8 @@ def render_report(summary: RunSummary) -> str:
         "",
         f"Run [[run-{s.run_id}]] · {', '.join(s.symbols)} {s.interval} · "
         f"started {s.started_at} · finished {s.finished_at}",
+        "",
+        render_checklist(s, journal_path=journal_path),
         "",
         "### Outcome",
         "",
@@ -650,7 +945,7 @@ class Journal:
         if summary.outcome == "running":
             raise ValueError("cannot finish a run whose outcome is still 'running'")
         _guard_summary(summary)
-        report = render_report(summary)
+        report = render_report(summary, journal_path=self._path)
         guard_holdout(report, per_line=True)
 
         text = self._read()

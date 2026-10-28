@@ -34,6 +34,23 @@ inside ``BEGIN IMMEDIATE`` so two processes cannot both spend the last check, an
 (:mod:`lab.research.family`: logic and plan hashes), refuses a hypothesis any of whose family
 members was already holdout-checked in ANY run (a hypothesis gets one holdout check, ever).
 
+Per-run hash chain (Phase 13): every trial has a ``trial_chain`` row whose ``hash`` is
+:func:`trial_hash` of the previous trial's hash in the same run (``None`` for the run's first
+trial) and the trial's stored content (every ``trials`` column; ``returns_blob`` by its sha256).
+:meth:`Ledger.record` inserts the trial and its chain link in ONE ``BEGIN IMMEDIATE``
+transaction, reading the run's head inside the write lock, so two processes cannot fork a
+chain. :meth:`Ledger.verify_chain` recomputes every link in id order and names the first trial
+whose content, link, or chain row does not match, and :meth:`Ledger.chain_head` is the value a
+journal can quote. ``trial_chain`` is append-only like the other tables. Trials written before
+the chain existed (or by an older process that does not chain) are chained lazily, in id order
+per run, when a ``Ledger`` opens and before each ``record`` of that run (``backfilled = 1``).
+A backfilled link is tamper evidence only from the backfill time onward: it proves nothing
+about what the row held before it was chained. Only a run's unchained *tail* (ids above its
+last chained trial) is ever backfilled, so a chain row missing in the middle of a chain stays
+a detected gap instead of being silently re-created. The chain is tamper *evidence*, not
+prevention: someone who can drop the triggers can also rewrite every later link, so quote
+:meth:`Ledger.chain_head` in the journal to pin the chain's end.
+
 Storage conventions:
 
 * ``window_start`` / ``window_end`` are INTEGER UNIX seconds (UTC).
@@ -50,12 +67,13 @@ Results are historical and not forward-looking.
 from __future__ import annotations
 
 import builtins
+import hashlib
 import json
 import math
 import sqlite3
 import zlib
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -222,6 +240,32 @@ _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             "CREATE INDEX holdout_checks_logic ON holdout_checks (logic_hash)",
         ),
     ),
+    (
+        5,
+        "trial_hash_chain",
+        # Phase 13: per-run hash chain over trials (tamper evidence). Rows already in the
+        # ledger are chained by ``Ledger._ensure_chain`` after migrating (``backfilled = 1``).
+        (
+            """
+            CREATE TABLE trial_chain (
+                trial_id    INTEGER PRIMARY KEY REFERENCES trials(id),
+                run_id      TEXT    NOT NULL,
+                prev_hash   TEXT,
+                hash        TEXT    NOT NULL,
+                backfilled  INTEGER NOT NULL DEFAULT 0
+            )
+            """,
+            "CREATE INDEX trial_chain_run ON trial_chain (run_id, trial_id)",
+            """
+            CREATE TRIGGER trial_chain_no_update BEFORE UPDATE ON trial_chain
+            BEGIN SELECT RAISE(ABORT, 'trial hash chain is append-only'); END
+            """,
+            """
+            CREATE TRIGGER trial_chain_no_delete BEFORE DELETE ON trial_chain
+            BEGIN SELECT RAISE(ABORT, 'trial hash chain is append-only'); END
+            """,
+        ),
+    ),
 )
 
 # Kinds of research evidence (report JSON) stored per (run_id, plan_hash).
@@ -236,6 +280,67 @@ EVIDENCE_KINDS: tuple[str, ...] = (
 
 # Window kinds whose Sharpe never enters the DSR variance (out-of-sample fold results).
 _VARIANCE_EXCLUDED_KINDS: tuple[str, ...] = ("walk_forward_test",)
+
+
+# --------------------------------------------------------------------------- hash chain
+
+# Every ``trials`` column that a chain link hashes (``returns_blob`` is hashed via its sha256).
+_HASHED_COLUMNS: tuple[str, ...] = (
+    "id",
+    "created_at",
+    "run_id",
+    "source",
+    "status",
+    "plan_hash",
+    "plan_json",
+    "params_json",
+    "symbol",
+    "interval",
+    "window_kind",
+    "window_start",
+    "window_end",
+    "metrics_json",
+    "sharpe_per_bar",
+    "n_trades",
+    "error",
+    "n_returns",
+    "returns_blob",
+    "costs_json",
+)
+
+
+def _canonical_value(value: Any) -> Any:
+    """A JSON-encodable stand-in for one stored column value (bytes become their sha256)."""
+    if isinstance(value, bytes | bytearray | memoryview):
+        return {"sha256": hashlib.sha256(bytes(value)).hexdigest()}
+    return value
+
+
+def trial_hash(prev_hash: str | None, row: Mapping[str, Any]) -> str:
+    """sha256 hex of ``(prev_hash or "")`` + the canonical JSON of the trial's stored content.
+
+    ``row`` is a ``trials`` row (``sqlite3.Row`` or a dict of every column, as stored). The
+    content is ``{column: value}`` over every ``trials`` column, with ``returns_blob`` replaced
+    by ``returns_sha256`` (the sha256 hex of the stored blob, or null), encoded with
+    ``sort_keys=True`` and compact separators. Raises ``ValueError`` naming a missing column.
+    """
+    if prev_hash is not None and not isinstance(prev_hash, str):
+        raise ValueError(f"prev_hash must be a str or None, got {type(prev_hash).__name__}")
+    keys = set(row.keys())
+    missing = [c for c in _HASHED_COLUMNS if c not in keys]
+    if missing:
+        raise ValueError(f"row is missing trials column(s) {missing}")
+    content: dict[str, Any] = {}
+    for col in _HASHED_COLUMNS:
+        value = row[col]
+        if col == "returns_blob":
+            content["returns_sha256"] = (
+                None if value is None else hashlib.sha256(bytes(value)).hexdigest()
+            )
+        else:
+            content[col] = _canonical_value(value)
+    text = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(((prev_hash or "") + text).encode("utf-8")).hexdigest()
 
 
 # --------------------------------------------------------------------------- json helpers
@@ -409,6 +514,45 @@ class Ledger:
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self.schema_version = self._migrate()
+        self._ensure_chain()
+
+    @classmethod
+    def open_readonly(cls, path: Path | str, *, min_schema_version: int = 1) -> Ledger:
+        """Open an existing ledger strictly read-only (SQLite ``mode=ro``): no migrations, no
+        hash-chain backfill, no journal-mode change, never creates the file. Any write raises
+        ``sqlite3.OperationalError``. ``ValueError`` if the file is missing or its schema is
+        older than ``min_schema_version``."""
+        p = Path(path)
+        if not p.is_file():
+            raise ValueError(f"ledger {p} not found")
+        self = cls.__new__(cls)
+        self.path = p.resolve()
+        self._conn = sqlite3.connect(
+            f"{self.path.as_uri()}?mode=ro", uri=True, timeout=30.0, isolation_level=None
+        )
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout=30000")
+        try:
+            row = self._conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        except sqlite3.DatabaseError as exc:
+            self._conn.close()
+            text = str(exc).lower()
+            if "readonly" in text or "unable to open" in text:
+                # A WAL ledger read without its -wal/-shm files needs to create them.
+                raise ValueError(
+                    f"cannot open ledger {p} read-only: SQLite needs a writable folder for its "
+                    "WAL files (-wal/-shm); copy the ledger to a writable folder first"
+                ) from exc
+            raise ValueError(f"{p} is not a trial ledger: {exc}") from exc
+        version = int(row[0]) if row and row[0] is not None else 0
+        if version < min_schema_version:
+            self._conn.close()
+            raise ValueError(
+                f"ledger {p} is at schema {version}, needs >= {min_schema_version}; open it once "
+                "with Ledger(path) (the lab does on its next run) to migrate"
+            )
+        self.schema_version = version
+        return self
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -452,10 +596,61 @@ class Ledger:
                 raise
         return int(conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0])
 
+    def _ensure_chain(self) -> None:
+        """Backfill every run's unchained tail (``trial_chain`` comes from migration 5), in id
+        order, inside one ``BEGIN IMMEDIATE`` (see the module docstring). A ledger with nothing
+        to chain is checked with a plain read and skips this lock (``_migrate`` still takes a
+        brief one per migration; :meth:`open_readonly` takes none)."""
+        conn = self._conn
+        unchained = (
+            "SELECT DISTINCT t.run_id FROM trials t WHERE t.id > ("
+            " SELECT COALESCE(MAX(c.trial_id), 0) FROM trial_chain c"
+            " WHERE c.run_id = t.run_id)"
+        )
+        if not conn.execute(unchained + " LIMIT 1").fetchone():
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Re-read inside the write lock: another process may have chained them meanwhile.
+            runs = [r[0] for r in conn.execute(unchained).fetchall()]
+            for run_id in runs:
+                self._chain_tail(run_id)
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+
+    def _chain_tail(self, run_id: str) -> str | None:
+        """Chain ``run_id``'s trials above its last chained trial (``backfilled = 1``) and
+        return the run's head. Caller must hold a ``BEGIN IMMEDIATE`` write lock."""
+        conn = self._conn
+        last = conn.execute(
+            "SELECT trial_id, hash FROM trial_chain WHERE run_id = ?"
+            " ORDER BY trial_id DESC LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        head: str | None = None if last is None else str(last["hash"])
+        after = 0 if last is None else int(last["trial_id"])
+        rows = conn.execute(
+            "SELECT * FROM trials WHERE run_id = ? AND id > ? ORDER BY id", (run_id, after)
+        ).fetchall()
+        for row in rows:
+            digest = trial_hash(head, row)
+            conn.execute(
+                "INSERT INTO trial_chain (trial_id, run_id, prev_hash, hash, backfilled)"
+                " VALUES (?, ?, ?, ?, 1)",
+                (int(row["id"]), run_id, head, digest),
+            )
+            head = digest
+        return head
+
     # ------------------------------------------------------------------ trials
 
     def record(self, rec: TrialRecord) -> int:
-        """Insert ``rec`` as a new row and return its id. ``created_at`` is now (UTC)."""
+        """Insert ``rec`` as a new row and return its id. ``created_at`` is now (UTC).
+
+        The trial and its ``trial_chain`` link are written in one ``BEGIN IMMEDIATE``
+        transaction (any unchained tail of the run is backfilled first)."""
         if not isinstance(rec, TrialRecord):
             raise ValueError(f"rec must be a TrialRecord, got {type(rec).__name__}")
         if rec.id is not None:
@@ -489,6 +684,41 @@ class Ledger:
         sharpe = _finite_or_none(rec.sharpe_per_bar, "sharpe_per_bar")
         n_returns, blob = _encode_returns(rec.returns)
 
+        conn = self._conn
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # The run's head is read inside the write lock, so no other connection can append
+            # to this run between reading it and linking to it (no forked chains).
+            head = self._chain_tail(rec.run_id)
+            trial_id = self._insert_trial(
+                rec, start, end, plan_json, params_json, costs_json, sharpe, n_returns, blob
+            )
+            row = conn.execute("SELECT * FROM trials WHERE id = ?", (trial_id,)).fetchone()
+            conn.execute(
+                "INSERT INTO trial_chain (trial_id, run_id, prev_hash, hash, backfilled)"
+                " VALUES (?, ?, ?, ?, 0)",
+                (trial_id, rec.run_id, head, trial_hash(head, row)),
+            )
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        return trial_id
+
+    def _insert_trial(
+        self,
+        rec: TrialRecord,
+        start: int,
+        end: int,
+        plan_json: str,
+        params_json: str,
+        costs_json: str,
+        sharpe: float | None,
+        n_returns: int | None,
+        blob: bytes | None,
+    ) -> int:
+        """The raw ``INSERT INTO trials`` of :meth:`record` (validated values; caller holds the
+        write lock and writes the chain link)."""
         cur = self._conn.execute(
             "INSERT INTO trials (created_at, run_id, source, status, plan_hash, plan_json,"
             " params_json, symbol, interval, window_kind, window_start, window_end,"
@@ -521,6 +751,88 @@ class Ledger:
         if trial_id is None:  # pragma: no cover - sqlite always sets it for INSERT
             raise RuntimeError("sqlite did not return a row id")
         return int(trial_id)
+
+    # ------------------------------------------------------------------ hash chain (Phase 13)
+
+    @staticmethod
+    def _check_run_id_arg(run_id: object) -> str:
+        if not isinstance(run_id, str):
+            raise ValueError(f"run_id must be a str, got {type(run_id).__name__}")
+        return run_id
+
+    def chain_head(self, run_id: str) -> str | None:
+        """The stored hash of ``run_id``'s last chained trial (highest trial id), or None when
+        the run has no chained trials. Not verified; see :meth:`verify_chain`."""
+        run_id = self._check_run_id_arg(run_id)
+        row = self._conn.execute(
+            "SELECT hash FROM trial_chain WHERE run_id = ? ORDER BY trial_id DESC LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        return None if row is None else str(row["hash"])
+
+    def verify_chain(self, run_id: str) -> dict[str, Any]:
+        """Recompute ``run_id``'s hash chain from its ``trials`` rows, in id order.
+
+        Returns ``{"run_id", "ok", "n_trials", "head", "first_bad_trial_id", "error"}``:
+        ``n_trials`` counts the run's trial rows, ``head`` is :meth:`chain_head` (the stored
+        head, meaningful as evidence only when ``ok``), and on failure ``first_bad_trial_id``
+        is the lowest trial id whose link does not hold (content changed, chain row missing,
+        wrong ``prev_hash``, or a chain row whose trial is gone or belongs to another run) with
+        a one-line ``error``. Read-only; never raises for a tampered chain. Raises
+        ``ValueError`` only when ``run_id`` is not a str.
+        """
+        run_id = self._check_run_id_arg(run_id)
+        conn = self._conn
+        trials = conn.execute(
+            "SELECT * FROM trials WHERE run_id = ? ORDER BY id", (run_id,)
+        ).fetchall()
+        links = {
+            int(r["trial_id"]): r
+            for r in conn.execute(
+                "SELECT trial_id, run_id, prev_hash, hash FROM trial_chain WHERE run_id = ?",
+                (run_id,),
+            ).fetchall()
+        }
+        failures: builtins.list[tuple[int, str]] = []
+        prev: str | None = None
+        for row in trials:
+            tid = int(row["id"])
+            link = links.pop(tid, None)
+            if link is None:
+                failures.append((tid, f"trial {tid} has no chain row"))
+                break
+            if link["prev_hash"] != prev:
+                failures.append(
+                    (tid, f"trial {tid}'s chain row does not link to the previous trial's hash")
+                )
+                break
+            try:
+                expected = trial_hash(prev, row)
+            except (TypeError, ValueError) as exc:  # tampered column of an unhashable type
+                failures.append((tid, f"trial {tid}'s content cannot be hashed: {exc}"))
+                break
+            if link["hash"] != expected:
+                failures.append(
+                    (tid, f"trial {tid}'s content does not match its chain hash (changed)")
+                )
+                break
+            prev = str(link["hash"])
+        # Chain rows of this run with no trial row in it (trial deleted, or moved to another run).
+        trial_ids = {int(r["id"]) for r in trials}
+        orphans = sorted(tid for tid in links if tid not in trial_ids)
+        if orphans:
+            failures.append(
+                (orphans[0], f"chain row for trial {orphans[0]} has no trial row in this run")
+            )
+        first = min(failures, default=None)
+        return {
+            "run_id": run_id,
+            "ok": first is None,
+            "n_trials": len(trials),
+            "head": self.chain_head(run_id),
+            "first_bad_trial_id": None if first is None else first[0],
+            "error": None if first is None else first[1],
+        }
 
     def get(self, trial_id: int, *, include_returns: bool = False) -> TrialRecord:
         """The trial with ``trial_id``; ``ValueError`` naming the id if it does not exist."""

@@ -1524,6 +1524,7 @@ dependencies = [
     { name = "claude-agent-sdk" },
     { name = "httpx" },
     { name = "lab" },
+    { name = "scipy" },
 ]
 
 [package.dev-dependencies]
@@ -1539,6 +1540,7 @@ requires-dist = [
     { name = "claude-agent-sdk", specifier = ">=0.2.174,<0.3" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "lab", editable = "../lab" },
+    { name = "scipy", specifier = ">=1.14" },
 ]
 
 [package.metadata.requires-dev]

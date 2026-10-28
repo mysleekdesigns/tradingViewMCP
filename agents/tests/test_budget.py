@@ -100,3 +100,44 @@ def test_unknown_cost_is_charged_at_the_cap_never_zero() -> None:
     assert t.usd_spent == pytest.approx(4.9)
     with pytest.raises(ValueError, match="cap"):
         t.charge_or_cap(None, float("inf"))
+
+
+# --------------------------------------------------------------------------- Phase 13
+
+
+def test_invalid_designer_outputs_spend_the_proposal_budget() -> None:
+    t = BudgetTracker(_budget(max_proposals=3))
+    t.update_server_usage({"proposals": 1})
+    assert t.proposals_left() == 2
+    t.add_invalid_proposals(2)  # one designer call: first try + the SDK's retry both invalid
+    assert t.invalid_proposals == 2
+    assert t.proposals_used == 3
+    assert t.proposals_left() == 0
+    assert t.exhausted() == "proposals"
+    assert t.usage()["proposals"] == 3  # the run state shows lab-counted + invalid
+    # A later ledger refresh replaces only the server-side count, never the local one.
+    t.update_server_usage({"proposals": 1})
+    assert t.proposals_used == 3
+
+
+def test_invalid_proposals_restored_and_validated() -> None:
+    assert BudgetTracker(_budget(), invalid_proposals=2).proposals_left() == 1
+    for bad in (-1, 1.5, True):
+        with pytest.raises(ValueError):
+            BudgetTracker(_budget(), invalid_proposals=bad)  # type: ignore[arg-type]
+    t = BudgetTracker(_budget())
+    with pytest.raises(ValueError):
+        t.add_invalid_proposals(-1)
+    t.add_invalid_proposals(0)
+    assert t.invalid_proposals == 0 and t.exhausted() is None
+
+
+def test_designer_attempt_that_ran_the_lab_then_failed_the_schema_counts_twice() -> None:
+    """Conservative double count: the server counts the plan it backtested as a proposal, and
+    the same attempt's schema-invalid output is counted again here."""
+    t = BudgetTracker(_budget(max_proposals=3))
+    t.update_server_usage({"proposals": 1})  # the Designer's run_backtest (server-counted)
+    t.add_invalid_proposals(1)  # ... then its final output failed the plan schema
+    assert t.proposals_used == 2  # one attempt, two proposals spent
+    assert t.proposals_left() == 1
+    assert t.usage()["proposals"] == 2

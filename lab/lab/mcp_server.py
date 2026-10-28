@@ -12,7 +12,11 @@ Tools (all return compact JSON: never equity curves or trade lists):
   every trial goes to the ledger and the report is recorded as research evidence for the
   submitted plan's ``plan_hash`` (with its ``logic_hash``, :mod:`lab.research.logic`).
 * ``run_crosscheck``: re-run a backtested plan in the event-driven engine (design window).
-* ``get_ledger``, ``get_report``, ``get_budget``: read the run (holdout trials hidden).
+* ``get_ledger``, ``get_report``, ``get_budget``: read the run (holdout trials hidden);
+  ``get_ledger(..., verify_chain=True)`` adds :meth:`lab.ledger.Ledger.verify_chain`.
+
+Tool descriptions are the dedented docstrings, each in the audited shape (purpose, Use when,
+Not for, Params, Example, Limits; PLAN.md Phase 13), checked by ``tests/test_mcp_descriptions.py``.
 * ``holdout_check(run_id, plan)``: the locked holdout, budgeted server-side; pass/fail only.
 
 Portfolio plans (``"kind": "portfolio"``, PLAN.md Phase 10) go through the same tools, routed
@@ -59,6 +63,7 @@ Nothing here trades. Results are historical and not forward-looking.
 from __future__ import annotations
 
 import fcntl
+import inspect
 import logging
 import os
 import re
@@ -219,6 +224,7 @@ correct outcome.
 Results are historical and not forward-looking."""
 
 _T = TypeVar("_T")
+_F = TypeVar("_F", bound=Callable[..., Any])
 _RUN_ID_SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _TINY = 1e-9  # floor for |mid| so a range around 0 still needs a positive width
 _READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
@@ -448,6 +454,17 @@ def build_server(
     lock_dir = db_path.parent / "locks"
     server = MCPServer("strategy-lab", instructions=INSTRUCTIONS)
 
+    def tool(annotations: ToolAnnotations) -> Callable[[_F], _F]:
+        """Register ``fn`` as a tool described by its dedented docstring. Every docstring has
+        the audited shape (purpose, Use when, Not for, Params, Example, Limits; checked by
+        tests/test_mcp_descriptions.py), so the client sees it without Python indentation."""
+
+        def deco(fn: _F) -> _F:
+            text = inspect.cleandoc(fn.__doc__ or "")
+            return server.tool(annotations=annotations, description=text)(fn)
+
+        return deco
+
     @contextmanager
     def run_lock(run_id: str) -> Iterator[None]:
         """This process's thread lock plus an exclusive flock on the run's lock file, so guard +
@@ -548,10 +565,18 @@ def build_server(
 
     # ------------------------------------------------------------------ run lifecycle
 
-    @server.tool(annotations=_WRITES)
+    @tool(_WRITES)
     def start_run(label: str) -> dict[str, Any]:
-        """Start a research run: freezes the owner's success criteria and budget into the
-        ledger and returns the server-assigned run_id to pass to every other tool."""
+        """Start a research run: freeze the owner's success criteria and budget (with their
+        sha256), the lab.toml fingerprint, the universe manifest and the derivatives archive
+        snapshot into the ledger, and return the server-assigned run_id.
+        Use when: once, before any run-scoped tool; every later call passes this run_id.
+        Not for: resetting budgets or the DSR trial count (N spans every research run); a
+        server pinned by STRATEGY_LAB_RUN_ID refuses it (use the pinned run_id).
+        Params: label — short human name for the run, 1-200 characters.
+        Example: start_run(label="btc-4h-trend-pullback")
+        Limits: refused without lab/config/success_criteria.toml (no criteria, no research);
+        the frozen criteria and budget never change mid-run."""
         if pinned_run_id is not None:
             raise ToolError(
                 f"this server is pinned to research run {pinned_run_id}; use that run_id "
@@ -589,11 +614,18 @@ def build_server(
 
     # ------------------------------------------------------------------ free tools
 
-    @server.tool(annotations=_READ_ONLY)
+    @tool(_READ_ONLY)
     def list_features() -> dict[str, Any]:
-        """Every registry feature a plan may use: name, description, outputs, and params
-        (kind, default, inclusive low/high bounds). Derivatives features carry "role": "gate":
-        they may only gate long_entry (an `and` conjunct beside a price signal), never exits."""
+        """List every registry feature a plan may use (name, description, outputs, params with
+        kind, default and inclusive low/high bounds) plus the portfolio plan schema.
+        Use when: designing a plan, before validate_plan; plans may use these features only.
+        Not for: checking a plan (validate_plan) or adding features (a human adds registry
+        features, with look-ahead tests).
+        Params: none.
+        Example: list_features()
+        Limits: free (no ledger trial, no budget). Features with "role": "gate" (funding,
+        premium, basis, open interest, long/short ratio) are exposure filters, not signals:
+        only an `and` conjunct of long_entry beside a price signal, never in long_exit."""
         return {
             "features": [
                 {
@@ -642,11 +674,21 @@ def build_server(
             },
         }
 
-    @server.tool(annotations=_READ_ONLY)
+    @tool(_READ_ONLY)
     def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
-        """Validate a plan (free: no ledger trial, no budget). Returns errors with JSON paths,
-        or the plan_hash and the tunable params (keys usable in run_sweep's space). Portfolio
-        plans ("kind": "portfolio") are validated against the universe interval."""
+        """Validate a plan: return errors with JSON paths, or its plan_hash and tunable params
+        (the space keys run_sweep / walk_forward accept, with bounds).
+        Use when: after every plan edit, until valid, before any run_* tool.
+        Not for: evidence of performance; it runs nothing.
+        Params: plan — plan JSON: name, symbol, interval, features, long_entry, long_exit,
+        optional risk; or {"kind": "portfolio", ...} (schema in list_features).
+        Example: validate_plan(plan={"name": "ema_trend", "symbol": "BTCUSDT", "interval":
+        "4h", "features": {"f": {"ema": {"period": 20}}, "s": {"ema": {"period": 50}}},
+        "long_entry": "f > s", "long_exit": "f < s"})
+        Limits: free (no ledger trial, no budget). No prices or levels: comparing a price- or
+        volume-scale value with a fixed number (close > 50000) is rejected; use ratios or like
+        with like. A derivatives look-back must fit [derivatives] warmup_days. Portfolio plans
+        are validated on the universe interval; rebalance.offset is fixed at 0."""
         if pf.is_portfolio_plan(plan):
             res = pf.validate_portfolio_plan(plan, interval=config.universe.interval)
             if res.plan is None:
@@ -724,16 +766,22 @@ def build_server(
         # base + delays + sign flip + cost stress + permutation-null summary row
         return 1 + len(config.stats.adversarial_delays) + 1 + len(config.stress_factors) + 1
 
-    @server.tool(annotations=_WRITES)
+    @tool(_WRITES)
     def run_backtest(run_id: str, plan: dict[str, Any]) -> dict[str, Any]:
-        """Backtest a plan on the design window: net/gross metrics, benchmarks (buy-and-hold,
-        vol-targeted, random entry), a run-local DSR (dsr_run_local; get_report's DSR row, with
-        the global trial count and variance, is authoritative), PBO over the ±20%
-        neighbourhood, fixed-param walk-forward folds, regime breakdown, warnings. Every run is
-        ledger trials; the report is evidence for get_report. Portfolio plans: equal-weight
-        universe, BTC buy-and-hold, vol-targeted BTC and random-selection null benchmarks
-        (all from the first decision), alpha/beta to BTC, turnover, fees and impact, segment
-        exits, and dispersion + gate state per rebalance."""
+        """Backtest a plan on the design window, recording ledger trials and evidence for
+        get_report.
+        Use when: first test of each validated plan; walk_forward and run_crosscheck need it
+        for the exact plan.
+        Not for: tuning (run_sweep), judging (get_report), or the holdout (holdout_check).
+        Params: run_id — from start_run; plan — the plan JSON as validated.
+        Example: run_backtest(run_id="r-20261028-120000-a1b2c3", plan={...})
+        Limits: records base + 3 benchmark + ±20% neighbour + fixed-param fold trials (refused
+        before running if over budget); each raises the DSR bar. Returns net/gross metrics,
+        benchmarks (buy-and-hold, vol-targeted, random entry), PBO, folds, regimes, warnings;
+        dsr_run_local is optimistic, get_report's DSR row is authoritative. Derivatives plans
+        add an ungated baseline and the gate's binding share as information only (never submit
+        a price-only twin). Portfolio: equal-weight, BTC, vol-targeted BTC and random-selection
+        benchmarks from the first decision, alpha/beta to BTC, turnover, costs, gate state."""
         if pf.is_portfolio_plan(plan):
             _, ph = _portfolio_or_error(plan, config)
             with open_ledger() as led:
@@ -764,14 +812,19 @@ def build_server(
             out["budget"] = budget_status(led, run_id, config)
         return out
 
-    @server.tool(annotations=_WRITES)
+    @tool(_WRITES)
     def run_adversarial(run_id: str, plan: dict[str, Any]) -> dict[str, Any]:
-        """Adversarial checks on the design window: signal delay 1/3/5 bars, sign flip, cost
-        stress, Monte Carlo trade reshuffle, permutation null. Every variant is a ledger
-        trial; the report is evidence for get_report. Portfolio plans: stale inputs 1/3/5
-        rebalance periods old on the same rebalance rows, cost stress (fees, slippage and
-        impact), and a descriptive timing-luck table of the other rebalance weekdays (the lab
-        pins rebalance.offset at 0, so those variants cannot be resubmitted)."""
+        """Stress a plan on the design window: signal delay 1/3/5 bars, sign flip, cost
+        stress, Monte Carlo trade reshuffle and a permutation null.
+        Use when: after run_backtest / walk_forward, before run_crosscheck; get_report's delay
+        and cost-stress rows need it.
+        Not for: finding better variants; results are evidence, not candidates.
+        Params: run_id — from start_run; plan — the plan JSON as validated.
+        Example: run_adversarial(run_id="r-20261028-120000-a1b2c3", plan={...})
+        Limits: every variant is a ledger trial (refused before running if over budget).
+        Portfolio: stale inputs 1/3/5 rebalances old, cost stress (fees, slippage, impact) and
+        a descriptive timing-luck table of other rebalance weekdays (rebalance.offset is
+        pinned at 0, so those variants cannot be resubmitted)."""
         if pf.is_portfolio_plan(plan):
             pplan, ph = _portfolio_or_error(plan, config)
             with open_ledger() as led:
@@ -802,14 +855,18 @@ def build_server(
             out["budget"] = budget_status(led, run_id, config)
         return out
 
-    @server.tool(annotations=_WRITES)
+    @tool(_WRITES)
     def run_crosscheck(run_id: str, plan: dict[str, Any]) -> dict[str, Any]:
-        """Re-run an already backtested plan in the event-driven engine (nautilus_trader) on
-        the same design window and compare trades and returns with the vectorbt engine.
-        matched=true only when the engine is available and both agree. Needs run_backtest
-        evidence for this exact plan first; counts as 1 backtest for the budget guard.
-        Portfolio plans: an independent accounting replay recomputes net equity from the same
-        weights, candles, costs and impact and must match within 1e-8 (relative)."""
+        """Re-run a backtested plan in the event-driven engine (nautilus_trader) on the same
+        design window and compare its trades and returns with the vectorbt engine.
+        Use when: a plan looks promising, before get_report; holdout_check needs matched=true.
+        Not for: plans without run_backtest evidence for this exact plan (refused).
+        Params: run_id — from start_run; plan — the exact plan JSON that was backtested.
+        Example: run_crosscheck(run_id="r-20261028-120000-a1b2c3", plan={...})
+        Limits: counts as 1 backtest for the budget. matched=true only when the engine is
+        installed and both agree. Portfolio: an independent accounting replay of the same
+        weights, candles, costs and impact must match within 1e-8 (relative); it checks
+        accounting only, not signal look-ahead."""
         if pf.is_portfolio_plan(plan):
             _, ph = _portfolio_or_error(plan, config)
             with open_ledger() as led:
@@ -840,14 +897,23 @@ def build_server(
             out["budget"] = budget_status(led, run_id, config)
         return out
 
-    @server.tool(annotations=_WRITES)
+    @tool(_WRITES)
     def run_sweep(
         run_id: str, plan: dict[str, Any], space: dict[str, SpaceRange], n_trials: int
     ) -> dict[str, Any]:
-        """Optuna (seeded TPE) search maximising the net Sharpe on the design window over the
-        explicit ranges in space ({tunable key: {low, high}}). Every trial is a ledger trial
-        and raises the DSR bar; the best of many trials is biased upward. Portfolio plans:
-        space keys are the tunable paths validate_plan lists."""
+        """Search a plan's tunable params with seeded Optuna TPE, maximising net Sharpe on the
+        design window over explicit ranges.
+        Use when: after run_backtest, to tune numbers; get_report's PBO needs enough trials.
+        Not for: rule literals (thresholds in long_entry/long_exit are fixed hypotheses) or
+        judging (best_sharpe is the max of n_trials and biased upward; use walk_forward).
+        Params: run_id — from start_run; plan — the plan JSON as validated; space —
+        {tunable key from validate_plan: {"low", "high"}}; n_trials — trials to run (>= 1).
+        Example: run_sweep(run_id="r-20261028-120000-a1b2c3", plan={...},
+        space={"ema_fast.period": {"low": 10, "high": 30}}, n_trials=40)
+        Limits: low < high and width >= 2 x neighbourhood_pct x |mid|; every trial is a
+        ledger trial and raises the DSR bar; refused if n_trials exceeds the backtests left.
+        Trials below min trades are never selected; derivatives trials whose price clause
+        fails are ledgered as failed."""
         if pf.is_portfolio_plan(plan):
             pplan, ph = _portfolio_or_error(plan, config)
             if isinstance(n_trials, bool) or n_trials < 1:
@@ -941,14 +1007,23 @@ def build_server(
             out["budget"] = budget_status(led, run_id, config)
         return out
 
-    @server.tool(annotations=_WRITES)
+    @tool(_WRITES)
     def walk_forward(
         run_id: str, plan: dict[str, Any], space: dict[str, SpaceRange], n_trials_per_fold: int
     ) -> dict[str, Any]:
-        """Walk-forward optimisation inside the design window: per fold, Optuna searches space
-        on the train window only, then the chosen params run once on the test window. The
-        stitched out-of-sample net Sharpe is what the success criteria judge. Portfolio plans
-        follow the same lineage rule (cover every value the behaviour family tried)."""
+        """Walk-forward optimisation inside the design window: per fold Optuna searches space
+        on the train window only, then the chosen params run once on the test window.
+        Use when: after run_backtest (and any run_sweep) of this exact plan; the stitched
+        out-of-sample net Sharpe is what the success criteria judge.
+        Not for: plans without a run_backtest of the exact plan, or logic whose rule literals
+        were hand-tuned across plans (both refused).
+        Params: run_id — from start_run; plan — the plan JSON as backtested; space —
+        {tunable key: {"low", "high"}}; n_trials_per_fold — train trials per fold (>= 1).
+        Example: walk_forward(run_id="r-20261028-120000-a1b2c3", plan={...},
+        space={"ema_fast.period": {"low": 10, "high": 30}}, n_trials_per_fold=20)
+        Limits: space must cover every value the behaviour family (same logic, or returns
+        correlated >= [research] family_return_corr, any run) already tried; costs
+        folds x (n_trials_per_fold + 1) ledger trials, refused if over budget."""
         if pf.is_portfolio_plan(plan):
             return portfolio_walk_forward_tool(run_id, plan, space, n_trials_per_fold)
         parsed, h = _plan_or_error(plan)
@@ -1110,10 +1185,19 @@ def build_server(
 
     # ------------------------------------------------------------------ reads
 
-    @server.tool(annotations=_READ_ONLY)
-    def get_ledger(run_id: str, limit: int = 50) -> dict[str, Any]:
-        """This run's trials, newest first, as summary rows (no returns), plus counts and the
-        DSR trial count N. Holdout trials are not listed."""
+    @tool(_READ_ONLY)
+    def get_ledger(run_id: str, limit: int = 50, verify_chain: bool = False) -> dict[str, Any]:
+        """List this run's trials newest first as summary rows (no returns), with counts by
+        source and status and the DSR trial count N.
+        Use when: auditing what was tried, for the journal's trial links, or to prove the
+        ledger is untampered (verify_chain).
+        Not for: judging a plan (get_report) or budgets (get_budget).
+        Params: run_id — from start_run; limit — rows to return, 0-500 (default 50);
+        verify_chain — true to add "chain": the run's trial hash-chain check (ok, n_trials,
+        head, first_bad_trial_id, error).
+        Example: get_ledger(run_id="r-20261028-120000-a1b2c3", limit=20, verify_chain=True)
+        Limits: read-only, free. Holdout trials are never listed. dsr_n counts distinct plans
+        across every research run; a new run does not reset it."""
         if isinstance(limit, bool) or not 0 <= limit <= MAX_LEDGER_PAGE:
             raise ToolError(f"limit must be 0-{MAX_LEDGER_PAGE}, got {limit!r}")
         with open_ledger() as led:
@@ -1128,7 +1212,7 @@ def build_server(
             for r in recs:
                 by_source[r.source] = by_source.get(r.source, 0) + 1
                 by_status[r.status] = by_status.get(r.status, 0) + 1
-            return {
+            out: dict[str, Any] = {
                 "run_id": run_id,
                 "total": len(recs),
                 "by_source": by_source,
@@ -1141,12 +1225,23 @@ def build_server(
                 "run_distinct_plans": led.count_distinct_plans(run_id, sources=SELECTION_SOURCES),
                 "items": [ledger_item(r) for r in recs[:limit]],
             }
+            if verify_chain:  # tamper evidence for the journal's "every trial in the ledger"
+                out["chain"] = led.verify_chain(run_id)
+            return out
 
-    @server.tool(annotations=_READ_ONLY)
+    @tool(_READ_ONLY)
     def get_report(run_id: str, plan_hash: str) -> dict[str, Any]:
-        """Judge a plan (by plan_hash of the plan as submitted) against the run's frozen
-        success criteria: one row per criterion with pass / fail / missing, the DSR N, and the
-        budget. pre_holdout_passed must be true before holdout_check."""
+        """Judge a plan against the run's frozen success criteria: one row per criterion with
+        pass / fail / missing, the DSR N, and the budget.
+        Use when: after the backtest, sweep, walk-forward, adversarial and crosscheck
+        evidence exists; pre_holdout_passed must be true before holdout_check.
+        Not for: holdout results (never shown) or re-scoring with other thresholds.
+        Params: run_id — from start_run; plan_hash — the plan_hash of the plan as submitted
+        (from validate_plan or a run_* result).
+        Example: get_report(run_id="r-20261028-120000-a1b2c3", plan_hash="3f9a...")
+        Limits: read-only, free; criteria are the ones frozen at start_run. Missing evidence
+        shows as missing. Derivatives plans add the ungated baseline as information only (not
+        a criterion); portfolio plans add beat_equal_weight and alpha-to-BTC rows."""
         with open_ledger() as led:
             check_run(led, run_id)
             try:
@@ -1154,23 +1249,34 @@ def build_server(
             except ValueError as exc:
                 raise ToolError(str(exc)) from None
 
-    @server.tool(annotations=_READ_ONLY)
+    @tool(_READ_ONLY)
     def get_budget(run_id: str) -> dict[str, Any]:
-        """The run's frozen budget, what has been used, and what remains (proposals,
-        backtests, holdout checks)."""
+        """Show the run's frozen budget, what has been used, and what remains (proposals,
+        backtests, holdout checks).
+        Use when: before a sweep or walk-forward, to size n_trials to what is left.
+        Not for: raising a budget; budgets are frozen at start_run.
+        Params: run_id — from start_run.
+        Example: get_budget(run_id="r-20261028-120000-a1b2c3")
+        Limits: read-only, free. Budgets are enforced server-side: a call that could exceed
+        them is refused before anything runs or is recorded."""
         with open_ledger() as led:
             check_run(led, run_id)
             return budget_status(led, run_id, config)
 
     # ------------------------------------------------------------------ holdout
 
-    @server.tool(annotations=_WRITES)
+    @tool(_WRITES)
     def holdout_check(run_id: str, plan: dict[str, Any]) -> dict[str, Any]:
         """Spend one locked-holdout check on a plan that passes every pre-holdout criterion.
-        Returns pass/fail and the checks left only (no metrics, not even which rule failed).
-        One check per hypothesis logic, ever, in any run: a plan that fails is dead, and a
-        renamed or re-tuned copy is the same hypothesis. Refused, without spending, if any
-        guard fails."""
+        Use when: get_report says pre_holdout_passed (including a matched run_crosscheck)
+        and the strategy-critic review is done; the owner is asked each time.
+        Not for: tuning or comparing plans; a failed hypothesis is dead, never re-tune on it.
+        Params: run_id — from start_run; plan — the exact plan JSON get_report judged.
+        Example: holdout_check(run_id="r-20261028-120000-a1b2c3", plan={...})
+        Limits: returns pass/fail and checks left only (no metrics, not even which rule
+        failed). One check per hypothesis ever, in any run: a renamed, re-tuned or
+        alike-trading copy is the same hypothesis. Budgeted server-side; refused without
+        spending if any guard fails; disabled when STRATEGY_LAB_DISABLE_HOLDOUT=1."""
         if not holdout_enabled:
             raise ToolError(
                 "holdout_check is disabled on this server (STRATEGY_LAB_DISABLE_HOLDOUT=1): "

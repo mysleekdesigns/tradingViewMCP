@@ -18,6 +18,19 @@ Unknown costs fail closed: a call whose cost was not reported (or that raised af
 is charged its full cap (:meth:`BudgetTracker.charge_or_cap`), never zero. The orchestrator also
 persists each call's cap as a reservation before the call, so a crash mid-call is charged at the
 cap on ``--resume``.
+
+Invalid Designer outputs (PLAN.md Phase 13): the server counts proposals as distinct plans with
+lab evidence, so a Designer attempt whose structured output failed the plan schema (even after
+the SDK's retries) and that never ran the lab would cost nothing there. Each schema-invalid
+attempt is counted here in :attr:`BudgetTracker.invalid_proposals` and spends the proposal
+budget like a proposal: :meth:`BudgetTracker.proposals_left`, :meth:`BudgetTracker.exhausted`,
+and :meth:`BudgetTracker.usage` all include it.
+
+The two counts are independent and simply add up. When the Designer did run the lab (e.g.
+``run_backtest``, so the server already counts that plan as a proposal) and then returned an
+invalid output, the same attempt is counted twice: once by the server and once here as invalid.
+That is intentional and conservative: the attempt cost a proposal and produced nothing the loop
+can review, so the budget errs towards running out early, never late.
 """
 
 from __future__ import annotations
@@ -50,6 +63,12 @@ def _check_amount(x: float, name: str) -> float:
     return float(x)
 
 
+def _check_count(n: int, name: str) -> int:
+    if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        raise ValueError(f"{name} must be an int >= 0, got {n!r}")
+    return n
+
+
 @dataclass
 class BudgetTracker:
     """Tracks one run's spend against its frozen :class:`RunBudget`."""
@@ -57,6 +76,8 @@ class BudgetTracker:
     budget: RunBudget
     usd_spent: float = 0.0
     hypotheses_started: int = 0
+    # Designer outputs that failed the role's schema (counted toward the proposal budget).
+    invalid_proposals: int = 0
     # Effective holdout limit (frozen budget capped by lab.toml); defaults to the frozen budget.
     holdout_limit: int | None = None
     headroom_fraction: float = DEFAULT_HEADROOM_FRACTION
@@ -70,6 +91,7 @@ class BudgetTracker:
         if not 0.0 <= self.headroom_fraction < 1.0:
             raise ValueError(f"headroom_fraction must be in [0, 1), got {self.headroom_fraction}")
         _check_amount(self.min_call_usd, "min_call_usd")
+        _check_count(self.invalid_proposals, "invalid_proposals")
         if self.holdout_limit is None:
             self.holdout_limit = self.budget.max_holdout_checks
 
@@ -143,8 +165,18 @@ class BudgetTracker:
             if key in usage:
                 self.server_usage[key] = int(usage[key])
 
+    def add_invalid_proposals(self, n: int) -> None:
+        """Count ``n`` Designer outputs that failed the plan schema toward the proposal budget."""
+        self.invalid_proposals += _check_count(n, "invalid outputs")
+
+    @property
+    def proposals_used(self) -> int:
+        """Server-counted proposals (distinct plans with evidence) plus invalid Designer
+        outputs."""
+        return self.server_usage["proposals"] + self.invalid_proposals
+
     def proposals_left(self) -> int:
-        return max(0, self.budget.max_proposals - self.server_usage["proposals"])
+        return max(0, self.budget.max_proposals - self.proposals_used)
 
     def backtests_left(self) -> int:
         return max(0, self.budget.max_backtests - self.server_usage["backtests"])
@@ -168,7 +200,7 @@ class BudgetTracker:
     def usage(self) -> BudgetUsage:
         return BudgetUsage(
             hypotheses=self.hypotheses_started,
-            proposals=self.server_usage["proposals"],
+            proposals=self.proposals_used,
             backtests=self.server_usage["backtests"],
             holdout_checks=self.server_usage["holdout_checks"],
             usd=round(self.usd_spent, 6),

@@ -1,0 +1,46 @@
+# Pre-registered paper-trade protocol (PLAN.md Phase 13; research report section 4).
+#
+# `paper_trade.py prepare` freezes these values (and this file's sha256) into
+# agents/data/paper/<candidate>/protocol.json and the candidate's journal entry BEFORE the first
+# freqtrade --dry-run trade. `compare` judges the paper bot against that frozen copy, never
+# against this file, so editing it later changes only candidates prepared afterwards.
+# Verdicts: pass / fail / continue / inconclusive (see agents/README.md).
+# Paper trading only: freqtrade --dry-run, no exchange keys, no orders.
+
+[duration]
+min_days = 28   # PLAN.md: at least 4 weeks of forward paper trading before any verdict
+max_days = 56   # PLAN.md: at most 8 weeks; longer than that the test stops being a check and becomes a wait
+data_grace_days = 7   # Binance's public klines and the monthly archive carry every bar within hours to days; a bar still missing a week after the decision bar is a permanent gap, so the verdict becomes a final inconclusive ("data") instead of waiting forever
+
+[sharpe]
+confidence = 0.95          # one-sided PSR / MinTRL confidence, the same 95% bar as the lab's DSR threshold
+power = 0.8                # chance of confirming SR > benchmark if the claim is true; 0.5 reduces to the plain MinTRL (a coin flip at the claim)
+benchmark_annual = 0.0     # test "better than zero" (rf = 0, as every lab Sharpe); annualised with 365 days x bars/day
+
+[trades]
+band_confidence = 0.95     # two-sided coverage of the trade-count band (Poisson and empirical design blocks)
+min_expected = 5           # fewer expected entries than this over the decision horizon: the count cannot discriminate, so the best verdict is inconclusive
+
+[exposure]
+band_confidence = 0.95     # two-sided coverage of the empirical design-block exposure band
+slack = 0.02               # absolute widening: paper open/close times are rounded to bar boundaries
+max_band_width = 0.8       # a band this wide (e.g. [0, 1] on a slow trend plan) accepts almost any bot: the best verdict is inconclusive
+
+[shortfall]
+tolerance_mult = 1.0       # adverse drift allowed beyond the lab's modelled fill = 1 x the modelled per-side slippage (report section 4)
+min_fills = 3              # a median over fewer fills is one fill's noise: weeks with fewer fills are not judged, and fewer judged fills at the decision bar is inconclusive
+fill_noise_bps = 10.0      # assumed sd of one honest fill's shortfall vs the bar open (a market order a few seconds after a BTC/ETH bar opens moves a few bps; 10 is deliberately generous so the stated false-fail odds are not optimistic)
+gross_breakage_multiple = 4.0  # one week can end the test only above 4 x tolerance (gross breakage); weekly medians below that are alerts, so 8 weekly looks do not compound into a high false-fail rate
+
+[matching]
+match_tolerance_bars = 1   # freqtrade fills seconds after the signal bar closes (the lab's fill bar); a fill +/-1 bar off is still paired with its lab fill and counted ONCE as off-lag (named late or early), further off it is unmatched on both sides (counted twice)
+irregular_share = 0.05     # ONE joint count of irregular fills (unmatched paper + unmatched lab entries and exits of any reason, plus matched fills off the lab's bar) may be at most max(1, floor(0.05 x (all lab fills + all paper fills))). The bot runs the lab's own compile_plan on the same closed candles from the same frozen WARM_FROM as the lab replay, so an honest bot has none by construction; the one allowance covers a bar on which the exchange feed and the comparison's candles disagree. Rounded down: a skipped or far-shifted trade is 2-4 irregular fills, and rounding up would excuse one at 21-40 fills. Replaces the 0.8 match-rate floor, whose 20% slack let skipped, extra and 2+-bar-shifted trades pass
+
+[design]
+block_step_days = 7        # rolling design-window blocks (one per decision horizon) start every week
+min_blocks = 8             # fewer design blocks than this cannot give an empirical band: prepare refuses
+min_independent_blocks = 3 # non-overlapping decision-horizon blocks in the design window; the predictive band uses t with m - 1 degrees of freedom, and below 3 it is unbounded in practice
+
+[bootstrap]
+draws = 2000               # design blocks judged as pseudo forward periods; Monte Carlo error ~0.7 points at ~10%. The result is a single-path estimate (one design path): it can be off in either direction and excludes regime change
+seed = 20261028            # fixed so the frozen estimate is reproducible

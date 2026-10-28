@@ -8,6 +8,7 @@ import ast
 import json
 import sys
 import types
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from lab.plan import compile_plan, parse_plan
+from lab.config import load_config
+from lab.ledger import Ledger
+from lab.plan import compile_plan, parse_plan, plan_hash
+from lab.types import TrialRecord
 from research.paper.freqtrade import (
     FREQTRADE_INSTALL_HINT,
     PreparedPaper,
@@ -414,12 +418,86 @@ def test_cli_prepare_prints_the_dry_run_command(
 ) -> None:
     import paper_trade
 
+    # prepare runs the design-window backtest for the protocol: keep it offline with seeded
+    # synthetic 1h candles (the seed plan's interval) and a 9-month design window.
+    base = load_config()
+    splits = replace(
+        base.splits,
+        design_start=pd.Timestamp("2025-01-01", tz="UTC"),
+        holdout_start=pd.Timestamp("2025-10-01", tz="UTC"),
+    )
+    lab_cfg = replace(base, data_dir=tmp_path / "lab", splits=splits)
+    n = 24 * 304  # 2024-12-01 .. 2025-10-01
+    rng = np.random.default_rng(11)
+    close = 30_000.0 * np.exp(np.cumsum(rng.normal(0.0, 0.008, n)))
+    open_ = np.r_[30_000.0, close[:-1]]
+    spread = np.abs(rng.normal(0.0, 0.003, n)) * close
+    candles = pd.DataFrame(
+        {
+            "open": open_,
+            "high": np.maximum(open_, close) + spread,
+            "low": np.minimum(open_, close) - spread,
+            "close": close,
+            "volume": rng.uniform(1.0, 50.0, n),
+            "tradable": np.ones(n, dtype=bool),
+        },
+        index=pd.date_range("2024-12-01", periods=n, freq="1h", tz="UTC", name="time"),
+    )
+    monkeypatch.setattr(paper_trade, "load_config", lambda: lab_cfg)
+    monkeypatch.setattr(paper_trade, "default_loader", lambda cfg: lambda *a: candles)
+
     seed_file = Path(__file__).resolve().parents[1] / "seeds" / "freqtrade_strategy001.json"
-    argv = ["--paper-dir", str(tmp_path), "prepare", "--plan-file", str(seed_file)]
+    # prepare needs the plan in the lab ledger (read only): a tmp ledger holding the seed plan's
+    # design-window trial and one walk-forward result (its OOS Sharpe becomes the claim)
+    seed_plan = json.loads(seed_file.read_text())["plan"]
+    parsed = parse_plan(seed_plan)
+    ledger_path = tmp_path / "ledger.db"
+    with Ledger(ledger_path) as led:
+        led.start_research_run("r-seed", label="seed", config_json="{}", config_sha256="0" * 64)
+        trial_id = led.record(
+            TrialRecord(
+                run_id="r-seed",
+                source="api",
+                status="ok",
+                plan_hash=plan_hash(parsed),
+                plan_json=json.dumps(seed_plan),
+                params_json="{}",
+                symbol=parsed.symbol,
+                interval=parsed.interval,
+                window_kind="design",
+                window_start=pd.Timestamp("2025-01-01", tz="UTC"),
+                window_end=pd.Timestamp("2025-10-01", tz="UTC"),
+                metrics_json="{}",
+                sharpe_per_bar=0.0,
+                n_trades=3,
+                returns=np.zeros(8),
+            )
+        )
+        led.record_evidence(
+            "r-seed",
+            plan_hash(parsed),
+            "walk_forward",
+            json.dumps({"oos_metrics": {"sharpe": 0.3}}),
+        )
+    argv = [
+        "--paper-dir",
+        str(tmp_path),
+        "--journal-dir",
+        str(tmp_path / "journal"),
+        "prepare",
+        "--plan-file",
+        str(seed_file),
+        "--ledger",
+        str(ledger_path),
+    ]
     assert paper_trade.main([*argv, "--candidate", "s001"]) == 0
     out = capsys.readouterr().out
     assert "freqtrade trade --dry-run --config" in out
     assert (tmp_path / "s001" / "config.json").is_file()
+    protocol = json.loads((tmp_path / "s001" / "protocol.json").read_text())
+    assert protocol["source"]["trial_id"] == trial_id and protocol["source"]["run_id"] == "r-seed"
+    assert protocol["sharpe"]["claim_source"] == "walk_forward_oos"
+    assert not (tmp_path / "lab" / "ledger.db").exists()  # the lab default was never touched
 
     runner = FakeRunner()
 

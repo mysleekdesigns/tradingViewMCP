@@ -7,6 +7,7 @@ Helpers at the top are shared with the other ``test_research_*`` modules."""
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -526,6 +527,45 @@ def test_get_ledger_limits_and_counts(tmp_path: Path) -> None:
     assert "limit must be" in error_text(
         lab.server, "get_ledger", {"run_id": run_id, "limit": 10_000}
     )
+
+
+def test_get_ledger_omits_the_chain_unless_asked(tmp_path: Path) -> None:
+    lab = Lab(tmp_path)
+    run_id = lab.start()
+    assert "chain" not in ok(lab.server, "get_ledger", {"run_id": run_id})
+
+
+def test_get_ledger_verify_chain_passes_on_an_untouched_run(tmp_path: Path) -> None:
+    lab = Lab(tmp_path)
+    run_id = lab.start()
+    ok(lab.server, "run_sweep", {"run_id": run_id, "plan": EMA_PLAN, "space": SPACE, "n_trials": 3})
+    out = ok(lab.server, "get_ledger", {"run_id": run_id, "verify_chain": True})
+    chain = out["chain"]
+    assert set(chain) == {"run_id", "ok", "n_trials", "head", "first_bad_trial_id", "error"}
+    assert chain["run_id"] == run_id and chain["ok"] is True
+    assert chain["n_trials"] == out["total"] == 3
+    assert isinstance(chain["head"], str) and chain["head"]
+    assert chain["first_bad_trial_id"] is None and chain["error"] is None
+
+
+def test_get_ledger_verify_chain_names_the_first_tampered_trial(tmp_path: Path) -> None:
+    lab = Lab(tmp_path)
+    run_id = lab.start()
+    ok(lab.server, "run_sweep", {"run_id": run_id, "plan": EMA_PLAN, "space": SPACE, "n_trials": 3})
+    with lab.ledger() as led:
+        ids = sorted(int(r.id or 0) for r in led.list(run_id=run_id, limit=led.count(run_id)))
+    # Simulate someone editing the ledger file behind the server's back: lift the append-only
+    # trigger, then rewrite the middle trial's trade count.
+    conn = sqlite3.connect(lab.ledger_path)
+    try:
+        conn.execute("DROP TRIGGER trials_no_update")
+        conn.execute("UPDATE trials SET n_trades = n_trades + 7 WHERE id = ?", (ids[1],))
+        conn.commit()
+    finally:
+        conn.close()
+    chain = ok(lab.server, "get_ledger", {"run_id": run_id, "verify_chain": True})["chain"]
+    assert chain["ok"] is False and chain["first_bad_trial_id"] == ids[1]
+    assert isinstance(chain["error"], str) and str(ids[1]) in chain["error"]
 
 
 def test_criteria_snapshot_is_frozen_even_if_the_file_changes(tmp_path: Path) -> None:

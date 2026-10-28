@@ -8,4 +8,5 @@
 - [No-trade bars](project_web_no_trade_bars.md) — raw `candles` vs plotted `bars` split, which consumer uses which; open: sparse-pair paging, empty-view clicks
 - [Market venue](project_market_venue.md) — TV_MARKET_VENUE binance|binance-us, live-verified limits/sizes; DB lock/startup order, tsx-watch safe; open: lock takeover race, venue label cached
 - [Phase 8 Research page](project_web_phase8_research.md) — poll triggers, tab boundaries, persisted plan-restore confirmed; open: stalled run stops new-run check, backtick regex cost
+- [Phase 13 agents/ledger](project_agents_phase13.md) — SDK/CLI facts, confirmed designs; round-4: all round-3 warnings fixed; open: prepare misses DataUnavailableError
 - [Phase 9 wave 2](project_web_phase9_wave2.md) — multi-chart/seconds/replay/paper/regime; round-3 gate+slow-retry+repair verified; LWC sync crosshair re-fire; minor open

@@ -345,7 +345,7 @@ def test_migrations_are_idempotent_on_reopen(tmp_path: Path) -> None:
     path = tmp_path / "ledger.db"
     for _ in range(3):
         with Ledger(path) as led:
-            assert led.schema_version == 4
+            assert led.schema_version == 5
     conn = sqlite3.connect(path)
     rows = conn.execute("SELECT version, name FROM schema_version").fetchall()
     conn.close()
@@ -354,6 +354,7 @@ def test_migrations_are_idempotent_on_reopen(tmp_path: Path) -> None:
         (2, "costs_json"),
         (3, "research_runs"),
         (4, "holdout_logic_hash"),
+        (5, "trial_hash_chain"),
     ]
 
 
@@ -571,7 +572,7 @@ def test_migration_2_adds_costs_json_to_an_existing_v1_ledger(tmp_path: Path) ->
     )
     conn.close()
     with Ledger(path) as led:
-        assert led.schema_version == 4  # every later migration applies on top of v1
+        assert led.schema_version == 5  # every later migration applies on top of v1
         (old,) = led.list(run_id="old")
         assert old.costs_json == "{}"
         new_id = led.record(replace(make_record(), costs_json=costs_to_json(CostModel())))

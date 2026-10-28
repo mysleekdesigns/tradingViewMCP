@@ -4,16 +4,25 @@
   ``populate_indicators`` calls **our lab's** ``compile_plan`` on the closed candles, so the
   entry/exit rules are the same code as the backtest's. The signal is decided on bar t's close;
   freqtrade fills right after the close, i.e. at roughly bar t+1's open (the lab's fill rule).
-  Signals are identical only for features whose value depends on a **bounded look-back** (EMA
-  after warm-up, RSI, ATR, rolling windows). History-dependent features such as
-  ``regime_signal`` (expanding exponentially weighted Markov transition counts) depend on every
-  bar seen so far; freqtrade hands ``populate_indicators`` only the candles it holds (about
-  ``startup_candle_count`` plus the bars since start), so those values, and the signals built on
-  them, can differ from the lab's full-history backtest. The weekly comparison
-  (:mod:`research.paper.compare`) then reports ``diverging``: a mismatch never shows up as a
-  false pass. ``startup_candle_count`` is not raised for regime features here; to narrow the gap,
-  set a larger value in the generated file by hand (freqtrade must be able to download that many
-  candles) and re-check the comparison.
+* **Same history as the lab replay.** On its first fetch freqtrade's dry-run pulls the
+  exchange's ``ohlcv_candle_limit`` candles (1000 on Binance) and keeps about
+  ``candle_limit + startup_candle_count`` of them, so recursive indicators (EMA) would start
+  ~1000 bars back while ``paper_trade.py compare`` replays the lab from the protocol's frozen
+  warm-up (``start - warmup_bars`` bars). Honest bots then disagreed near crossings. The
+  rendered strategy therefore carries a frozen ``WARM_FROM`` (UTC epoch seconds, the
+  protocol's ``data.warm_from``): ``populate_indicators`` runs ``compile_plan`` only on rows
+  with ``date >= WARM_FROM`` and maps the signals back (earlier rows get no signal), so the bot
+  and the lab replay compute every feature from the same first bar. It also carries the
+  protocol's frozen ``START`` (UTC epoch seconds): ``enter_long`` is set only on candles with
+  ``date >= START``, the same first signal bar as the lab replay (``replay_trades`` keeps rows
+  ``>= start``), so a bot launched before the test starts can neither enter at ``start`` on a
+  pre-start signal nor hold a pre-start position into it. Exits are not gated (with entries
+  gated there is no position before ``START``). ``compare`` refuses when the strategy file's
+  ``WARM_FROM`` or ``START`` is not the protocol's. Remaining limits: candle data that
+  differ between the exchange feed and the comparison's source, and a dataframe that no longer
+  reaches back to ``WARM_FROM`` (freqtrade keeps a bounded number of candles: with ``warmup_bars
+  + decision_bars`` above about 1000, the oldest rows drop off late in the test; the strategy
+  logs a warning then, and any resulting mismatch shows up as a fail, never a false pass).
 * :func:`render_config` builds a freqtrade config that is ALWAYS ``dry_run: true`` with empty
   exchange credentials. It raises ``ValueError`` if asked for anything else.
 * :func:`prepare_candidate` writes ``PAPER_DIR/<candidate>/`` (plan, strategy, config, meta)
@@ -141,11 +150,23 @@ def class_name_for(candidate: str) -> str:
 # --------------------------------------------------------------------------- strategy
 
 
-def render_strategy(plan: Mapping[str, Any] | Plan, *, class_name: str) -> str:
+def render_strategy(
+    plan: Mapping[str, Any] | Plan,
+    *,
+    class_name: str,
+    warm_from: int | None = None,
+    start: int | None = None,
+) -> str:
     """Python source of a freqtrade IStrategy (v3) running ``plan`` through ``lab.plan``.
 
     The plan is validated first (``PlanValidationError``, a ``ValueError``, lists every
-    problem); ``class_name`` must be a valid, non-keyword Python identifier.
+    problem); ``class_name`` must be a valid, non-keyword Python identifier. ``warm_from``
+    (UTC epoch seconds; the paper protocol's frozen ``data.warm_from``) is rendered as
+    ``WARM_FROM``: indicators are computed only from that bar on, exactly like the lab replay
+    in ``compare`` (None: on every candle freqtrade holds, for previews without a protocol).
+    ``start`` (the protocol's start, UTC epoch seconds) is rendered as ``START``: entry signals
+    count only on candles with ``date >= START``, the lab replay's first signal bar (None: no
+    gate, for previews).
     """
     if not isinstance(class_name, str) or not class_name.isidentifier():
         raise ValueError(f"class_name {class_name!r} is not a valid Python identifier")
@@ -158,16 +179,20 @@ def render_strategy(plan: Mapping[str, Any] | Plan, *, class_name: str) -> str:
     sl = p.risk.stop_loss_pct
     stoploss = -round(sl / 100.0, 10) if sl is not None else NO_STOPLOSS
     startup = startup_candle_count(p)
+    for name, value in (("warm_from", warm_from), ("start", start)):
+        ok = value is None or (isinstance(value, int) and not isinstance(value, bool))
+        if not ok or (value is not None and value < 0):
+            raise ValueError(f"{name} must be a non-negative int (epoch seconds), got {value!r}")
+    if warm_from is not None and start is not None and warm_from > start:
+        raise ValueError(f"warm_from {warm_from} must not be after start {start}")
     return f'''"""Generated by tradingView agents (research.paper.freqtrade). DO NOT EDIT.
 
 PAPER TRADING ONLY: run with `freqtrade trade --dry-run`. Entry/exit signals come from the
 tradingView lab (lab.plan.compile_plan) on closed candles: same rules and timing as the backtest
-(signal at bar t's close, fill right after it, about bar t+1's open). Signals match the lab only
-for features with a bounded look-back; history-dependent features (e.g. regime_signal's
-exponentially weighted Markov counts) see only the candles freqtrade holds (about
-startup_candle_count), so they can differ from the full-history backtest and the weekly
-comparison may report "diverging" (never a false pass). Needs the `lab` package installed
-(editable) in freqtrade's environment.
+(signal at bar t's close, fill right after it, about bar t+1's open). Indicators are computed
+only on candles from WARM_FROM on (the paper protocol's frozen warm-up start), the same history
+the lab replays in `paper_trade.py compare`, so recursive features start from the same bar.
+Needs the `lab` package installed (editable) in freqtrade's environment.
 
 Plan hash: {plan_hash(p)}
 Results are historical, not forward-looking.
@@ -176,6 +201,7 @@ Results are historical, not forward-looking.
 from __future__ import annotations
 
 import json
+import logging
 
 import numpy as np
 import pandas as pd
@@ -184,6 +210,13 @@ from lab.plan import compile_plan, parse_plan
 
 PLAN_JSON = {plan_json!r}
 PLAN = parse_plan(json.loads(PLAN_JSON))
+# Frozen in the paper protocol (data.warm_from, UTC epoch seconds): indicators start here, like
+# the lab replay in `paper_trade.py compare`. None: every candle freqtrade holds.
+WARM_FROM = {warm_from!r}
+# Frozen in the paper protocol (start, UTC epoch seconds): entries only on candles dated at or
+# after it, the lab replay's first signal bar. None: no gate.
+START = {start!r}
+logger = logging.getLogger(__name__)
 
 
 def lab_candles(dataframe: pd.DataFrame) -> tuple[pd.DataFrame, np.ndarray]:
@@ -232,16 +265,32 @@ class {class_name}(IStrategy):
         entries = np.zeros(n, dtype=bool)
         exits = np.zeros(n, dtype=bool)
         candles, keep = lab_candles(dataframe)
+        rows = np.flatnonzero(keep)  # dataframe positions of the lab candles
+        if WARM_FROM is not None and len(candles) > 0:
+            first = pd.Timestamp(WARM_FROM, unit="s", tz="UTC")
+            if candles.index[0] > first:
+                logger.warning(
+                    "candles start at %s, after WARM_FROM %s: indicators cannot match the lab "
+                    "replay exactly",
+                    candles.index[0],
+                    first,
+                )
+            warm = np.asarray(candles.index >= first)
+            candles, rows = candles.loc[warm], rows[warm]
         if len(candles) > 0:
             signals = compile_plan(PLAN, candles)
-            entries[keep] = signals.entries.to_numpy(dtype=bool)
-            exits[keep] = signals.exits.to_numpy(dtype=bool)
+            entries[rows] = signals.entries.to_numpy(dtype=bool)
+            exits[rows] = signals.exits.to_numpy(dtype=bool)
         dataframe["lab_entry"] = entries
         dataframe["lab_exit"] = exits
         return dataframe
 
     def populate_entry_trend(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
-        dataframe["enter_long"] = dataframe["lab_entry"].astype("int64")
+        enter = dataframe["lab_entry"].to_numpy(dtype=bool)
+        if START is not None:
+            dates = pd.DatetimeIndex(pd.to_datetime(dataframe["date"], utc=True))
+            enter = enter & np.asarray(dates >= pd.Timestamp(START, unit="s", tz="UTC"))
+        dataframe["enter_long"] = enter.astype("int64")
         return dataframe
 
     def populate_exit_trend(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
@@ -441,10 +490,14 @@ def prepare_candidate(
     candidate: str,
     paper_dir: Path = PAPER_DIR,
     now: datetime | None = None,
+    warm_from: int | None = None,
+    start: int | None = None,
     **config_kwargs: Any,
 ) -> PreparedPaper:
     """Write ``paper_dir/<candidate>/`` (``plan.json``, ``<Class>.py``, ``config.json``,
-    ``meta.json``, ``user_data/``) and return the dry-run launch command.
+    ``meta.json``, ``user_data/``) and return the dry-run launch command. ``warm_from`` is the
+    registered protocol's ``data.warm_from`` and ``start`` is its start, both rendered into the
+    strategy (see :func:`render_strategy`); ``paper_trade.py prepare`` always passes them.
 
     Re-preparing a candidate keeps its dry-run DB and first ``prepared_at``; a different plan
     under an existing candidate name raises ``ValueError`` (use a new name).
@@ -478,7 +531,10 @@ def prepare_candidate(
     _atomic_write(
         folder / "plan.json", json.dumps(plan_to_dict(p), indent=2, sort_keys=True) + "\n"
     )
-    _atomic_write(strategy_path, render_strategy(p, class_name=class_name))
+    _atomic_write(
+        strategy_path,
+        render_strategy(p, class_name=class_name, warm_from=warm_from, start=start),
+    )
     _atomic_write(config_path, json.dumps(config, indent=2) + "\n")
     command = [
         "freqtrade",
@@ -503,6 +559,8 @@ def prepare_candidate(
         "interval": p.interval,
         "prepared_at": prepared_at,
         "db_path": str(db_path),
+        "warm_from": warm_from,
+        "start": start,
         "command": command,
     }
     _atomic_write(meta_path, json.dumps(meta, indent=2) + "\n")
@@ -515,6 +573,21 @@ def prepare_candidate(
         db_path=db_path,
         plan_hash=phash,
     )
+
+
+def strategy_frozen_value(source: str, name: str) -> int | None:
+    """The frozen ``<name> = <int>`` (``WARM_FROM`` or ``START``) rendered into a strategy
+    file's source; ``ValueError`` when the line is missing or appears more than once (a
+    hand-edited or older file)."""
+    found = re.findall(rf"^{re.escape(name)} = (None|\d+)$", source, flags=re.M)
+    if len(found) != 1:
+        raise ValueError(f"the strategy file has no single `{name} = ...` line")
+    return None if found[0] == "None" else int(found[0])
+
+
+def strategy_warm_from(source: str) -> int | None:
+    """:func:`strategy_frozen_value` for ``WARM_FROM``."""
+    return strategy_frozen_value(source, "WARM_FROM")
 
 
 def _check_command(prepared: PreparedPaper) -> None:
@@ -575,5 +648,7 @@ __all__ = [
     "render_config",
     "render_strategy",
     "startup_candle_count",
+    "strategy_frozen_value",
+    "strategy_warm_from",
     "symbol_to_pair",
 ]

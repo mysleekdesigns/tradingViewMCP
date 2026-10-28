@@ -72,6 +72,8 @@ logs/
 tmp/
 temp/
 *.tmp
+# paper-trade verdict lock files next to journal entries (agents/research/paper/protocol.py)
+agents/journal/.*.lock
 
 # ---------- Claude Code local-only files ----------
 .claude/settings.local.json

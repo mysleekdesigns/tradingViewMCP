@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -17,6 +18,7 @@ from lab.research.contract import (
     SuccessCriteria,
 )
 from research.journal import (
+    REPORTING_CHECKLIST,
     UNTRUSTED_CALLOUT,
     CandidateReport,
     HoldoutLeakError,
@@ -395,3 +397,192 @@ def test_finish_candidate_writes_report(tmp_path: Path) -> None:
     meta = parse_frontmatter(text)
     assert meta["outcome"] == "candidate" and meta["idea_ids"] == [4, 7, 9]
     assert "#### [[idea-9]] plan `c0ffee12`" in text
+
+
+# --------------------------------------------------------------------------- reporting checklist
+
+CHECKLIST_TITLES = [
+    "Data and universe",
+    "Time split and leakage",
+    "Action semantics",
+    "Execution and costs",
+    "Leakage audit",
+    "Artifacts",
+    "Adaptation",
+]
+HEAD = "a1" * 32
+
+
+def _run_config() -> dict[str, object]:
+    """Shape of ``Ledger.research_run(run_id)["config"]`` (lab.research.runs.start_research_run)."""
+    return {
+        "criteria": {},
+        "budget": {},
+        "lab": {
+            "fingerprint": "b2" * 32,
+            "values": {
+                "costs": {
+                    "fee_rate": 0.001,
+                    "slippage_rate": 0.0005,
+                    "slippage_vol_mult": 0.1,
+                    "slippage_cap": 0.01,
+                },
+                "stress_factors": [2.0, 4.0],
+                "splits": {
+                    "design_start": "2019-01-01T00:00:00",
+                    "holdout_start": "2025-10-01T00:00:00+00:00",
+                    "holdout_budget": 3,
+                    "wf_train_months": 24,
+                    "wf_test_months": 6,
+                    "wf_step_months": 6,
+                    "wf_anchored": False,
+                },
+                "universe": {
+                    "quote": "USDT",
+                    "top_n": 30,
+                    "volume_window_days": 30,
+                    "portfolio": {"impact_coef": 0.5},
+                },
+            },
+        },
+        "universe_manifest": {"file": "manifest.json", "sha256": "c3" * 32},
+        "derivatives": {"manifest_sha256": "d4" * 32, "series": {"a": {}, "b": {}}},
+    }
+
+
+def _chain(ok: bool = True, bad: int | None = None, error: str | None = None) -> dict[str, object]:
+    return {
+        "run_id": RUN,
+        "ok": ok,
+        "n_trials": 42,
+        "head": HEAD if ok else None,
+        "first_bad_trial_id": bad,
+        "error": error,
+    }
+
+
+def _full_summary(outcome: str = "no_edge", **kw: object) -> RunSummary:
+    full: dict[str, object] = {
+        "run_config": _run_config(),
+        "ledger_chain": _chain(),
+        "ledger_path": "lab/data/ledger.db",
+    }
+    return _summary(outcome, **{**full, **kw})
+
+
+def _checklist(md: str) -> list[str]:
+    block = md[md.index("### Reporting checklist") :].split("\n### ")[0]
+    return [x for x in block.splitlines() if x.startswith("- **")]
+
+
+def test_checklist_constant_order() -> None:
+    assert [k for k, _ in REPORTING_CHECKLIST] == [
+        "data_universe",
+        "time_split",
+        "action_semantics",
+        "execution_costs",
+        "leakage_audit",
+        "artifacts",
+        "adaptation",
+    ]
+    assert [t for _, t in REPORTING_CHECKLIST] == CHECKLIST_TITLES
+
+
+def test_checklist_is_first_section_of_report() -> None:
+    md = render_report(_full_summary())
+    assert md.startswith("## End-of-run report")
+    assert "## Reporting checklist" in md
+    headings = [x for x in md.splitlines() if x.startswith("### ")]
+    assert headings[0] == "### Reporting checklist"
+    assert md.index("### Reporting checklist") < md.index("### Outcome")
+
+
+def test_checklist_titles_in_order_one_line_each_with_fields() -> None:
+    lines = _checklist(render_report(_full_summary()))
+    assert [x.split("**")[1] for x in lines] == CHECKLIST_TITLES
+    for line in lines:
+        fields = line.split("fields: ", 1)[1]
+        assert re.search(r"`[a-z_]+(?:\.[A-Za-z_]+)+`|`[a-z_]+`", fields), line
+
+
+def test_checklist_values_from_frozen_config() -> None:
+    lines = dict(zip(CHECKLIST_TITLES, _checklist(render_report(_full_summary())), strict=True))
+    data = lines["Data and universe"]
+    assert "BTCUSDT, ETHUSDT on 1h bars" in data and "top 30 USDT" in data
+    assert "c3" * 32 in data and "d4" * 32 in data and "2 series" in data
+    split = lines["Time split and leakage"]
+    assert "design window from `2019-01-01` up to `2025-10-01`" in split
+    assert "holdout checks used 1 of 2" in split and "rolling, train 24 / test 6 / step 6" in split
+    assert "`research_runs.config_json.lab.values.splits.holdout_start`" in split
+    assert "bar t's close and fills at bar t+1's open" in lines["Action semantics"]
+    costs = lines["Execution and costs"]
+    assert "fee 0.001 (0.1%) per side" in costs and "slippage 0.0005 (0.05%)" in costs
+    assert "capped at 0.01 (1%)" in costs and "cost stress x2, x4" in costs
+    assert "`trials.costs_json`" in costs
+    art = lines["Artifacts"]
+    assert f"run `{RUN}`" in art and "ledger `lab/data/ledger.db`" in art
+    assert f"chain head `{HEAD}`" in art and "f" * 64 in art and "b2" * 32 in art
+    adapt = lines["Adaptation"]
+    assert "2 idea(s), 1 plan(s) designed" in adapt
+    assert "LLM proposals 7 of 30" in adapt and "model spend USD 1.25 of 5.00" in adapt
+    assert "DSR N 120" in adapt and "frozen at start_run" in adapt
+
+
+def test_checklist_chain_ok() -> None:
+    leak = _checklist(render_report(_full_summary()))[4]
+    assert f"ledger hash chain verified over 42 trial(s), head `{HEAD}`" in leak
+    assert "BROKEN" not in leak
+
+
+def test_checklist_chain_broken_is_loud() -> None:
+    summary = _full_summary(ledger_chain=_chain(ok=False, bad=17, error="trial 17 hash mismatch"))
+    lines = _checklist(render_report(summary))
+    assert "**CHAIN BROKEN at trial 17**" in lines[4]
+    assert "verifier error: trial 17 hash mismatch" in lines[5]
+    assert "chain head not recorded" in lines[5]
+
+
+def test_checklist_chain_error_withheld_when_guard_would_trip() -> None:
+    summary = _full_summary(
+        ledger_chain=_chain(ok=False, bad=3, error="holdout sharpe 1.4 row changed")
+    )
+    md = render_report(summary)
+    assert "1.4" not in md and "withheld by the journal leak guard" in md
+    guard_holdout(md, per_line=True)
+
+
+def test_checklist_chain_not_verified() -> None:
+    lines = _checklist(render_report(_summary()))
+    assert "ledger hash chain not verified" in lines[4]
+    assert "BROKEN" not in lines[4]
+
+
+def test_checklist_missing_values_say_not_recorded() -> None:
+    lines = dict(zip(CHECKLIST_TITLES, _checklist(render_report(_summary())), strict=True))
+    assert "manifest sha256 not recorded" in lines["Data and universe"]
+    assert "design window from not recorded up to not recorded" in lines["Time split and leakage"]
+    assert "fee not recorded per side" in lines["Execution and costs"]
+    art = lines["Artifacts"]
+    assert "ledger not recorded" in art and "journal not recorded" in art
+    assert "lab.toml fingerprint not recorded" in art
+    # nothing invented: no cost or date appears without a frozen config
+    joined = "\n".join(lines.values())
+    assert "0.001" not in joined and "2025-10-01" not in joined
+
+
+def test_checklist_counts_invalid_designer_outputs() -> None:
+    from_usage = _full_summary(used={**_used(), "invalid_outputs": 2})
+    assert "2 invalid designer output(s) (`used.invalid_outputs`)" in render_report(from_usage)
+    from_notes = _full_summary(notes=["designer returned an invalid plan: bad feature"])
+    assert "1 invalid designer output(s) named in the notes" in render_report(from_notes)
+
+
+def test_finish_full_report_passes_guard_and_names_journal(tmp_path: Path) -> None:
+    j = _journal(tmp_path)
+    j.log_holdout_spent(9, "c0ffee12", "candidate")
+    j.finish(_full_summary("candidate", candidates=[_candidate()]))
+    text = j.path.read_text()
+    guard_holdout(text.split("## End-of-run report", 1)[1], per_line=True)
+    art = next(x for x in text.splitlines() if x.startswith("- **Artifacts**"))
+    # outside the repo the journal is named by file name only, never a home-directory path
+    assert f"journal `{j.path.name}`" in art and str(tmp_path) not in text

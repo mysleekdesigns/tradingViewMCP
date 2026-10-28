@@ -15,6 +15,13 @@ Dedupe has three layers, cheapest first:
 
 A duplicate is not inserted; its sources are appended to the original idea so provenance is
 kept, and :class:`AddResult` names the original.
+
+Failure tags (PLAN.md Phase 13): when the orchestrator abandons an idea after a Critic verdict,
+the Critic's reasons are stored as tags from the closed vocabulary :data:`FAILURE_TAGS` in the
+``idea_failure_tags`` table (an agents-only migration, :data:`FAILURE_TAGS_SCHEMA`, applied on
+open beside the shared ``IDEAS_SCHEMA``). :meth:`IdeaLibrary.family_failure_tags` counts them
+per family across every run, so the Designer sees why earlier plans in the same family failed
+before it proposes a new one. Tags are our own enum values, never scout text.
 """
 
 from __future__ import annotations
@@ -34,12 +41,16 @@ from typing import Any
 from lab.research.contract import IDEA_STATUSES, IDEAS_DB_PATH, IDEAS_SCHEMA
 
 __all__ = [
+    "FAILURE_TAGS",
+    "FAILURE_TAGS_SCHEMA",
+    "FAILURE_TAG_MEANINGS",
     "NEAR_DUPLICATE_JACCARD",
     "AddResult",
     "DuplicateChecker",
     "Idea",
     "IdeaLibrary",
     "SourceRecord",
+    "family_key",
     "jaccard",
     "normalise_text",
 ]
@@ -50,6 +61,48 @@ NEAR_DUPLICATE_JACCARD = 0.8
 TERMINAL_STATUSES: frozenset[str] = frozenset({"dead"})
 
 _NON_WORD = re.compile(r"[^0-9a-z]+")
+
+# Why a plan was abandoned, as the Critic tags it (one closed vocabulary shared by the Critic's
+# output schema, the idea library, and the Designer prompt). ``other`` is the fallback when the
+# Critic gave no tag.
+FAILURE_TAGS: tuple[str, ...] = (
+    "cost_bound",
+    "regime_only",
+    "few_trades",
+    "beta_only",
+    "parameter_spike",
+    "no_signal",
+    "walk_forward_decay",
+    "fragile_costs",
+    "other",
+)
+FAILURE_TAG_MEANINGS: dict[str, str] = {
+    "cost_bound": "gross edge exists but fees and slippage eat it (net Sharpe near or below zero)",
+    "regime_only": "works in one regime or period only (one bull run, one crash)",
+    "few_trades": "too few trades for the statistics to mean anything",
+    "beta_only": "returns are explained by exposure to the market (lagged or levered buy-and-hold)",
+    "parameter_spike": "only an isolated parameter spike works; neighbours do not",
+    "no_signal": "no edge at all: indistinguishable from the random-entry null",
+    "walk_forward_decay": "in-sample edge that decays or vanishes out of sample in walk-forward",
+    "fragile_costs": "positive at base costs but negative under the cost stress (x2 costs)",
+    "other": "none of the above; the Critic's reasons say why",
+}
+
+# Agents-only migration, applied after the shared IDEAS_SCHEMA (the lab API ignores it). One row
+# per (idea, run, tag): re-recording the same verdict is idempotent.
+FAILURE_TAGS_SCHEMA: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS idea_failure_tags (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        idea_id     INTEGER NOT NULL REFERENCES ideas(id),
+        run_id      TEXT,
+        created_at  TEXT NOT NULL,
+        tag         TEXT NOT NULL,
+        UNIQUE (idea_id, run_id, tag)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idea_failure_tags_idea ON idea_failure_tags (idea_id)",
+)
 
 _IDEA_COLUMNS = (
     "id, created_at, run_id, family, title, hypothesis, rationale, dedupe_key, status, "
@@ -104,6 +157,12 @@ def normalise_text(text: str) -> str:
     return " ".join(_NON_WORD.sub(" ", text.lower()).split())
 
 
+def family_key(family: str) -> str:
+    """The family as compared across runs: :func:`normalise_text` (case, punctuation, and
+    whitespace do not split a family)."""
+    return normalise_text(family)
+
+
 def jaccard(a: str, b: str) -> float:
     """Token-set Jaccard similarity of two texts after :func:`normalise_text`."""
     ta, tb = set(normalise_text(a).split()), set(normalise_text(b).split())
@@ -136,7 +195,7 @@ class IdeaLibrary:
             # The lab API reads this file while a run writes it.
             self._conn.execute("PRAGMA journal_mode = WAL")
         with self._conn:
-            for statement in IDEAS_SCHEMA:
+            for statement in (*IDEAS_SCHEMA, *FAILURE_TAGS_SCHEMA):
                 self._conn.execute(statement)
 
     # ------------------------------------------------------------------ lifecycle
@@ -300,7 +359,59 @@ class IdeaLibrary:
                     (json.dumps(hashes), idea_id),
                 )
 
+    def add_failure_tags(
+        self, idea_id: int, tags: Sequence[str], *, run_id: str | None = None
+    ) -> None:
+        """Record why ``idea_id`` was abandoned, as tags from :data:`FAILURE_TAGS`. Every tag is
+        validated before anything is written; duplicates (same idea, run, and tag) are ignored.
+        ``run_id`` defaults to the idea's own run."""
+        if isinstance(tags, str):
+            raise ValueError("tags must be a sequence of tag names, not a single string")
+        clean: list[str] = []
+        for tag in tags:
+            if tag not in FAILURE_TAGS:
+                raise ValueError(f"unknown failure tag {tag!r}; expected one of {FAILURE_TAGS}")
+            if tag not in clean:
+                clean.append(tag)
+        row = self._conn.execute("SELECT run_id FROM ideas WHERE id = ?", (idea_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"no idea with id {idea_id}")
+        run = run_id if run_id is not None else row["run_id"]
+        now = _now()
+        with self._conn:
+            for tag in clean:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO idea_failure_tags (idea_id, run_id, created_at, tag)"
+                    " VALUES (?, ?, ?, ?)",
+                    (idea_id, run, now, tag),
+                )
+
     # ------------------------------------------------------------------ reads
+
+    def failure_tags(self, idea_id: int) -> list[str]:
+        """The idea's failure tags, in the order first recorded, each once."""
+        rows = self._conn.execute(
+            "SELECT tag FROM idea_failure_tags WHERE idea_id = ? ORDER BY id", (idea_id,)
+        ).fetchall()
+        return list(dict.fromkeys(str(r["tag"]) for r in rows))
+
+    def family_failure_tags(self, family: str) -> dict[str, int]:
+        """``{tag: number of ideas}`` for every idea in ``family`` (compared by
+        :func:`family_key`) across every run. An idea counts once per tag, however many runs
+        tagged it. Most frequent first, ties in :data:`FAILURE_TAGS` order."""
+        key = family_key(family)
+        if not key:
+            return {}
+        rows = self._conn.execute(
+            "SELECT DISTINCT t.idea_id, t.tag, i.family FROM idea_failure_tags t"
+            " JOIN ideas i ON i.id = t.idea_id"
+        ).fetchall()
+        counts: dict[str, int] = {}
+        for r in rows:
+            if family_key(str(r["family"])) == key:
+                counts[str(r["tag"])] = counts.get(str(r["tag"]), 0) + 1
+        order = {t: i for i, t in enumerate(FAILURE_TAGS)}
+        return dict(sorted(counts.items(), key=lambda kv: (-kv[1], order.get(kv[0], 99))))
 
     def _sources_for(self, idea_id: int) -> list[SourceRecord]:
         rows = self._conn.execute(

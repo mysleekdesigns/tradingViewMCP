@@ -21,19 +21,26 @@ import research.paper.compare as cmp_mod
 from lab.config import LabConfig, load_config
 from lab.engine import run_signals
 from lab.plan import compile_plan, parse_plan
-from lab.types import Trade
+from lab.types import CostModel, Trade
 from research.paper.compare import (
+    EXIT_KIND_BY_REASON,
+    LAB_EXIT_KIND,
     MIN_FORWARD_TRADES,
     ForwardTrade,
     backtest_same_period,
     backtest_stats,
     compare,
+    comparison_path,
     forward_stats,
     match_entries,
     public_kline_loader,
     read_dryrun_trades,
+    render_verdict_markdown,
+    replay_trades,
     write_comparison,
+    write_missing_comparison,
 )
+from research.paper.protocol import Check, Verdict, WeekShortfall
 
 T0 = pd.Timestamp("2026-09-01", tz="UTC")
 HOUR = pd.Timedelta(hours=1)
@@ -384,6 +391,84 @@ def test_backtest_same_period_edge_cases(cfg: LabConfig) -> None:
     assert out == []
 
 
+def test_replay_trades_matches_backtest_same_period_and_is_causal(cfg: LabConfig) -> None:
+    """The protocol's timing match replays the plan flat at ``start`` on the same candles; the
+    replay is what backtest_same_period returns, and bars at/after ``end`` change nothing."""
+    candles = synthetic_candles(2000, seed=5, start=T0 - pd.Timedelta(days=40))
+    start, end = T0, T0 + pd.Timedelta(days=30)
+    direct = replay_trades(PLAN, candles, start=start, end=end, costs=cfg.costs)
+    via_loader = backtest_same_period(
+        PLAN, start=start, end=end, cfg=cfg, loader=lambda *a: candles
+    )
+    assert direct == via_loader and direct
+    later = candles.copy()
+    later.loc[later.index >= end, ["open", "high", "low", "close"]] *= 0.5
+    assert replay_trades(PLAN, later, start=start, end=end, costs=cfg.costs) == direct
+    # the replay starts flat: nothing is entered before start
+    assert all(t.entry_time >= start for t in direct)
+
+
+def test_backtest_same_period_uses_the_frozen_cost_model(cfg: LabConfig) -> None:
+    candles = synthetic_candles(2000, seed=5, start=T0 - pd.Timedelta(days=40))
+    start, end = T0, T0 + pd.Timedelta(days=30)
+    frozen = CostModel(fee_rate=0.0, slippage_rate=0.002, slippage_vol_mult=0.0, slippage_cap=0.01)
+    trades = backtest_same_period(
+        PLAN, start=start, end=end, cfg=cfg, loader=lambda *a: candles, costs=frozen
+    )
+    first = trades[0]
+    assert first.entry_price == pytest.approx(float(candles.loc[first.entry_time, "open"]) * 1.002)
+
+
+def test_render_verdict_markdown_shows_coverage_alerts_and_week_flags() -> None:
+    verdict = Verdict(
+        verdict="continue",
+        mode="implementation_only",
+        headline="continue: incomplete data: 10 of 20 bars, 1 fills unjudged",
+        reasons=("incomplete data: 10 of 20 bars, 1 fills unjudged",),
+        fail_kinds=(),
+        alerts=("week 0 median shortfall +12.0 bps > 5.0 bps over 3 fills (alert only)",),
+        checks=(Check("entries", "pending", 2, 1, 5, "2 entries so far"),),
+        weeks=(WeekShortfall(0, 0, 3, 12.0, True, True, False),),
+        elapsed_days=3.3,
+        at_decision=True,
+        data_complete=False,
+        bars_expected=20,
+        bars_present=10,
+        fills_unjudged=1,
+        protocol_sha256="ab" * 32,
+    )
+    md = "\n".join(render_verdict_markdown(verdict))
+    failed = "\n".join(render_verdict_markdown(replace(verdict, fail_kinds=("regime",))))
+    assert "Fail kind: regime." in failed
+    assert "## Protocol verdict: continue" in md
+    assert "data 10 of 20 bars, 1 fills unjudged (incomplete)" in md
+    assert "- Alert: week 0 median shortfall +12.0 bps" in md
+    assert "| 0 | 3 | +12.0 | yes | yes | no |" in md
+
+
+def test_exit_kinds_pair_freqtrade_reasons_with_lab_exits() -> None:
+    """C-A: a paper exit only matches a lab exit of the same kind; unknown reasons never do."""
+    assert {EXIT_KIND_BY_REASON[r] for r in ("exit_signal", "sell_signal")} == {"signal"}
+    assert EXIT_KIND_BY_REASON["stop_loss"] == LAB_EXIT_KIND["stop_loss"] == "stop"
+    assert EXIT_KIND_BY_REASON["roi"] == LAB_EXIT_KIND["take_profit"] == "target"
+    assert "force_exit" not in EXIT_KIND_BY_REASON
+
+
+def test_comparison_path_is_known_before_writing(tmp_path: Path) -> None:
+    fw, bt = _daily(6, 0.009)
+    result = compare(
+        fw,
+        bt,
+        interval="1h",
+        candles=flat_candles(30),
+        candidate="c1",
+        now=datetime(2026, 10, 24, 9, 0, tzinfo=UTC),
+    )
+    path = comparison_path(result, tmp_path)
+    assert path == tmp_path / "c1" / "comparison-2026-10-24.json" and not path.exists()
+    assert write_comparison(result, tmp_path) == path
+
+
 # --------------------------------------------------------------------------- writing
 
 
@@ -448,12 +533,141 @@ def test_public_kline_loader_pages_parses_and_drops_forming_bar(
     assert not any(math.isnan(v) for v in frame["high"])
 
 
+def _kline_rows(n: int) -> list[list[Any]]:
+    ms, hour_ms = int(T0.timestamp() * 1000), 3_600_000
+    return [
+        [ms + i * hour_ms, "100", "101", "99", "100", "1", ms + (i + 1) * hour_ms - 1]
+        for i in range(n)
+    ]
+
+
+def _scripted(responses: list[httpx.Response]) -> tuple[httpx.Client, list[httpx.Request]]:
+    seen: list[httpx.Request] = []
+    queue = iter(responses)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return next(queue)
+
+    return httpx.Client(transport=httpx.MockTransport(handler)), seen
+
+
+def test_public_kline_loader_retries_429_honouring_retry_after() -> None:
+    client, seen = _scripted(
+        [
+            httpx.Response(429, headers={"Retry-After": "7"}),
+            httpx.Response(429),  # no Retry-After: the doubling default (2 s x 2)
+            httpx.Response(200, json=_kline_rows(3)),
+        ]
+    )
+    waits: list[float] = []
+    now = (T0 + 10 * HOUR).to_pydatetime()
+    loader = public_kline_loader(since=T0, client=client, now=now, sleep=waits.append)
+    frame = loader("BTCUSDT", "1h", T0 + 3 * HOUR)
+    assert waits == [7.0, 4.0] and len(seen) == 3
+    assert list(frame.index) == [T0 + i * HOUR for i in range(3)]
+
+
+def test_public_kline_loader_never_retries_418() -> None:
+    client, seen = _scripted([httpx.Response(418, headers={"Retry-After": "1"})])
+    waits: list[float] = []
+    loader = public_kline_loader(since=T0, client=client, sleep=waits.append)
+    with pytest.raises(httpx.HTTPStatusError, match="HTTP 418") as info:
+        loader("BTCUSDT", "1h", T0 + 3 * HOUR)
+    assert info.value.response.status_code == 418
+    assert len(seen) == 1 and waits == []
+
+
+def test_public_kline_loader_gives_up_after_bounded_retries() -> None:
+    client, seen = _scripted([httpx.Response(429, headers={"Retry-After": "1"})] * 10)
+    waits: list[float] = []
+    loader = public_kline_loader(since=T0, client=client, sleep=waits.append)
+    with pytest.raises(httpx.HTTPStatusError, match=r"HTTP 429.*4 attempt"):
+        loader("BTCUSDT", "1h", T0 + 3 * HOUR)
+    assert len(seen) == 1 + cmp_mod.KLINE_MAX_RETRIES and waits == [1.0, 1.0, 1.0]
+
+
+def test_public_kline_loader_caps_the_total_wait() -> None:
+    """A Retry-After that would push the load's total wait past the cap is not waited for."""
+    client, seen = _scripted([httpx.Response(429, headers={"Retry-After": "45"})] * 3)
+    waits: list[float] = []
+    loader = public_kline_loader(since=T0, client=client, sleep=waits.append)
+    with pytest.raises(httpx.HTTPStatusError, match="HTTP 429"):
+        loader("BTCUSDT", "1h", T0 + 3 * HOUR)
+    assert waits == [45.0] and sum(waits) <= cmp_mod.KLINE_MAX_WAIT_S and len(seen) == 2
+    client2, _ = _scripted([httpx.Response(429, headers={"Retry-After": "3600"})])
+    with pytest.raises(httpx.HTTPStatusError, match="HTTP 429"):
+        public_kline_loader(since=T0, client=client2, sleep=waits.append)(
+            "BTCUSDT", "1h", T0 + 3 * HOUR
+        )
+    assert waits == [45.0]  # an hour-long Retry-After is never slept
+
+
+def _result(candidate: str = "c1") -> Any:
+    fw, bt = _daily(6, 0.009)
+    return compare(
+        fw,
+        bt,
+        interval="1h",
+        candles=flat_candles(30),
+        candidate=candidate,
+        now=datetime(2026, 10, 24, 9, 0, tzinfo=UTC),
+    )
+
+
+def test_atomic_write_uses_a_unique_fsynced_tmp_and_keeps_the_old_file_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _result()
+    path = comparison_path(result, tmp_path)
+    path.parent.mkdir(parents=True)
+    # the old fixed "<name>.tmp" name is taken (another writer, or a stale leftover): no clash
+    (path.parent / (path.name + ".tmp")).mkdir()
+    synced: list[int] = []
+    real_fsync = cmp_mod.os.fsync
+    monkeypatch.setattr(cmp_mod.os, "fsync", lambda fd: (synced.append(fd), real_fsync(fd)))
+    assert write_comparison(result, tmp_path) == path
+    assert json.loads(path.read_text())["candidate"] == "c1"
+    assert len(synced) >= 2  # both files fsynced before the rename
+    old = path.read_text()
+
+    def broken_replace(src: Any, dst: Any) -> None:
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(cmp_mod.os, "replace", broken_replace)
+    with pytest.raises(OSError, match="rename failed"):
+        write_comparison({**result, "notes": ["changed"]}, tmp_path)
+    assert path.read_text() == old  # never truncated or lost
+    assert not list(path.parent.glob(".comparison-*"))  # the temporary file is cleaned up
+
+
+def test_write_missing_comparison_creates_only_missing_files(tmp_path: Path) -> None:
+    result = _result()
+    folder = tmp_path / "c1"
+    name = "comparison-2026-01-20.json"  # the journal's name, not today's
+    written = write_missing_comparison(result, tmp_path, name=name)
+    assert [p.name for p in written] == [name, "comparison-2026-01-20.md"]
+    assert json.loads((folder / name).read_text())["candidate"] == "c1"
+    (folder / name).write_text("kept\n")
+    (folder / name).with_suffix(".md").unlink()
+    written = write_missing_comparison(result, tmp_path, name=name)
+    assert [p.name for p in written] == ["comparison-2026-01-20.md"]
+    assert (folder / name).read_text() == "kept\n"  # never overwritten
+    assert write_missing_comparison(result, tmp_path, name=name) == []
+    for bad in ("../x.json", "comparison-2026-01-20.json/../../y", "notes.json"):
+        with pytest.raises(ValueError, match="not a comparison file name"):
+            write_missing_comparison(result, tmp_path, name=bad)
+
+
 # --------------------------------------------------------------------------- CLI
 
 
-def test_cli_compare_writes_a_comparison(
+def test_cli_compare_needs_a_registered_protocol(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """A bot prepared without the pre-registered protocol (Phase 13) is never judged: compare
+    refuses instead of writing a comparison. The full prepare -> compare flow is tested in
+    test_paper_protocol.py."""
     import paper_trade
 
     from research.paper.freqtrade import prepare_candidate
@@ -469,12 +683,10 @@ def test_cli_compare_writes_a_comparison(
     candles = synthetic_candles(2000, seed=5, start=T0 - pd.Timedelta(days=40))
     monkeypatch.setattr(paper_trade, "default_loader", lambda cfg: lambda *a: candles)
     argv = ["--paper-dir", str(tmp_path), "compare", "--candidate", "cli", "--source", "archive"]
-    assert paper_trade.main([*argv, "--start", "2026-09-01", "--end", "2026-10-01"]) == 0
-    assert "verdict: insufficient_data" in capsys.readouterr().out
-    (written,) = (tmp_path / "cli").glob("comparison-*.json")
-    data = json.loads(written.read_text())
-    assert data["candidate"] == "cli" and data["forward"]["n_trades"] == 1
-    assert data["period_start"] == int(T0.timestamp())
+    assert paper_trade.main([*argv, "--end", "2026-10-01"]) == 2
+    err = capsys.readouterr().err
+    assert "protocol.json not found" in err and "no registered protocol" in err
+    assert not list((tmp_path / "cli").glob("comparison-*"))
 
 
 def test_cli_compare_without_prepare_fails_cleanly(

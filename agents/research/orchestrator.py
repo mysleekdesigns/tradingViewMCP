@@ -31,6 +31,48 @@ Dollars fail closed: each call's cap is persisted as a reservation before it sta
 to the actual cost after; an unknown cost, a call that raises, or a crash mid-call (charged on
 ``--resume``) costs the full cap.
 
+Structured outputs (PLAN.md Phase 13): every role's output schema is JSON Schema draft-07
+(``ROLE_SCHEMAS``). The Designer's ``plan`` is the lab's own plan schema (single-symbol or
+portfolio; ``{}`` means "not expressible"), and the Critic returns ``{verdict, reasons,
+evidence}`` where ``evidence`` points at the report/ledger fields behind the verdict, plus
+optional ``failure_tags``. The SDK validates and retries; :func:`validate_output` is the local
+second check. Every Designer attempt whose output failed the schema (``RoleResult.
+invalid_outputs``, plus one if the local check rejects the final output) is counted toward the
+proposal budget (``BudgetTracker.invalid_proposals``) and kept per idea in the resume sidecar
+(``IdeaProgress.context["invalid_outputs"]``), so ``--resume`` restores it. A Designer call
+with no valid output abandons the idea (the SDK already retried); the run continues.
+
+Tool-setup failures are run failures: when a role session's ``init`` tool list lacks a role tool
+or lists a forbidden one (``RoleResult.error`` starts with :data:`INIT_MISSING_ERROR` or
+:data:`INIT_FORBIDDEN_ERROR`), :meth:`Orchestrator._call` charges the call and raises
+:class:`InitToolsError`, as a Scout failure does. The run ends ``error`` and stays resumable;
+the idea in progress is neither abandoned nor tagged, since a broken tool setup says nothing
+about the idea.
+
+Resume at the Critic: before each Critic call the round's tested plan (hash, plan, the
+Designer's notes and trial ids, the criteria rows the Critic sees, and the triage text) is
+saved in ``IdeaProgress.context["pending_critic"]`` and persisted. If the run stops before the
+verdict is handled (e.g. a Critic-side :class:`InitToolsError`), ``--resume`` goes straight to
+that plan's Critic review: no second Designer call, no new proposal or backtests, no change to
+DSR's N. As soon as the Critic call returns a valid output, that output is stored in the record
+(``critic_output``) and persisted, so a crash before the verdict is handled resumes with the SAME
+verdict ("resume: reusing the recorded Critic verdict"): no second paid Critic call, no chance
+of a different verdict. The record is cleared and persisted as soon as the Critic's verdict
+(with its lessons and journal lines) is recorded, before refine/abandon/promising runs: it can
+never send a plan whose cross-check or holdout already started back to the Critic, and a crash
+after the verdict resumes as before (the round is designed again).
+
+Failure tags: when an idea is abandoned after a Critic verdict (Critic abandoned, or
+refinements used up), the Critic's ``failure_tags`` (``["other"]`` when it gave none) are stored
+in the idea library, and the next Designer prompt for an idea in the same family lists the
+family's tag counts across every run. Nothing is tagged when the Critic gave no verdict
+(unavailable or invalid output), when the Designer failed or found the idea not expressible
+(a tooling or vocabulary problem, not evidence about the family), or when a holdout check
+decided the idea (tags never carry holdout information into a Designer prompt).
+
+At the end of the run the ledger's per-run hash chain is verified (``Ledger.verify_chain``)
+and passed to the journal's report (``RunSummary.ledger_chain``) with the frozen run config.
+
 Untrusted text: everything the Scout returns (title, family, hypothesis text, and source
 excerpts) is screened (:func:`research.screening.screen_sources`), sanitized, and wrapped in
 untrusted markers before the Designer or Critic sees it. Hypotheses tied to an
@@ -39,8 +81,11 @@ injection-suspected source are dropped entirely.
 
 from __future__ import annotations
 
+import copy
+import inspect
 import json
 import logging
+import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -63,6 +108,7 @@ from lab.research.contract import (
 from lab.research.holdout import HoldoutRefusedError
 from lab.research.runs import frozen_budget, holdout_budget, run_usage, start_research_run
 from research.budget import BudgetExceededError, BudgetTracker
+from research.ideas import FAILURE_TAG_MEANINGS, FAILURE_TAGS
 from research.journal import HOLDOUT_WORD
 from research.screening import sanitize_untrusted
 from research.state import (
@@ -125,18 +171,154 @@ class RoleResult:
     error: str | None
     # True when the SDK did not report the cost and ``cost_usd`` is the charged cap.
     cost_estimated: bool = False
+    # Attempts whose output failed the role's output schema (set by the runner; the
+    # orchestrator adds one when its own check rejects the final output). For the Designer
+    # each one counts toward the proposal budget.
+    invalid_outputs: int = 0
 
 
 class AgentRunner(Protocol):
     async def run(self, req: RoleRequest) -> RoleResult: ...
 
 
+# Error prefixes a runner uses when a session's SDK ``init`` tool list is wrong: a role tool is
+# missing, or a forbidden tool is present. Either is a broken tool setup, never evidence about
+# an idea, so the orchestrator stops the run (:class:`InitToolsError`) instead of abandoning it.
+INIT_MISSING_ERROR = "init tool list missing"
+INIT_FORBIDDEN_ERROR = "init tool list has forbidden tools"
+
+
+def is_init_tools_error(error: str | None) -> bool:
+    """True when a :class:`RoleResult` error comes from the runner's ``init`` tool-list check."""
+    return bool(error) and str(error).startswith((INIT_MISSING_ERROR, INIT_FORBIDDEN_ERROR))
+
+
+class InitToolsError(RuntimeError):
+    """A role session's ``init`` tool list failed the runner's check. A broken tool setup says
+    nothing about the idea, so this is a RUN failure (outcome ``error``, resumable with
+    ``--resume``), never an idea verdict: the idea's status and failure tags are left untouched.
+    A Critic-side failure comes after the round's plan was tested; resume continues with that
+    plan's Critic review (``pending_critic``)."""
+
+    def __init__(self, role: str, error: str, run_id: str) -> None:
+        self.role = role
+        self.error = error
+        self.run_id = run_id
+        super().__init__(f"{role} session {error}")
+
+
 # --------------------------------------------------------------------------- output schemas
+
+DRAFT_07 = "http://json-schema.org/draft-07/schema#"
+
+# Every keyword draft-07 defines (validation, applicators, annotations). The role schemas use
+# only these; :func:`to_draft07` converts the few 2019-09/2020-12 spellings that have a draft-07
+# equivalent and refuses the rest.
+DRAFT_07_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "$schema", "$id", "$ref", "$comment", "title", "description", "default", "examples",
+        "readOnly", "writeOnly", "definitions", "type", "enum", "const", "multipleOf",
+        "maximum", "exclusiveMaximum", "minimum", "exclusiveMinimum", "maxLength",
+        "minLength", "pattern", "items", "additionalItems", "maxItems", "minItems",
+        "uniqueItems", "contains", "maxProperties", "minProperties", "required", "properties",
+        "patternProperties", "additionalProperties", "dependencies", "propertyNames", "if",
+        "then", "else", "allOf", "anyOf", "oneOf", "not", "format", "contentMediaType",
+        "contentEncoding",
+    }
+)  # fmt: skip
+# Keywords whose value is a map of name -> subschema / a subschema / a list of subschemas.
+_SCHEMA_MAPS = ("properties", "patternProperties", "definitions")
+_SCHEMA_ONE = (
+    "additionalProperties", "additionalItems", "propertyNames", "contains", "not", "if", "then",
+    "else",
+)  # fmt: skip
+_SCHEMA_LISTS = ("allOf", "anyOf", "oneOf")
+# Values that are data, never subschemas.
+_DATA_KEYWORDS = ("enum", "const", "default", "examples", "required")
+
+
+def to_draft07(schema: Mapping[str, Any], *, top: bool = True) -> dict[str, Any]:
+    """A deep copy of ``schema`` as JSON Schema draft-07: the top-level ``$schema`` becomes
+    :data:`DRAFT_07`, any nested ``$schema`` is dropped, ``$defs`` becomes ``definitions`` (and
+    ``#/$defs/`` refs follow), ``dependentRequired`` / ``dependentSchemas`` become
+    ``dependencies``, and ``prefixItems`` becomes the array form of ``items``. Any other keyword
+    draft-07 does not define raises ``ValueError`` (a lab schema change must be looked at, not
+    sent to the SDK half-understood)."""
+    out: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "$schema":
+            continue
+        if key == "$defs":
+            key = "definitions"
+        if key in ("dependentRequired", "dependentSchemas"):
+            deps = out.setdefault("dependencies", {})
+            for name, sub in value.items():
+                deps[name] = list(sub) if key == "dependentRequired" else to_draft07(sub, top=False)
+            continue
+        if key == "prefixItems":
+            if "items" in schema and schema["items"] is not False:
+                out["additionalItems"] = (
+                    to_draft07(schema["items"], top=False)
+                    if isinstance(schema["items"], Mapping)
+                    else schema["items"]
+                )
+            elif schema.get("items") is False:
+                out["additionalItems"] = False
+            out["items"] = [to_draft07(sub, top=False) for sub in value]
+            continue
+        if key == "items" and "prefixItems" in schema:
+            continue  # handled with prefixItems
+        if key not in DRAFT_07_KEYWORDS:
+            raise ValueError(f"JSON Schema keyword {key!r} has no draft-07 equivalent")
+        if key == "$ref" and isinstance(value, str):
+            out[key] = value.replace("#/$defs/", "#/definitions/")
+        elif key in _SCHEMA_MAPS or key == "dependencies":
+            out[key] = {
+                name: (
+                    to_draft07(sub, top=False) if isinstance(sub, Mapping) else copy.deepcopy(sub)
+                )
+                for name, sub in value.items()
+            }
+        elif key in _SCHEMA_ONE and isinstance(value, Mapping):
+            out[key] = to_draft07(value, top=False)
+        elif key in _SCHEMA_LISTS:
+            out[key] = [to_draft07(sub, top=False) for sub in value]
+        elif key == "items" and isinstance(value, Mapping):
+            out[key] = to_draft07(value, top=False)
+        elif key == "items" and isinstance(value, list):
+            out[key] = [to_draft07(sub, top=False) for sub in value]
+        else:
+            out[key] = copy.deepcopy(value)
+    if top:
+        out = {"$schema": DRAFT_07, **out}
+    return out
+
+
+def schema_keywords(schema: Any) -> set[str]:
+    """Every keyword used anywhere in ``schema`` (property names and data values excluded)."""
+    found: set[str] = set()
+    if not isinstance(schema, Mapping):
+        return found
+    for key, value in schema.items():
+        found.add(key)
+        if key in _DATA_KEYWORDS:
+            continue
+        if key in (*_SCHEMA_MAPS, "dependencies", "$defs") and isinstance(value, Mapping):
+            for sub in value.values():
+                found |= schema_keywords(sub)
+        elif isinstance(value, Mapping):
+            found |= schema_keywords(value)
+        elif isinstance(value, list):
+            for sub in value:
+                found |= schema_keywords(sub)
+    return found
+
 
 _STR = {"type": "string"}
 _STR_LIST = {"type": "array", "items": _STR}
 
 SCOUT_SCHEMA: dict[str, Any] = {
+    "$schema": DRAFT_07,
     "type": "object",
     "required": ["hypotheses"],
     "properties": {
@@ -174,25 +356,80 @@ SCOUT_SCHEMA: dict[str, Any] = {
     },
 }
 
+# "The idea cannot be expressed with registry features": plan_hash "" and plan {}. Kept as an
+# anyOf branch rather than a separate ``expressible`` flag: the contract (and the orchestrator's
+# not-expressible path) stays as it was, a non-empty plan must still match a lab schema in full,
+# and draft-07 would need if/then to tie a flag to the plan's shape.
+NOT_EXPRESSIBLE_PLAN: dict[str, Any] = {
+    "type": "object",
+    "maxProperties": 0,
+    "description": "{} only when the idea cannot be expressed with registry features "
+    '(then plan_hash is "" and notes say why)',
+}
+
+
+def designer_plan_schemas() -> list[dict[str, Any]]:
+    """The lab's plan schemas as draft-07, single-symbol first then portfolio (the MCP tools
+    route ``{"kind": "portfolio", ...}`` plans to the portfolio pipeline, so the Designer may
+    submit either)."""
+    from lab.plan.portfolio import portfolio_plan_json_schema
+    from lab.plan.schema import plan_json_schema
+
+    return [
+        to_draft07(plan_json_schema(), top=False),
+        to_draft07(portfolio_plan_json_schema(), top=False),
+    ]
+
+
 DESIGNER_SCHEMA: dict[str, Any] = {
+    "$schema": DRAFT_07,
     "type": "object",
     "required": ["plan_hash", "plan", "trial_ids", "notes"],
     "properties": {
-        "plan_hash": _STR,
-        "plan": {"type": "object"},
+        "plan_hash": {**_STR, "description": "the hash the lab returned for this plan"},
+        "plan": {
+            "description": "the final plan exactly as validate_plan accepted it",
+            "anyOf": [*designer_plan_schemas(), NOT_EXPRESSIBLE_PLAN],
+        },
         "trial_ids": {"type": "array", "items": {"type": "integer"}},
         "notes": _STR,
     },
 }
 
+EVIDENCE_SOURCES: tuple[str, ...] = ("get_report", "get_ledger", "get_budget", "prompt")
+
 CRITIC_SCHEMA: dict[str, Any] = {
+    "$schema": DRAFT_07,
     "type": "object",
-    "required": ["verdict", "reasons", "lessons"],
+    "required": ["verdict", "reasons", "evidence"],
     "properties": {
         "verdict": {"type": "string", "enum": ["refine", "abandon", "promising"]},
-        "reasons": _STR_LIST,
+        "reasons": {"type": "array", "items": _STR, "minItems": 1},
+        "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "description": "the report / ledger fields behind the verdict",
+            "items": {
+                "type": "object",
+                "required": ["field", "value"],
+                "properties": {
+                    "field": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "e.g. rows.wf_oos_sharpe.value, adversarial.cost_x2",
+                    },
+                    "value": {"type": "string", "description": "the value as read"},
+                    "source": {"type": "string", "enum": list(EVIDENCE_SOURCES)},
+                },
+            },
+        },
         "lessons": _STR_LIST,
         "biggest_concern": _STR,
+        "failure_tags": {
+            "type": "array",
+            "items": {"type": "string", "enum": list(FAILURE_TAGS)},
+            "uniqueItems": True,
+        },
     },
 }
 
@@ -209,36 +446,165 @@ _JSON_TYPES: dict[str, tuple[type, ...]] = {
     "integer": (int,),
     "number": (int, float),
     "boolean": (bool,),
+    "null": (type(None),),
 }
 
 
-def _type_ok(value: Any, kind: str | None) -> bool:
+def _type_ok(value: Any, kind: Any) -> bool:
     if kind is None:
         return True
+    if isinstance(kind, list):
+        return any(_type_ok(value, k) for k in kind)
     if kind in ("integer", "number") and isinstance(value, bool):
+        return False
+    if kind == "integer" and isinstance(value, float):
+        return math.isfinite(value) and value.is_integer()
+    if kind == "number" and isinstance(value, float) and not math.isfinite(value):
         return False
     return isinstance(value, _JSON_TYPES.get(kind, (object,)))
 
 
+def _is_num(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _json_equal(a: Any, b: Any) -> bool:
+    """JSON equality (``True`` is not ``1``)."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    return bool(a == b)
+
+
+def _kind_name(kind: Any) -> str:
+    return " or ".join(kind) if isinstance(kind, list) else str(kind)
+
+
 def validate_output(output: Any, schema: Mapping[str, Any], path: str = "$") -> list[str]:
-    """Minimal JSON-Schema check (type, required, enum, array items; recursive). Returns a list
-    of error strings, empty when valid. Enough to reject malformed role output."""
-    errors: list[str] = []
+    """Local JSON-Schema draft-07 check of a role output: the keywords the role schemas use
+    (type, enum, const, required, properties, additionalProperties, propertyNames,
+    min/maxProperties, items, min/maxItems, uniqueItems, min/maxLength, pattern, numeric
+    bounds, anyOf, oneOf, allOf, not). Returns a list of error strings, empty when valid. The
+    SDK validates fully; this is the second check."""
     kind = schema.get("type")
     if not _type_ok(output, kind):
-        return [f"{path}: expected {kind}, got {type(output).__name__}"]
-    if "enum" in schema and output not in schema["enum"]:
+        return [f"{path}: expected {_kind_name(kind)}, got {type(output).__name__}"]
+    errors: list[str] = []
+    if "enum" in schema and not any(_json_equal(output, e) for e in schema["enum"]):
         errors.append(f"{path}: {output!r} not one of {schema['enum']}")
-    if kind == "object":
-        for key in schema.get("required", []):
-            if key not in output:
-                errors.append(f"{path}: missing required key {key!r}")
-        for key, sub in schema.get("properties", {}).items():
-            if key in output:
-                errors += validate_output(output[key], sub, f"{path}.{key}")
-    elif kind == "array" and "items" in schema:
+    if "const" in schema and not _json_equal(output, schema["const"]):
+        errors.append(f"{path}: {output!r} is not {schema['const']!r}")
+    if isinstance(output, dict):
+        errors += _validate_object(output, schema, path)
+    elif isinstance(output, list):
+        errors += _validate_array(output, schema, path)
+    elif isinstance(output, str):
+        if "minLength" in schema and len(output) < schema["minLength"]:
+            errors.append(f"{path}: shorter than {schema['minLength']} characters")
+        if "maxLength" in schema and len(output) > schema["maxLength"]:
+            errors.append(f"{path}: longer than {schema['maxLength']} characters")
+        if "pattern" in schema and not re.search(schema["pattern"], output):
+            errors.append(f"{path}: {output!r} does not match {schema['pattern']!r}")
+    elif _is_num(output):
+        errors += _validate_number(output, schema, path)
+    errors += _validate_combinators(output, schema, path)
+    return errors
+
+
+def _validate_object(output: dict[str, Any], schema: Mapping[str, Any], path: str) -> list[str]:
+    errors: list[str] = []
+    for key in schema.get("required", []):
+        if key not in output:
+            errors.append(f"{path}: missing required key {key!r}")
+    if "minProperties" in schema and len(output) < schema["minProperties"]:
+        errors.append(f"{path}: fewer than {schema['minProperties']} properties")
+    if "maxProperties" in schema and len(output) > schema["maxProperties"]:
+        errors.append(f"{path}: more than {schema['maxProperties']} properties")
+    props: Mapping[str, Any] = schema.get("properties", {})
+    patterns: Mapping[str, Any] = schema.get("patternProperties", {})
+    extra = schema.get("additionalProperties", True)
+    names = schema.get("propertyNames")
+    for key, value in output.items():
+        sub = f"{path}.{key}"
+        if isinstance(names, Mapping):
+            errors += [f"{sub}: bad property name: {e}" for e in validate_output(key, names, sub)]
+        matched = False
+        if key in props:
+            matched = True
+            errors += validate_output(value, props[key], sub)
+        for pattern, psub in patterns.items():
+            if re.search(pattern, key):
+                matched = True
+                errors += validate_output(value, psub, sub)
+        if matched:
+            continue
+        if extra is False:
+            errors.append(f"{path}: unexpected key {key!r}")
+        elif isinstance(extra, Mapping):
+            errors += validate_output(value, extra, sub)
+    return errors
+
+
+def _validate_array(output: list[Any], schema: Mapping[str, Any], path: str) -> list[str]:
+    errors: list[str] = []
+    if "minItems" in schema and len(output) < schema["minItems"]:
+        errors.append(f"{path}: fewer than {schema['minItems']} items")
+    if "maxItems" in schema and len(output) > schema["maxItems"]:
+        errors.append(f"{path}: more than {schema['maxItems']} items")
+    if schema.get("uniqueItems"):
+        seen: list[Any] = []
+        for item in output:
+            if any(_json_equal(item, s) for s in seen):
+                errors.append(f"{path}: duplicate item {item!r}")
+                break
+            seen.append(item)
+    items = schema.get("items")
+    if isinstance(items, Mapping):
         for i, item in enumerate(output):
-            errors += validate_output(item, schema["items"], f"{path}[{i}]")
+            errors += validate_output(item, items, f"{path}[{i}]")
+    elif isinstance(items, list):
+        for i, item in enumerate(output):
+            if i < len(items):
+                errors += validate_output(item, items[i], f"{path}[{i}]")
+            elif schema.get("additionalItems") is False:
+                errors.append(f"{path}: more than {len(items)} items")
+            elif isinstance(schema.get("additionalItems"), Mapping):
+                errors += validate_output(item, schema["additionalItems"], f"{path}[{i}]")
+    return errors
+
+
+def _validate_number(output: float, schema: Mapping[str, Any], path: str) -> list[str]:
+    errors: list[str] = []
+    if "minimum" in schema and output < schema["minimum"]:
+        errors.append(f"{path}: {output} < minimum {schema['minimum']}")
+    if "maximum" in schema and output > schema["maximum"]:
+        errors.append(f"{path}: {output} > maximum {schema['maximum']}")
+    if _is_num(schema.get("exclusiveMinimum")) and output <= schema["exclusiveMinimum"]:
+        errors.append(f"{path}: {output} <= exclusiveMinimum {schema['exclusiveMinimum']}")
+    if _is_num(schema.get("exclusiveMaximum")) and output >= schema["exclusiveMaximum"]:
+        errors.append(f"{path}: {output} >= exclusiveMaximum {schema['exclusiveMaximum']}")
+    return errors
+
+
+def _validate_combinators(output: Any, schema: Mapping[str, Any], path: str) -> list[str]:
+    errors: list[str] = []
+    for sub in schema.get("allOf", []):
+        errors += validate_output(output, sub, path)
+    for key in ("anyOf", "oneOf"):
+        if key not in schema:
+            continue
+        branches = [validate_output(output, sub, path) for sub in schema[key]]
+        passing = sum(1 for b in branches if not b)
+        if (key == "anyOf" and passing == 0) or (key == "oneOf" and passing != 1):
+            if passing > 1:
+                errors.append(f"{path}: matches {passing} of the oneOf schemas, expected one")
+                continue
+            closest = min(branches, key=len) if branches else []
+            errors.append(
+                f"{path}: matches none of the {len(branches)} allowed schemas; closest: "
+                + "; ".join(closest[:3])
+            )
+    if isinstance(schema.get("not"), Mapping) and not validate_output(output, schema["not"], path):
+        errors.append(f"{path}: must not match {schema['not']!r}")
     return errors
 
 
@@ -301,11 +667,25 @@ class Collaborators:
                 dict(plan), run_id=run_id, cfg=cfg, ledger=ledger, loader=default_loader(cfg)
             )
 
+        def any_plan_hash(plan: Mapping[str, Any]) -> str:
+            # The MCP tools route {"kind": "portfolio", ...} plans to the portfolio pipeline and
+            # hash them with portfolio_plan_hash; single-symbol plans with plan_hash.
+            from lab.plan import portfolio as pf
+
+            if pf.is_portfolio_plan(plan):
+                checked = pf.validate_portfolio_plan(
+                    dict(plan), interval=str(plan.get("interval", ""))
+                )
+                if not checked.ok or checked.plan is None:
+                    raise ValueError("; ".join(checked.errors) or "invalid portfolio plan")
+                return pf.portfolio_plan_hash(checked.plan)
+            return _plan_hash(parse_plan(dict(plan)))
+
         return cls(
             evaluate_plan=evaluate_plan,
             run_holdout_check=run_holdout_check,
             crosscheck_evidence=crosscheck,
-            plan_hash=lambda plan: _plan_hash(parse_plan(dict(plan))),
+            plan_hash=any_plan_hash,
             has_lab_evidence=lambda ledger, run_id, h: bool(ledger.evidence(run_id, plan_hash=h)),
             screen_sources=screening.screen_sources,
             source_doc=screening.SourceDoc,
@@ -405,6 +785,14 @@ class IdeaStore(Protocol):
 
     def attach_plan(self, idea_id: int, plan_hash: str) -> None: ...
 
+    # Phase 13 failure tags. The loop calls these through ``getattr`` and fails open (a store
+    # without them simply records and shows no tags).
+    def add_failure_tags(
+        self, idea_id: int, tags: Sequence[str], *, run_id: str | None = None
+    ) -> None: ...
+
+    def family_failure_tags(self, family: str) -> dict[str, int]: ...
+
 
 # --------------------------------------------------------------------------- helpers
 
@@ -424,6 +812,117 @@ def _as_dict(obj: Any) -> dict[str, Any]:
     if isinstance(obj, Mapping):
         return dict(obj)
     return {"value": repr(obj)}
+
+
+# Resume record for a Designer round whose Critic review has not been handled yet, kept in
+# ``IdeaProgress.context[PENDING_CRITIC]`` (the resume sidecar is JSON, written with
+# allow_nan=False). Holds only what build_critic_prompt and the verdict handling read.
+PENDING_CRITIC = "pending_critic"
+PENDING_NOTES_CHARS = 2000  # build_critic_prompt shows at most this much of the notes
+PENDING_TRIAGE_CHARS = 2000
+PENDING_ROW_NOTE_CHARS = 200  # criteria_table shows at most this much of a row note
+PENDING_TRIAL_IDS = 50
+
+
+def _json_scalar(value: Any) -> Any:
+    """A JSON-safe stand-in for one criteria value: finite numbers and short strings as they
+    are, anything else (NaN, inf, numpy scalars, objects) as short text."""
+    if value is None or isinstance(value, bool | int | str):
+        return value if not isinstance(value, str) else _short(value, 200)
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    return _short(value, 200)
+
+
+def critic_report_view(report: Mapping[str, Any]) -> dict[str, Any]:
+    """The part of an ``evaluate_plan`` report that the Critic step reads: criteria rows
+    (criterion, status, value, threshold, note), ``ledger_n``, and ``pre_holdout_passed``."""
+    rows = []
+    for r in report.get("rows", []) or []:
+        if not isinstance(r, Mapping):
+            continue
+        row = {k: _json_scalar(r.get(k)) for k in ("criterion", "status", "value", "threshold")}
+        row["note"] = _short(r.get("note") or "", PENDING_ROW_NOTE_CHARS)
+        rows.append(row)
+    n = report.get("ledger_n")
+    return {
+        "rows": rows,
+        "ledger_n": n if isinstance(n, int) and not isinstance(n, bool) else None,
+        "pre_holdout_passed": report.get("pre_holdout_passed") is True,
+    }
+
+
+def pending_critic_record(
+    *,
+    round_: int,
+    plan_hash: str,
+    plan: Mapping[str, Any],
+    designer: Mapping[str, Any],
+    report: Mapping[str, Any],
+    triage: str,
+) -> dict[str, Any] | None:
+    """The JSON-safe resume record for a round awaiting its Critic, or None when the plan
+    cannot be stored as strict JSON."""
+    trial_ids = [int(t) for t in designer.get("trial_ids", []) or [] if isinstance(t, int)]
+    record = {
+        "round": int(round_),
+        "plan_hash": str(plan_hash),
+        "plan": dict(plan),
+        "designer": {
+            "notes": _short(designer.get("notes", ""), PENDING_NOTES_CHARS),
+            "trial_ids": trial_ids[:PENDING_TRIAL_IDS],
+        },
+        "report": critic_report_view(report),
+        "triage": _short(triage, PENDING_TRIAGE_CHARS),
+    }
+    try:
+        return cast(dict[str, Any], json.loads(json.dumps(record, allow_nan=False)))
+    except (TypeError, ValueError):
+        return None
+
+
+def pending_critic_of(prog: IdeaProgress) -> dict[str, Any] | None:
+    """The idea's pending-critic record when it belongs to the current round and is well
+    formed, else None."""
+    rec = prog.context.get(PENDING_CRITIC)
+    if not isinstance(rec, Mapping):
+        return None
+    ok = (
+        rec.get("round") == prog.refinements
+        and isinstance(rec.get("plan_hash"), str)
+        and bool(rec["plan_hash"])
+        and isinstance(rec.get("plan"), Mapping)
+        and bool(rec["plan"])
+        and isinstance(rec.get("designer"), Mapping)
+        and isinstance(rec.get("report"), Mapping)
+        and isinstance(rec.get("triage"), str)
+    )
+    return dict(rec) if ok else None
+
+
+PENDING_CRITIC_OUTPUT = "critic_output"
+CRITIC_VERDICTS: frozenset[str] = frozenset(CRITIC_SCHEMA["properties"]["verdict"]["enum"])
+
+
+def critic_output_record(output: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The Critic's output as strict JSON for the pending record, or None when it cannot be
+    stored (then a crash before the verdict is handled re-asks the Critic, as before)."""
+    try:
+        return cast(dict[str, Any], json.loads(json.dumps(dict(output), allow_nan=False)))
+    except (TypeError, ValueError):
+        return None
+
+
+def recorded_critic_output(pending: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The Critic output already recorded in a current-round pending record (a run that stopped
+    after the Critic answered but before its verdict was handled), or None. Only a well-formed
+    output with a known verdict is reused."""
+    if pending is None:
+        return None
+    out = pending.get(PENDING_CRITIC_OUTPUT)
+    if not isinstance(out, Mapping) or out.get("verdict") not in CRITIC_VERDICTS:
+        return None
+    return dict(out)
 
 
 def wrap_untrusted(text: str, *, source: str) -> str:
@@ -510,6 +1009,8 @@ class Orchestrator:
         self.clock = clock
         self.deps = collaborators or Collaborators.default()
         self.max_refinements = max_refinements
+        # ``Ledger.verify_chain`` result of the last finished run (None: not verified).
+        self.last_ledger_chain: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------ public API
 
@@ -591,6 +1092,7 @@ class Orchestrator:
                 frozen_budget(ledger, run_id),
                 usd_spent=resume.usd_spent + reserved,
                 hypotheses_started=resume.hypotheses_started,
+                invalid_proposals=_invalid_outputs_of(resume),
                 holdout_limit=holdout_budget(ledger, run_id, self.cfg),
             )
             resume.usd_reserved, resume.reserved_key = 0.0, None
@@ -651,7 +1153,11 @@ class Orchestrator:
             if prog.status == "done":
                 continue
             reason = self._hard_stop(ctx)
-            if reason is not None:
+            # A round whose plan was already designed and tested before the run stopped
+            # still gets its Critic review (dollars are checked by that call itself).
+            if reason is not None and not (
+                prog.status == "in_progress" and pending_critic_of(prog) is not None
+            ):
                 ctx.stop_reason = reason
                 break
             if prog.status == "pending":
@@ -880,52 +1386,29 @@ class Orchestrator:
 
     async def _test_idea(self, ctx: _Ctx, prog: IdeaProgress) -> None:
         while True:
-            reason = self._hard_stop(ctx)
-            if reason is not None and reason != "holdout_checks":
-                raise BudgetExceededError(reason, f"budget exhausted ({reason}) before designing")
             rnd = prog.refinements
-            ctx.state["phase"] = "designing"
-            add_event(ctx.state, "design", f"idea {prog.idea_id} round {rnd}", self.clock())
-            self._persist(ctx)
-            prompt = build_designer_prompt(
-                run_id=ctx.run_id,
-                interval=ctx.state["interval"],
-                symbol=str(prog.context.get("symbol") or ctx.state["symbols"][0]),
-                idea_id=prog.idea_id,
-                title=prog.title,
-                context=prog.context,
-                lessons=ctx.resume.lessons,
-                round_=rnd,
-                max_refinements=self.max_refinements,
-                previous_plan=prog.last_plan,
-                feedback=prog.feedback,
-                proposals_left=ctx.tracker.proposals_left(),
-                backtests_left=ctx.tracker.backtests_left(),
-            )
-            res = await self._call(ctx, "designer", prompt, key=f"designer:{prog.idea_id}:{rnd}")
-            ctx.tracker.update_server_usage(run_usage(ctx.ledger, ctx.run_id))
-            design = self._check_design(ctx, prog, res)
-            if design is None:
-                return
-            h, plan, out = design
-
-            ctx.state["phase"] = "testing"
-            report = dict(self.deps.evaluate_plan(ctx.ledger, ctx.run_id, h, self.cfg))
-            self._note_dsr_n(ctx, report)
-            design_txt = "PASS" if design_criteria_pass(report) else "not met"
-            pre_txt = "PASS" if report.get("pre_holdout_passed") else "not met"
-            self._jlog(
-                ctx,
-                "criteria",
-                # No "incl." (the sentence split would cut there) and no h-word before the
-                # metric names in "missing", or the leak guard withholds these clauses.
-                f"design-window criteria (all but the locked-data and cross-checks) {design_txt}; "
-                f"gate before the locked-data check, event-driven cross-check included, {pre_txt}; "
-                f"missing: {', '.join(map(str, report.get('missing', []))) or 'none'}",
-                idea_ids=[prog.idea_id],
-                plan_hashes=[h],
-            )
-            triage_text = self._triage(ctx, prog, h)
+            pending = pending_critic_of(prog)
+            if pending is not None:
+                # Resume after the run stopped between this round's Designer and its Critic
+                # (e.g. a Critic-side InitToolsError): the plan was already designed, tested,
+                # and evaluated, so go straight to its review. No Designer call, no new
+                # proposal, no budget stop before it (an uninterrupted run would not have one).
+                h, plan, out = pending["plan_hash"], pending["plan"], pending["designer"]
+                report, triage_text = pending["report"], pending["triage"]
+                self._jlog(
+                    ctx,
+                    "resume",
+                    f"round {rnd}: plan {h[:12]} was already designed and tested before the run "
+                    "stopped; continuing with its Critic review (no new design)",
+                    idea_ids=[prog.idea_id],
+                    plan_hashes=[h],
+                )
+            else:
+                design = await self._design_round(ctx, prog, rnd)
+                if design is None:
+                    return
+                h, plan, out, report, triage_text = design
+                self._save_pending_critic(ctx, prog, rnd, h, plan, out, report, triage_text)
 
             ctx.state["phase"] = "critic"
             add_event(ctx.state, "critic", f"critic reviewing plan {h[:12]}", self.clock())
@@ -942,27 +1425,58 @@ class Orchestrator:
                 title=prog.title,
                 family=str(prog.context.get("family") or ""),
             )
-            cres = await self._call(
-                ctx, "critic", critic_prompt, key=f"critic:{prog.idea_id}:{rnd}"
-            )
+            recorded = recorded_critic_output(pending)
+            if recorded is not None:
+                # The previous process got this round's Critic verdict but stopped before it
+                # was handled: reuse it (never pay for, or re-roll, a second review).
+                self._jlog(
+                    ctx,
+                    "resume",
+                    f"resume: reusing the recorded Critic verdict for plan {h[:12]} "
+                    f"(round {rnd}); no new Critic call",
+                    idea_ids=[prog.idea_id],
+                    plan_hashes=[h],
+                )
+                cres = RoleResult(output=recorded, cost_usd=0.0, session_id=None, error=None)
+            else:
+                cres = await self._call(
+                    ctx, "critic", critic_prompt, key=f"critic:{prog.idea_id}:{rnd}", prog=prog
+                )
+                if cres.output is not None:
+                    self._save_critic_output(ctx, prog, h, cres.output)
+            tags: list[str] = []
+            evidence_txt = ""
             if cres.output is None:
                 verdict, reasons, lessons = "abandon", [f"critic unavailable: {cres.error}"], []
             else:
                 verdict = str(cres.output["verdict"])
                 reasons = [str(r) for r in cres.output.get("reasons", [])]
                 lessons = [str(x) for x in cres.output.get("lessons", [])]
+                tags = [
+                    t
+                    for t in dict.fromkeys(cres.output.get("failure_tags", []) or [])
+                    if t in FAILURE_TAGS
+                ]
+                evidence_txt = _evidence_text(cres.output.get("evidence", []))
             ctx.resume.add_lessons(lessons)
             self._jlog(
                 ctx,
                 "critic",
-                f"verdict {verdict}: {_short('; '.join(reasons), 600)}",
+                f"verdict {verdict}: {_short('; '.join(reasons), 600)}"
+                + (f" | evidence: {evidence_txt}" if evidence_txt else "")
+                + (f" | failure tags: {', '.join(tags)}" if tags else ""),
                 idea_ids=[prog.idea_id],
                 plan_hashes=[h],
             )
             for lesson in lessons:
                 self._jlog(ctx, "lesson", _short(lesson, 500), idea_ids=[prog.idea_id])
 
+            # The verdict is recorded: clear the pending record and persist BEFORE acting on it,
+            # so it can never send a plan whose cross-check or holdout already started back to
+            # the Critic. A crash from here on resumes as before (the round is redesigned).
+            prog.context.pop(PENDING_CRITIC, None)
             ctx.state["phase"] = "testing"
+            self._persist(ctx)
             if verdict == "promising" and design_criteria_pass(report):
                 await self._promising(ctx, prog, h, plan, report, out)
                 return
@@ -988,8 +1502,106 @@ class Orchestrator:
             why = ("refinements used up" if verdict != "abandon" else "critic abandoned") + (
                 ": " + _short("; ".join(reasons), 300) if reasons else ""
             )
+            if cres.output is not None:  # a real Critic verdict ended the idea: tag why
+                self._store_failure_tags(ctx, prog, tags or ["other"])
             self._finish_idea(ctx, prog, "abandoned", why)
             return
+
+    async def _design_round(
+        self, ctx: _Ctx, prog: IdeaProgress, rnd: int
+    ) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any], str] | None:
+        """One Designer call for round ``rnd``, then Python's evaluation and sweep triage.
+        Returns ``(plan_hash, plan, designer output, report, triage text)``, or None when the
+        idea was finished (abandoned) instead."""
+        reason = self._hard_stop(ctx)
+        if reason is not None and reason != "holdout_checks":
+            raise BudgetExceededError(reason, f"budget exhausted ({reason}) before designing")
+        ctx.state["phase"] = "designing"
+        add_event(ctx.state, "design", f"idea {prog.idea_id} round {rnd}", self.clock())
+        self._persist(ctx)
+        prompt = build_designer_prompt(
+            run_id=ctx.run_id,
+            interval=ctx.state["interval"],
+            symbol=str(prog.context.get("symbol") or ctx.state["symbols"][0]),
+            idea_id=prog.idea_id,
+            title=prog.title,
+            context=prog.context,
+            lessons=ctx.resume.lessons,
+            round_=rnd,
+            max_refinements=self.max_refinements,
+            previous_plan=prog.last_plan,
+            feedback=prog.feedback,
+            proposals_left=ctx.tracker.proposals_left(),
+            backtests_left=ctx.tracker.backtests_left(),
+            family_failure_tags=self._family_tags(prog),
+        )
+        res = await self._call(
+            ctx, "designer", prompt, key=f"designer:{prog.idea_id}:{rnd}", prog=prog
+        )
+        ctx.tracker.update_server_usage(run_usage(ctx.ledger, ctx.run_id))
+        design = self._check_design(ctx, prog, res)
+        if design is None:
+            return None
+        h, plan, out = design
+
+        ctx.state["phase"] = "testing"
+        report = dict(self.deps.evaluate_plan(ctx.ledger, ctx.run_id, h, self.cfg))
+        self._note_dsr_n(ctx, report)
+        design_txt = "PASS" if design_criteria_pass(report) else "not met"
+        pre_txt = "PASS" if report.get("pre_holdout_passed") else "not met"
+        self._jlog(
+            ctx,
+            "criteria",
+            # No "incl." (the sentence split would cut there) and no h-word before the
+            # metric names in "missing", or the leak guard withholds these clauses.
+            f"design-window criteria (all but the locked-data and cross-checks) {design_txt}; "
+            f"gate before the locked-data check, event-driven cross-check included, {pre_txt}; "
+            f"missing: {', '.join(map(str, report.get('missing', []))) or 'none'}",
+            idea_ids=[prog.idea_id],
+            plan_hashes=[h],
+        )
+        triage_text = self._triage(ctx, prog, h)
+        return h, plan, out, report, triage_text
+
+    def _save_pending_critic(
+        self,
+        ctx: _Ctx,
+        prog: IdeaProgress,
+        rnd: int,
+        h: str,
+        plan: Mapping[str, Any],
+        out: Mapping[str, Any],
+        report: Mapping[str, Any],
+        triage_text: str,
+    ) -> None:
+        """Record (persisted by the caller's next ``_persist``) everything the Critic step of
+        round ``rnd`` needs, so a run that stops before the verdict is handled resumes at the
+        Critic instead of repeating the Designer round. Skipped, with a warning, when the plan
+        is not JSON-serialisable (the resume then repeats the round, as before)."""
+        record = pending_critic_record(
+            round_=rnd, plan_hash=h, plan=plan, designer=out, report=report, triage=triage_text
+        )
+        if record is None:
+            logger.warning("plan %s is not JSON-serialisable; no pending-critic record", h[:12])
+            prog.context.pop(PENDING_CRITIC, None)
+            return
+        prog.context[PENDING_CRITIC] = record
+
+    def _save_critic_output(
+        self, ctx: _Ctx, prog: IdeaProgress, h: str, output: Mapping[str, Any]
+    ) -> None:
+        """Store the Critic's output in the round's pending record and persist at once, before
+        anything else (lessons, journal lines) can fail: a resume then reuses this verdict
+        instead of paying for a second, possibly different, one. No-op without a record."""
+        rec = prog.context.get(PENDING_CRITIC)
+        if not isinstance(rec, dict) or rec.get("plan_hash") != h:
+            return
+        stored = critic_output_record(output)
+        if stored is None:
+            logger.warning("critic output for %s is not JSON-serialisable; not recorded", h[:12])
+            return
+        rec[PENDING_CRITIC_OUTPUT] = stored
+        self._persist(ctx)
 
     def _check_design(
         self, ctx: _Ctx, prog: IdeaProgress, res: RoleResult
@@ -1345,6 +1957,7 @@ class Orchestrator:
         prog.status = "done"
         prog.final_status = status
         prog.reason = self._safe_text(reason)
+        prog.context.pop(PENDING_CRITIC, None)  # e.g. an abandon with no Critic call
         self.ideas.set_status(prog.idea_id, status, prog.reason)
         if log:
             self._jlog(
@@ -1376,7 +1989,9 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ calls and persistence
 
-    async def _call(self, ctx: _Ctx, role: Role, prompt: str, *, key: str) -> RoleResult:
+    async def _call(
+        self, ctx: _Ctx, role: Role, prompt: str, *, key: str, prog: IdeaProgress | None = None
+    ) -> RoleResult:
         # Raises BudgetExceededError before starting when the call cannot fit.
         cap = round(ctx.tracker.per_call_cap_usd(), 4)
         schema = ROLE_SCHEMAS[role]
@@ -1414,16 +2029,105 @@ class Orchestrator:
             add_event(ctx.state, "budget", msg, self.clock())
         if res.session_id:
             ctx.resume.sessions[key] = res.session_id
+        invalid = _count(res.invalid_outputs)
         if res.output is not None:
             errors = validate_output(res.output, schema)
             if errors:
+                invalid += 1  # the runner accepted it, the local second check did not
                 res = RoleResult(
-                    None, res.cost_usd, res.session_id, "invalid output: " + "; ".join(errors[:5])
+                    None,
+                    res.cost_usd,
+                    res.session_id,
+                    "invalid output: " + "; ".join(errors[:5]),
+                    cost_estimated=res.cost_estimated,
+                    invalid_outputs=invalid,
                 )
+        if invalid:
+            self._note_invalid(ctx, role, invalid, prog)
         if res.error:
             add_event(ctx.state, role, f"{role} error: {_short(res.error, 300)}", self.clock())
         self._persist(ctx)
+        if is_init_tools_error(res.error):
+            # A broken tool setup, not an idea verdict: stop the run (outcome "error", resumable)
+            # before any caller can abandon or tag the idea. The call is already charged.
+            raise InitToolsError(role, _short(res.error, 400), ctx.run_id)
         return res
+
+    def _note_invalid(self, ctx: _Ctx, role: Role, n: int, prog: IdeaProgress | None) -> None:
+        """Count a call's schema-invalid attempts. Designer attempts spend the proposal budget
+        (kept per idea in the resume sidecar so ``--resume`` restores the count); other roles
+        are only logged."""
+        if role == "designer":
+            ctx.tracker.add_invalid_proposals(n)
+            if prog is not None:
+                prog.context["invalid_outputs"] = _count(prog.context.get("invalid_outputs")) + n
+            msg = (
+                f"designer returned {n} invalid output(s) (failed the plan schema); counted "
+                f"toward the proposal budget ({ctx.tracker.invalid_proposals} invalid so far, "
+                f"{ctx.tracker.proposals_left()} proposals left)"
+            )
+        else:
+            msg = f"{role} returned {n} invalid output(s) (failed its output schema)"
+        add_event(ctx.state, "budget" if role == "designer" else role, msg, self.clock())
+        self._jlog(ctx, "budget" if role == "designer" else role, msg, idea_ids=_ids(prog))
+
+    def _family_tags(self, prog: IdeaProgress) -> dict[str, int]:
+        family = str(prog.context.get("family") or "")
+        fn = getattr(self.ideas, "family_failure_tags", None)
+        if not family or fn is None:
+            return {}
+        try:
+            raw = fn(family)
+            return {
+                str(t): int(n)
+                for t, n in dict(raw).items()
+                if t in FAILURE_TAGS and isinstance(n, int) and not isinstance(n, bool) and n > 0
+            }
+        except Exception as exc:  # advisory context: never blocks a design step
+            logger.warning("family failure tags unavailable: %s", exc)
+            return {}
+
+    def _store_failure_tags(self, ctx: _Ctx, prog: IdeaProgress, tags: Sequence[str]) -> None:
+        fn = getattr(self.ideas, "add_failure_tags", None)
+        if fn is None:
+            return
+        try:
+            fn(prog.idea_id, list(tags), run_id=ctx.run_id)
+        except Exception as exc:  # bookkeeping: never fails the run
+            logger.warning("could not store failure tags for idea %s: %s", prog.idea_id, exc)
+            return
+        prog.context["failure_tags"] = list(tags)
+        self._jlog(
+            ctx, "decide", f"failure tags recorded: {', '.join(tags)}", idea_ids=[prog.idea_id]
+        )
+
+    def _verify_chain(self, ctx: _Ctx, notes: list[str]) -> dict[str, Any] | None:
+        """``Ledger.verify_chain(run_id)``, or None (with a note) when it is missing or raises.
+        Never raises: a broken chain is reported, not fatal."""
+        fn = getattr(ctx.ledger, "verify_chain", None)
+        if fn is None:
+            notes.append("Ledger hash chain not verified: this lab's ledger has no verify_chain.")
+            return None
+        try:
+            chain = dict(fn(ctx.run_id))
+        except Exception as exc:
+            notes.append(f"Ledger hash chain could not be verified ({type(exc).__name__}).")
+            return None
+        if chain.get("ok") is not True:
+            notes.append(
+                "Ledger hash chain verification FAILED: first bad trial "
+                f"{chain.get('first_bad_trial_id')}: {_short(chain.get('error') or '', 300)}"
+            )
+        return chain
+
+    def _run_config(self, ctx: _Ctx) -> Mapping[str, Any] | None:
+        try:
+            run = ctx.ledger.research_run(ctx.run_id) or {}
+            cfg = run.get("config")
+            return dict(cfg) if isinstance(cfg, Mapping) else None
+        except Exception as exc:
+            logger.warning("frozen run config unavailable for %s: %s", ctx.run_id, exc)
+            return None
 
     def _persist(self, ctx: _Ctx) -> None:
         ctx.state["used"] = ctx.tracker.usage()
@@ -1478,6 +2182,15 @@ class Orchestrator:
                 f"DSR N used by the success criteria: {ctx.resume.dsr_n} distinct plans across "
                 "every research run (the global search count), not only this run's trials."
             )
+        n_invalid = ctx.tracker.invalid_proposals
+        notes.append(
+            f"Proposals used: {ctx.tracker.proposals_used} = "
+            f"{ctx.tracker.server_usage['proposals']} distinct plans with lab evidence + "
+            f"{n_invalid} invalid designer outputs (each output that failed the plan schema "
+            "counts toward the proposal budget)."
+        )
+        chain = self._verify_chain(ctx, notes)
+        self.last_ledger_chain = chain
         notes.append(
             "Results are historical backtests on the design window and are not forward-looking. "
             "A candidate is a plan that passed every frozen criterion, the locked holdout, and "
@@ -1500,13 +2213,21 @@ class Orchestrator:
             )
             for c in ctx.resume.candidates
         ]
+        extra: dict[str, Any] = {
+            "ledger_chain": chain,
+            "run_config": self._run_config(ctx),
+            "ledger_path": _rel_to_repo(self.ledger_path),
+        }
+        extra = {k: v for k, v in extra.items() if _accepts(self.deps.run_summary, k)}
         summary = self.deps.run_summary(
             run_id=ctx.run_id,
             symbols=list(ctx.state["symbols"]),
             interval=ctx.state["interval"],
             outcome=outcome,
             research=ctx.research,
-            used=ctx.tracker.usage(),
+            # BudgetUsage plus the invalid-output count (the journal's Adaptation line reads
+            # every key containing "invalid"); proposals already include it.
+            used=cast(Any, {**ctx.tracker.usage(), "invalid_designer_outputs": n_invalid}),
             ledger_n=(
                 ctx.resume.dsr_n
                 if ctx.resume.dsr_n is not None
@@ -1517,6 +2238,7 @@ class Orchestrator:
             started_at=ctx.state["started_at"],
             finished_at=iso_now(self.clock()),
             notes=[self._safe_text(n) for n in notes],
+            **extra,
         )
         ctx.journal.finish(summary)
         ctx.state["outcome"] = cast(Any, outcome)
@@ -1534,6 +2256,39 @@ STOP_REASONS: dict[str, str] = {
     "proposals": "the proposal budget was used",
     "backtests": "the backtest budget was used",
 }
+
+
+def _count(n: Any) -> int:
+    return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 0
+
+
+def _ids(prog: IdeaProgress | None) -> list[int]:
+    return [prog.idea_id] if prog is not None else []
+
+
+def _invalid_outputs_of(resume: ResumeState) -> int:
+    """Invalid Designer outputs already counted in this run (kept per idea in the sidecar)."""
+    return sum(_count(p.context.get("invalid_outputs")) for p in resume.ideas)
+
+
+def _accepts(fn: Callable[..., Any], name: str) -> bool:
+    """True when ``fn`` takes keyword ``name`` (or ``**kwargs``)."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
+def _evidence_text(evidence: Any, limit: int = 6) -> str:
+    """``field = value (source)`` for the Critic's evidence pointers, shortened."""
+    items: list[str] = []
+    for e in list(evidence or [])[:limit]:
+        if not isinstance(e, Mapping):
+            continue
+        src = f" ({e['source']})" if e.get("source") in EVIDENCE_SOURCES else ""
+        items.append(f"{_short(e.get('field', ''), 80)} = {_short(e.get('value', ''), 80)}{src}")
+    return "; ".join(items)
 
 
 def _rel_to_repo(path: Path) -> str:
@@ -1594,6 +2349,7 @@ def build_designer_prompt(
     feedback: Sequence[str],
     proposals_left: int,
     backtests_left: int,
+    family_failure_tags: Mapping[str, int] | None = None,
 ) -> str:
     sources = (
         "\n\n".join(
@@ -1631,6 +2387,8 @@ def build_designer_prompt(
         "",
         "Lessons from earlier ideas in this run:",
         _bullets([str(x) for x in lessons][-10:]),
+        "",
+        *family_tags_section(family_failure_tags or {}),
     ]
     if round_ > 0 and previous_plan is not None:
         parts += [
@@ -1643,12 +2401,35 @@ def build_designer_prompt(
         ]
     parts += [
         "",
-        'Finish with ONE JSON object: {"plan_hash": <hash returned by the lab>, "plan": '
-        '<the final validated plan JSON>, "trial_ids": [<ledger trial ids, run_backtest first>]'
-        ', "notes": <what you tested and why>}. If the idea cannot be expressed with registry '
+        'Finish with ONE JSON object matching the output schema: {"plan_hash": <hash returned '
+        'by the lab>, "plan": <the final plan exactly as validate_plan accepted it: a '
+        'single-symbol plan, or a {"kind": "portfolio", ...} plan>, "trial_ids": [<ledger '
+        'trial ids, run_backtest first>], "notes": <what you tested and why>}. The plan is '
+        "checked against the lab's plan schema; an output that fails it counts toward the "
+        "proposal budget like a proposal. If the idea cannot be expressed with registry "
         'features, return plan_hash "" and plan {} and explain in notes.',
     ]
     return "\n".join(parts)
+
+
+def family_tags_section(tags: Mapping[str, int]) -> list[str]:
+    """The Designer prompt's failure-tag block: why earlier plans in this idea's family were
+    abandoned (Critic tags, counted across every run), each with its meaning."""
+    known = [(t, int(n)) for t, n in tags.items() if t in FAILURE_TAGS and int(n) > 0]
+    if not known:
+        return ["Earlier plans in this idea's family: no recorded failure tags."]
+    return [
+        "Earlier plans in this family failed for: "
+        + ", ".join(f"{t} x{n}" for t, n in known)
+        + " (Critic failure tags across every run).",
+        *(f"- {t}: {FAILURE_TAG_MEANINGS[t]}" for t, _ in known),
+        "Design so this plan does not fail the same way, or say in notes why it will not.",
+    ]
+
+
+def failure_tag_lines() -> list[str]:
+    """One line per failure tag, for the Critic prompt."""
+    return [f"- {t}: {FAILURE_TAG_MEANINGS[t]}" for t in FAILURE_TAGS]
 
 
 def build_critic_prompt(
@@ -1696,7 +2477,16 @@ def build_critic_prompt(
             "nothing worries you). After promising, Python re-runs the event-driven cross-check; "
             "only a match plus every pre-holdout criterion makes it eligible for one budgeted "
             "holdout check.",
-            'Finish with ONE JSON object: {"verdict": "refine"|"abandon"|"promising", '
-            '"reasons": [...], "lessons": [...], "biggest_concern": "..."}.',
+            "",
+            "Failure tags (give every tag that applies when the verdict is refine or abandon; "
+            "they are stored with the idea and shown to future Designers of this family):",
+            *failure_tag_lines(),
+            "",
+            'Finish with ONE JSON object matching the output schema: {"verdict": "refine"|'
+            '"abandon"|"promising", "reasons": [...], "evidence": [{"field": "<report or '
+            'ledger field>", "value": "<value as read>", "source": "get_report"|"get_ledger"|'
+            '"get_budget"|"prompt"}, ...], "failure_tags": [...], "lessons": [...], '
+            '"biggest_concern": "..."}. evidence is required (at least one entry): cite the '
+            "criteria rows and ledger fields your verdict rests on.",
         ]
     )

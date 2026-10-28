@@ -3,3 +3,4 @@
 - [Lab conventions](lab-conventions.md): engine/stats + Phase 8 research layer verified; Phase 9 regime, replay highWater, paper identity, web probe recipe; Phase 10 portfolio engine verified
 - [Universe review 2026-10-26](universe-review-2026-10-26.md) — PIT universe: min-step look-ahead fixed (nominal interval), partial-download gate, relist-jump rule; config fingerprint + delisting exits closed; data content not fingerprinted
 - [Derivatives review 2026-10-27](derivatives-review-2026-10-27.md) — P12 r1-r4: scored start/coverage/daily fill verified; open: criteria neighbour cap mismatch, per-trial gate-base, H3 twin
+- [Paper protocol review 2026-10-28](paper-protocol-review-2026-10-28.md) — P13 r5: match/family/ledger/WARM_FROM fixed; open W: bot has no START gate (pre-start signal fills at start)

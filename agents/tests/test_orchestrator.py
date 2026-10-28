@@ -27,12 +27,13 @@ from research.journal import guard_holdout
 from research.orchestrator import (
     CRITIC_SCHEMA,
     Collaborators,
+    InitToolsError,
     Orchestrator,
     RoleRequest,
     RoleResult,
     validate_output,
 )
-from research.sdk_runner import ScriptedAgentRunner
+from research.sdk_runner import HOLDOUT_TOOL, ScriptedAgentRunner, expected_init_tools
 from research.state import RunStateStore, validate_run_state
 
 PROPOSED = research_loop.PROPOSED_CRITERIA
@@ -46,10 +47,32 @@ def _hash(plan: Mapping[str, Any]) -> str:
     return hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
 
 
+def valid_plan(name: str) -> dict[str, Any]:
+    """A plan that passes the lab's plan schema (the Designer's structured output must)."""
+    return {
+        "name": name,
+        "symbol": "BTCUSDT",
+        "interval": "4h",
+        "features": {"ema_fast": {"ema": {"period": 20}}, "ema_slow": {"ema": {"period": 100}}},
+        "long_entry": "crosses_above(ema_fast, ema_slow)",
+        "long_exit": "crosses_below(ema_fast, ema_slow)",
+    }
+
+
 @dataclass
 class FakeIdeas:
     ideas: dict[int, dict[str, Any]] = field(default_factory=dict)
     statuses: list[tuple[int, str, str | None]] = field(default_factory=list)
+    tags: list[tuple[int, list[str], str | None]] = field(default_factory=list)
+    family_tags: dict[str, dict[str, int]] = field(default_factory=dict)
+    family_queries: list[str] = field(default_factory=list)
+
+    def add_failure_tags(self, idea_id: int, tags: Sequence[str], *, run_id=None) -> None:
+        self.tags.append((idea_id, list(tags), run_id))
+
+    def family_failure_tags(self, family: str) -> dict[str, int]:
+        self.family_queries.append(family)
+        return dict(self.family_tags.get(family, {}))
 
     def add_idea(
         self, *, run_id, family, title, hypothesis, rationale, sources=(), duplicate_checker=None
@@ -295,7 +318,7 @@ class World:
     def designer(self, req: RoleRequest) -> dict[str, Any]:
         idea = int(re.search(r"Idea (\d+):", req.prompt).group(1))  # type: ignore[union-attr]
         self.designer_calls.append(idea)
-        plan = {"idea": idea, "round": self.designer_calls.count(idea)}
+        plan = valid_plan(f"idea_{idea}_round_{self.designer_calls.count(idea)}")
         h = _hash(plan)
         with Ledger(self.ledger_path) as led:
             if self.record_evidence:
@@ -335,8 +358,16 @@ def scout_output(*titles: str, extra: list[dict[str, Any]] | None = None) -> dic
     return {"hypotheses": hyps + (extra or []), "dropped": []}
 
 
-def critic(verdict: str, *reasons: str) -> dict[str, Any]:
-    return {"verdict": verdict, "reasons": list(reasons) or ["r"], "lessons": ["lesson"]}
+def critic(verdict: str, *reasons: str, tags: Sequence[str] | None = None) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "verdict": verdict,
+        "reasons": list(reasons) or ["r"],
+        "evidence": [{"field": "rows.dsr.status", "value": "fail", "source": "get_report"}],
+        "lessons": ["lesson"],
+    }
+    if tags is not None:
+        out["failure_tags"] = list(tags)
+    return out
 
 
 @pytest.fixture
@@ -428,7 +459,7 @@ async def test_candidate_when_promising_passes_criteria_holdout_and_crosscheck(
     assert len(w.holdout_calls) == 1
     [cand] = state["candidates"]
     assert cand["idea_id"] == 1 and cand["plan_hash"] == w.holdout_calls[0]
-    assert cand["plan"] == {"idea": 1, "round": 1}
+    assert cand["plan"] == valid_plan("idea_1_round_1")
     assert cand["trial_id"] >= 1
     assert ideas.ideas[1]["status"] == "candidate"
     # Design evaluation -> cross-check FIRST -> pre-holdout re-evaluation -> holdout -> full
@@ -795,6 +826,360 @@ async def test_scout_failure_is_an_error_not_no_edge(tmp_path: Path, cfg: LabCon
     orch, _ = make(w, runner)
     with pytest.raises(RuntimeError, match="scout failed"):
         await orch.run(["BTCUSDT"], "4h")
+
+
+# --------------------------------------------------------------------------- init tool list
+
+
+def _broken_init(bad_role: str, *, drop: str | None = None, add: str | None = None) -> Any:
+    """A simulated init tool list that is wrong for ``bad_role`` only."""
+
+    def tools(role: Any) -> list[str]:
+        listed = list(expected_init_tools(role))
+        if role != bad_role:
+            return listed
+        if drop is not None:
+            listed = [t for t in listed if not t.endswith(drop)]
+        return listed + ([add] if add else [])
+
+    return tools
+
+
+def _saved(tmp_path: Path) -> Any:
+    store = RunStateStore(tmp_path / "runs")
+    [state_file] = [p for p in (tmp_path / "runs").glob("r-*.json") if "resume" not in p.name]
+    return store.read(state_file.stem), store.read_resume(state_file.stem)
+
+
+@pytest.mark.parametrize(
+    "bad_role,drop,add",
+    [
+        ("designer", "walk_forward", None),  # a role tool missing
+        ("designer", None, HOLDOUT_TOOL),  # a forbidden tool listed
+        ("critic", "get_report", None),
+        ("critic", None, "Bash"),
+    ],
+)
+async def test_init_tool_failure_is_a_run_error_not_an_abandoned_idea(
+    tmp_path: Path, cfg: LabConfig, bad_role: str, drop: str | None, add: str | None
+) -> None:
+    w = World(tmp_path, cfg)
+    scripts = {"scout": scout_output("A", "B"), "designer": w.designer, "critic": critic("abandon")}
+    runner = ScriptedAgentRunner(
+        scripts, cost_per_call=0.1, init_tools=_broken_init(bad_role, drop=drop, add=add)
+    )
+    orch, ideas = make(w, runner)
+    with pytest.raises(InitToolsError, match=f"{bad_role} session init tool list") as info:
+        await orch.run(["BTCUSDT"], "4h")
+
+    saved, resume = _saved(tmp_path)
+    assert info.value.run_id == saved["run_id"] and info.value.role == bad_role
+    assert saved["outcome"] == "error"  # never no_edge: nothing was tested
+    # The idea in progress keeps the status it had before the call; nothing is abandoned,
+    # nothing tagged, and the second idea was never started.
+    assert ideas.ideas[1]["status"] == "testing"
+    assert ideas.ideas[2]["status"] == "new"
+    assert all(status != "abandoned" for _, status, _ in ideas.statuses)
+    assert ideas.tags == []
+    assert [p.status for p in resume.ideas] == ["in_progress", "pending"]
+    assert "failure_tags" not in resume.ideas[0].context
+    j = journal_of(saved, w)
+    assert j.summary is None  # journal left open for --resume
+    assert any(k == "error" and "--resume" in t for k, t in j.logs)
+    # The failed call is charged (estimated), like any call whose cost is unknown.
+    calls = len(runner.requests)
+    assert saved["used"]["usd"] == pytest.approx(0.1 * calls)
+
+    # Resumable: with the tool setup fixed the run continues the same idea and finishes.
+    runner2 = ScriptedAgentRunner(scripts, cost_per_call=0.1)
+    orch2, _ = make(w, runner2, ideas=ideas)
+    state = await orch2.resume(saved["run_id"])
+    assert state["outcome"] == "no_edge"
+    assert {d["status"] for d in ideas.ideas.values()} == {"abandoned"}
+    assert state["used"]["hypotheses"] == 2  # the interrupted idea counted once
+
+
+async def test_resume_after_critic_init_failure_reviews_the_tested_plan_without_redesigning(
+    tmp_path: Path, cfg: LabConfig
+) -> None:
+    w = World(tmp_path, cfg)
+    scripts = {"scout": scout_output("A", "B"), "designer": w.designer, "critic": critic("abandon")}
+    runner = ScriptedAgentRunner(
+        scripts, cost_per_call=0.1, init_tools=_broken_init("critic", drop="get_report")
+    )
+    orch, ideas = make(w, runner)
+    with pytest.raises(InitToolsError, match="critic session init tool list"):
+        await orch.run(["BTCUSDT"], "4h")
+
+    saved, resume = _saved(tmp_path)
+    [h1] = w.evaluate_calls
+    assert w.designer_calls == [1]
+    pending = resume.ideas[0].context["pending_critic"]  # persisted before the Critic call
+    assert pending["round"] == 0 and pending["plan_hash"] == h1
+    assert _hash(pending["plan"]) == h1
+    assert pending["designer"]["notes"] == "tested"
+    assert {r["criterion"] for r in pending["report"]["rows"]} >= {"dsr"}
+    proposals_before = saved["used"]["proposals"]
+    assert proposals_before == 1
+
+    runner2 = ScriptedAgentRunner(scripts, cost_per_call=0.1)
+    orch2, _ = make(w, runner2, ideas=ideas)
+    state = await orch2.resume(saved["run_id"])
+
+    # Idea 1's round 0 was designed exactly once; the resume went straight to its Critic.
+    assert w.designer_calls == [1, 2]
+    assert roles(runner2)[0] == "critic"
+    assert f"Review plan {h1} sceptically" in runner2.requests[0].prompt
+    assert len(w.evaluate_calls) == 2 and w.evaluate_calls.count(h1) == 1  # not re-evaluated
+    assert ideas.ideas[1]["plans"] == [h1] and ideas.ideas[1]["status"] == "abandoned"
+    # No extra proposal or invalid count: one plan per idea.
+    assert state["used"]["proposals"] == 2
+    _, resume2 = _saved(tmp_path)
+    assert all("pending_critic" not in p.context for p in resume2.ideas)  # cleared once handled
+    assert all(_count_invalid(p.context) == 0 for p in resume2.ideas)
+    assert resume2.ideas[0].plan_hashes == [h1]
+    assert state["outcome"] == "no_edge"
+
+
+@pytest.mark.parametrize("kill_on", ["critic", "lesson"])
+async def test_crash_after_the_critic_answered_reuses_its_verdict_on_resume(
+    tmp_path: Path, cfg: LabConfig, kill_on: str
+) -> None:
+    """The Critic answered, then the process died (or a journal write failed) before the
+    verdict was handled: --resume reuses the recorded verdict. One Critic call in total, and
+    the same verdict (a second call would have said something else)."""
+    w = World(tmp_path, cfg)
+    answers = iter([critic("abandon", "no edge", tags=["no_signal"]), critic("refine", "other")])
+    critic_calls: list[str] = []
+
+    def critic_fn(req: RoleRequest) -> dict[str, Any]:
+        critic_calls.append(req.prompt)
+        return next(answers)
+
+    scripts = {"scout": scout_output("A"), "designer": w.designer, "critic": critic_fn}
+    runner = ScriptedAgentRunner(scripts, cost_per_call=0.1)
+    orch, ideas = make(w, runner)
+    real_jlog = orch._jlog
+
+    def dying_jlog(ctx: Any, kind: str, text: str, **links: Any) -> None:
+        if kind == kill_on:
+            raise _Killed(f"process died writing the {kind} line")
+        real_jlog(ctx, kind, text, **links)
+
+    orch._jlog = dying_jlog  # type: ignore[method-assign]
+    with pytest.raises(_Killed, match=kill_on):
+        await orch.run(["BTCUSDT"], "4h")
+
+    saved, resume = _saved(tmp_path)
+    assert len(critic_calls) == 1
+    [h1] = w.evaluate_calls
+    pending = resume.ideas[0].context["pending_critic"]
+    assert pending["plan_hash"] == h1
+    assert pending["critic_output"]["verdict"] == "abandon"  # on disk before the crash
+    assert saved["used"]["usd"] == pytest.approx(0.3)  # scout + designer + critic
+
+    runner2 = ScriptedAgentRunner(scripts, cost_per_call=0.1)
+    orch2, _ = make(w, runner2, ideas=ideas)
+    state = await orch2.resume(saved["run_id"])
+
+    assert len(critic_calls) == 1 and roles(runner2) == []  # no second Critic call
+    assert state["used"]["usd"] == pytest.approx(0.3)  # nothing charged twice
+    assert ideas.ideas[1]["status"] == "abandoned"  # the recorded verdict, not "refine"
+    assert ideas.tags == [(1, ["no_signal"], saved["run_id"])]
+    assert w.designer_calls == [1]  # the round was not redesigned either
+    j = journal_of(state, w)
+    assert any(
+        k == "resume" and "resume: reusing the recorded Critic verdict" in t for k, t in j.logs
+    )
+    assert any(k == "critic" and t.startswith("verdict abandon") for k, t in j.logs)
+    assert not any(k == "critic" and "verdict refine" in t for k, t in j.logs)
+    _, resume2 = _saved(tmp_path)
+    assert "pending_critic" not in resume2.ideas[0].context  # cleared once handled
+    assert state["outcome"] == "no_edge"
+
+
+def test_recorded_critic_output_reuses_only_a_well_formed_verdict() -> None:
+    from research.orchestrator import critic_output_record, recorded_critic_output
+
+    assert recorded_critic_output(None) is None
+    assert recorded_critic_output({"round": 0}) is None
+    assert recorded_critic_output({"critic_output": {"verdict": "maybe"}}) is None
+    assert recorded_critic_output({"critic_output": "abandon"}) is None
+    out = critic("refine")
+    assert recorded_critic_output({"critic_output": out}) == out
+    assert critic_output_record({"verdict": "refine", "x": float("nan")}) is None
+    assert critic_output_record(out) == out
+
+
+def _count_invalid(context: Mapping[str, Any]) -> int:
+    return int(context.get("invalid_outputs") or 0)
+
+
+async def test_pending_critic_review_runs_even_when_the_designer_used_the_last_proposal(
+    tmp_path: Path, cfg: LabConfig
+) -> None:
+    """An uninterrupted run reviews the plan that spent the last proposal; so does a resume."""
+    w = World(tmp_path, cfg)
+    scripts = {"scout": scout_output("A"), "designer": w.designer, "critic": critic("abandon")}
+    runner = ScriptedAgentRunner(
+        scripts, cost_per_call=0.1, init_tools=_broken_init("critic", add="Bash")
+    )
+    orch, ideas = make(w, runner, rc=research(max_proposals=1))
+    with pytest.raises(InitToolsError):
+        await orch.run(["BTCUSDT"], "4h")
+
+    saved, _ = _saved(tmp_path)
+    assert saved["used"]["proposals"] == 1  # the budget is now exhausted
+    runner2 = ScriptedAgentRunner(scripts, cost_per_call=0.1)
+    orch2, _ = make(w, runner2, rc=research(max_proposals=1), ideas=ideas)
+    state = await orch2.resume(saved["run_id"])
+    assert roles(runner2) == ["critic"]
+    assert w.designer_calls == [1]
+    assert ideas.ideas[1]["status"] == "abandoned"
+    assert state["used"]["proposals"] == 1
+
+
+async def test_refine_verdict_clears_the_pending_record_and_designs_the_next_round(
+    tmp_path: Path, cfg: LabConfig
+) -> None:
+    w = World(tmp_path, cfg)
+    verdicts = iter([critic("refine", "change the exit"), critic("abandon")])
+    seen: list[Any] = []
+
+    def critic_fn(req: RoleRequest) -> dict[str, Any]:
+        side = RunStateStore(tmp_path / "runs").read_resume(req.run_id)
+        seen.append(side.ideas[0].context.get("pending_critic", {}).get("round"))
+        return next(verdicts)
+
+    runner = ScriptedAgentRunner(
+        {"scout": scout_output("A"), "designer": w.designer, "critic": critic_fn},
+        cost_per_call=0.1,
+    )
+    orch, _ = make(w, runner)
+    await orch.run(["BTCUSDT"], "4h")
+    assert seen == [0, 1]  # each round's record is on disk before its Critic call
+    assert w.designer_calls == [1, 1]
+    _, resume = _saved(tmp_path)
+    assert "pending_critic" not in resume.ideas[0].context
+
+
+@pytest.mark.parametrize("spent_before_crash", [False, True])
+async def test_crash_in_the_holdout_step_does_not_send_the_plan_back_to_the_critic(
+    tmp_path: Path, cfg: LabConfig, spent_before_crash: bool
+) -> None:
+    """The pending record is cleared once the verdict is recorded, before the cross-check and
+    holdout: a crash there resumes as before this phase (no Critic re-review of that plan, so
+    no refused re-check can relabel the idea dead)."""
+    w = _promising_world(tmp_path, cfg)
+    base = w.deps()
+    crash = {"on": True}
+
+    def holdout(plan: Any, *, run_id: str, cfg: LabConfig, ledger: Ledger) -> Any:
+        if crash["on"]:
+            crash["on"] = False
+            if spent_before_crash:
+                ledger.record_holdout_check(run_id, _hash(plan), budget=1)
+            # The process dies (an ordinary exception would be handled as a refusal).
+            raise _Killed("process died in the holdout step")
+        return base.run_holdout_check(plan, run_id=run_id, cfg=cfg, ledger=ledger)
+
+    deps = replace(base, run_holdout_check=holdout)
+    scripts = {"scout": scout_output("A"), "designer": w.designer, "critic": critic("promising")}
+    runner = ScriptedAgentRunner(scripts, cost_per_call=0.1)
+    orch, ideas = make(w, runner, deps=deps)
+    with pytest.raises(_Killed, match="holdout step"):
+        await orch.run(["BTCUSDT"], "4h")
+
+    saved, resume = _saved(tmp_path)
+    assert saved["outcome"] == "running"  # killed, not a handled error
+    [h1] = w.crosscheck_calls
+    assert "pending_critic" not in resume.ideas[0].context  # cleared before the cross-check
+    assert resume.ideas[0].status == "in_progress"
+
+    runner2 = ScriptedAgentRunner(scripts, cost_per_call=0.1)
+    orch2, _ = make(w, runner2, ideas=ideas, deps=deps)
+    state = await orch2.resume(saved["run_id"])
+    critic_prompts = [r.prompt for r in runner2.requests if r.role == "critic"]
+    assert not any(f"Review plan {h1} " in p for p in critic_prompts)
+    assert all(status != "dead" for _, status, _ in ideas.statuses)
+    if spent_before_crash:
+        # The run's one holdout check is spent: the loop stops its scope (pre-existing path),
+        # the idea is left as it was, and nothing is re-reviewed or re-checked.
+        assert roles(runner2) == [] and w.holdout_calls == []
+        assert ideas.ideas[1]["status"] == "testing"
+        assert state["outcome"] == "no_edge"
+    else:
+        # Nothing was spent: the round is designed again, as before this phase.
+        assert roles(runner2)[0] == "designer"
+        assert w.designer_calls == [1, 1]
+        assert ideas.ideas[1]["status"] == "candidate"
+
+
+def test_pending_critic_record_is_strict_json_and_keeps_what_the_critic_prompt_reads() -> None:
+    from research.orchestrator import (
+        build_critic_prompt,
+        critic_report_view,
+        pending_critic_record,
+    )
+
+    report = {
+        "rows": [
+            {"criterion": "dsr", "status": "fail", "value": 0.5, "threshold": 0.95, "note": "n"},
+            {"criterion": "sharpe", "status": "missing", "value": float("nan"), "note": None},
+            {"criterion": "pbo", "status": "pass", "value": pd.Timestamp(0), "threshold": 0.5},
+        ],
+        "ledger_n": 7,
+        "pre_holdout_passed": False,
+        "budget": {"big": list(range(10_000))},  # not read by the Critic step: dropped
+        "equity": [float("inf")],
+    }
+    rec = pending_critic_record(
+        round_=1,
+        plan_hash="abc",
+        plan=valid_plan("p"),
+        designer={"notes": "x" * 10_000, "trial_ids": [1, "2", 3]},
+        report=report,
+        triage="t",
+    )
+    assert rec is not None
+    json.dumps(rec, allow_nan=False)  # the resume sidecar is written with allow_nan=False
+    assert len(json.dumps(rec)) < 5_000
+    assert set(rec["report"]) == {"rows", "ledger_n", "pre_holdout_passed"}
+    assert rec["report"]["rows"][1]["value"] == "nan"
+    assert rec["designer"]["trial_ids"] == [1, 3]
+    # With ordinary values the Critic prompt is the same from the trimmed view.
+    plain = {"rows": report["rows"][:1], "ledger_n": 7}
+    kw: dict[str, Any] = {
+        "run_id": "r",
+        "plan_hash": "abc",
+        "plan": valid_plan("p"),
+        "designer_notes": "n",
+        "triage": "t",
+        "ledger_n": 7,
+    }
+    assert build_critic_prompt(report=plain, **kw) == build_critic_prompt(
+        report=critic_report_view(plain), **kw
+    )
+    # A plan that is not strict JSON is not stored (the resume repeats the round instead).
+    bad = {**valid_plan("p"), "weight": float("nan")}
+    assert (
+        pending_critic_record(
+            round_=0, plan_hash="h", plan=bad, designer={}, report=report, triage=""
+        )
+        is None
+    )
+
+
+async def test_scout_init_tool_failure_is_a_run_error(tmp_path: Path, cfg: LabConfig) -> None:
+    w = World(tmp_path, cfg)
+    runner = ScriptedAgentRunner(
+        {"scout": scout_output("A")}, init_tools=_broken_init("scout", drop="WebSearch")
+    )
+    orch, ideas = make(w, runner)
+    with pytest.raises(InitToolsError, match="scout session init tool list missing"):
+        await orch.run(["BTCUSDT"], "4h")
+    saved, _ = _saved(tmp_path)
+    assert saved["outcome"] == "error" and ideas.ideas == {}
 
 
 async def test_invalid_critic_output_is_treated_as_abandon(tmp_path: Path, cfg: LabConfig) -> None:
