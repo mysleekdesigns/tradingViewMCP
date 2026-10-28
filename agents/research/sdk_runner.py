@@ -133,6 +133,10 @@ CRITIC_LAB_TOOLS: tuple[str, ...] = tuple(
     f"{MCP_PREFIX}{t}" for t in ("get_report", "get_ledger", "get_budget")
 )
 SCOUT_TOOLS: tuple[str, ...] = ("WebSearch", "WebFetch")
+# The CLI's synthetic tool for ``output_format`` answers (in every role's live init tool list,
+# CLI 2.1.310). Every role requests structured output, so every role must be allowed to call
+# it; denying it leaves the session retrying until ``error_max_turns``.
+STRUCTURED_OUTPUT_TOOL = "StructuredOutput"
 EDIT_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 SHELL_TOOLS: frozenset[str] = frozenset({"Bash", "BashOutput", "KillShell", "KillBash"})
 ORDER_PATTERN = re.compile(
@@ -532,6 +536,7 @@ class SdkAgentRunner:
         role = req.role
         tools = list(role_tools(role))
         builtin = [t for t in tools if not t.startswith("mcp__")]
+        permitted = [*tools, STRUCTURED_OUTPUT_TOOL]  # the role's tools + its structured answer
         schema = req.output_schema or ROLE_SCHEMAS[role]
         system = (
             load_role_prompt(role, self.prompts_dir)
@@ -542,7 +547,7 @@ class SdkAgentRunner:
             "PreToolUse": [
                 HookMatcher(
                     matcher=None,
-                    hooks=[deny_unsafe_tools, make_allowlist_hook(frozenset(tools))],
+                    hooks=[deny_unsafe_tools, make_allowlist_hook(frozenset(permitted))],
                 )
             ]
         }
@@ -556,7 +561,7 @@ class SdkAgentRunner:
             ]
         return ClaudeAgentOptions(
             tools=builtin,
-            allowed_tools=tools,
+            allowed_tools=permitted,
             disallowed_tools=role_disallowed(role),
             mcp_servers=self.mcp_servers(role, req.run_id),
             strict_mcp_config=True,

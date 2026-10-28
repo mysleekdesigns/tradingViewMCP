@@ -138,7 +138,7 @@ class FakeQuery:
 def test_scout_options_web_only_no_mcp() -> None:
     o = _runner().build_options(_req("scout", SCOUT_SCHEMA))
     assert o.tools == ["WebSearch", "WebFetch"]
-    assert o.allowed_tools == ["WebSearch", "WebFetch"]
+    assert o.allowed_tools == ["WebSearch", "WebFetch", "StructuredOutput"]
     assert o.mcp_servers == {}
     assert o.strict_mcp_config is True
     for t in ("Bash", "Edit", "Write", "NotebookEdit", HOLDOUT_TOOL, START_RUN_TOOL):
@@ -149,7 +149,7 @@ def test_scout_options_web_only_no_mcp() -> None:
 def test_designer_options_pin_run_and_disable_holdout() -> None:
     o = _runner().build_options(_req("designer", DESIGNER_SCHEMA))
     assert o.tools == []  # no built-in tools at all
-    assert set(o.allowed_tools) == set(DESIGNER_LAB_TOOLS)
+    assert set(o.allowed_tools) == {*DESIGNER_LAB_TOOLS, "StructuredOutput"}
     assert HOLDOUT_TOOL not in o.allowed_tools and START_RUN_TOOL not in o.allowed_tools
     assert "mcp__strategy-lab__run_sweep" in o.allowed_tools
     for t in (
@@ -177,7 +177,7 @@ def test_designer_options_pin_run_and_disable_holdout() -> None:
 
 def test_critic_options_read_only_tools() -> None:
     o = _runner().build_options(_req("critic", CRITIC_SCHEMA))
-    assert set(o.allowed_tools) == set(CRITIC_LAB_TOOLS)
+    assert set(o.allowed_tools) == {*CRITIC_LAB_TOOLS, "StructuredOutput"}
     assert set(CRITIC_LAB_TOOLS) == {
         "mcp__strategy-lab__get_report",
         "mcp__strategy-lab__get_ledger",
@@ -718,3 +718,19 @@ async def test_scripted_runner_flags_a_forbidden_tool_and_charges_the_call() -> 
     assert res.output is None and res.error == f"{INIT_FORBIDDEN_ERROR}: {HOLDOUT_TOOL}"
     assert res.cost_usd == pytest.approx(0.3) and res.cost_estimated is True
     assert runner.init_checks == [("critic", [f"forbidden {HOLDOUT_TOOL}"])]
+
+
+@pytest.mark.parametrize("role", ["scout", "designer", "critic"])
+async def test_every_role_may_call_the_structured_output_tool(role: Any) -> None:
+    """Live smoke (CLI 2.1.310): output_format answers arrive through the CLI's synthetic
+    StructuredOutput tool; denying it left every role retrying until error_max_turns."""
+    from research.sdk_runner import STRUCTURED_OUTPUT_TOOL, forbidden_init_tools
+
+    runner = _runner()
+    opts = runner.build_options(_req(role, SIMPLE_SCHEMA))
+    assert STRUCTURED_OUTPUT_TOOL in opts.allowed_tools
+    assert STRUCTURED_OUTPUT_TOOL not in opts.tools  # not a built-in the role can opt into
+    for matcher in opts.hooks["PreToolUse"]:
+        for hook in matcher.hooks:
+            assert await hook({"tool_name": STRUCTURED_OUTPUT_TOOL}, None, None) == {}
+    assert forbidden_init_tools(role, [STRUCTURED_OUTPUT_TOOL]) == []
