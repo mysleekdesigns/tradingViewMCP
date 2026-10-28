@@ -27,6 +27,12 @@ computed on the history through the window's end (warm-up from earlier bars, not
 window is visible) and the engine runs on the window slice only, with the same history as
 ``cost_history`` so vol-scaled slippage is warmed up on the window's first bars too.
 
+Sampler: every study (here and in :mod:`lab.portfolio_runner`) is built by
+:func:`make_tpe_sampler` with the explicit :data:`TPE_SAMPLER_SETTINGS`, which equal Optuna 5.0's
+effective single-objective defaults (multivariate TPE and constant liar on), so seeded results
+are unchanged and a future Optuna default flip cannot silently change them. The settings are
+recorded per research run (:func:`lab.research.runs.software_values`).
+
 Results are historical and not forward-looking.
 """
 
@@ -36,6 +42,7 @@ import json
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Literal
 
 import numpy as np
@@ -68,6 +75,26 @@ FAILED_OBJECTIVE = -1e9
 # Fallback minimum trades for a trial to be selectable when callers don't pass one; the CLI and
 # Phase 8 tools read config/lab.toml optuna.min_trades (same value and justification).
 MIN_TRADES = 30
+
+# TPESampler keyword arguments, stated explicitly (never left to Optuna's defaults): Optuna 5.0
+# turned multivariate TPE and constant liar on by default, and these values equal 5.0's effective
+# defaults for our single-objective studies, so seeded studies propose exactly what
+# ``TPESampler(seed=seed)`` did. Frozen into each research run's software record.
+TPE_SAMPLER_SETTINGS: Mapping[str, bool | int] = MappingProxyType(
+    {
+        "multivariate": True,
+        "constant_liar": True,
+        "n_startup_trials": 10,
+        "n_ei_candidates": 24,
+        "group": False,
+    }
+)
+
+
+def make_tpe_sampler(seed: int | None) -> optuna.samplers.TPESampler:
+    """The lab's TPE sampler: ``seed`` plus the explicit :data:`TPE_SAMPLER_SETTINGS`."""
+    return optuna.samplers.TPESampler(seed=seed, **TPE_SAMPLER_SETTINGS)
+
 
 STUDY_KEY = "_study"  # reserved params_json key holding the study's design (never a param)
 
@@ -513,7 +540,7 @@ def optuna_search(
 
     study = optuna.create_study(
         direction="maximize",
-        sampler=optuna.samplers.TPESampler(seed=seed),
+        sampler=make_tpe_sampler(seed),
         study_name=study_name,
     )
     study.optimize(objective_fn, n_trials=n_trials, catch=())

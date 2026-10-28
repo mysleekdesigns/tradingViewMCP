@@ -281,6 +281,16 @@ EVIDENCE_KINDS: tuple[str, ...] = (
 # Window kinds whose Sharpe never enters the DSR variance (out-of-sample fold results).
 _VARIANCE_EXCLUDED_KINDS: tuple[str, ...] = ("walk_forward_test",)
 
+# Window kinds a plan's returns may come from for the effective trial count, best first (the
+# design window is the common, longest one; walk-forward train windows are longer than test
+# folds). ``holdout`` is deliberately absent: the effective count never reads the holdout.
+_RETURN_WINDOW_PREFERENCE: tuple[str, ...] = (
+    "design",
+    "walk_forward_train",
+    "walk_forward_test",
+    "custom",
+)
+
 
 # --------------------------------------------------------------------------- hash chain
 
@@ -1327,6 +1337,76 @@ class Ledger:
             }
             for r in self._conn.execute(sql, [*srcs, symbol]).fetchall()
         ]
+
+    def plan_return_trials(
+        self,
+        *,
+        sources: Iterable[str] = SELECTION_SOURCES,
+        run_id: str | None = None,
+        holdout_start: pd.Timestamp,
+    ) -> tuple[builtins.list[dict[str, Any]], set[str]]:
+        """One returns-bearing trial per distinct plan of the DSR's nominal ``N`` (Phase 11
+        effective-N diagnostic), WITHOUT the returns.
+
+        The plan set is exactly the one :meth:`count_distinct_plans_research` (``run_id`` None:
+        every run, every window, ok and error rows) or :meth:`count_distinct_plans` (``run_id``
+        given) counts for ``sources``, so ``len(meta) + len(missing)`` equals that count. For each
+        plan the trial is its LATEST ok trial with stored returns whose source is in ``sources``
+        (an ``adversarial`` or ``benchmark`` row filed under the same hash is a different
+        series), from ``run_id`` when given, on a window kind in this preference order:
+        ``design``, ``walk_forward_train``, ``walk_forward_test``, ``custom``. ``holdout`` rows
+        are NEVER read, and neither is ANY trial whose ``window_end`` is after
+        ``holdout_start`` (tz-aware UTC; the lab's ``cfg.splits.holdout_start``), whatever its
+        ``window_kind``: a ``custom`` window that runs into the holdout is never chosen.
+
+        Returns ``(meta, missing)``: ``meta`` holds ``{plan_hash, trial_id, run_id, symbol,
+        interval, window_start, window_end (UNIX seconds), n_returns, window_kind}`` per plan
+        that has such a trial, in plan-hash order; ``missing`` is every plan hash of the set
+        without one (only error trials, or returns only on or past the holdout). Decode a
+        trial's returns with :meth:`trial_returns`.
+        """
+        srcs = self._check_sources(sources)
+        guard = _ts_to_seconds(holdout_start, "holdout_start")
+        marks = ", ".join("?" * len(srcs))
+        scope_sql = ""
+        scope_args: builtins.list[str] = []
+        if run_id is not None:
+            scope_sql = " AND run_id = ?"
+            scope_args.append(self._check_run_id_arg(run_id))
+        plans = {
+            r[0]
+            for r in self._conn.execute(
+                f"SELECT DISTINCT plan_hash FROM trials WHERE source IN ({marks}){scope_sql}",
+                [*srcs, *scope_args],
+            )
+        }
+        preference = ", ".join(f"'{k}'" for k in _RETURN_WINDOW_PREFERENCE)
+        rank_sql = " ".join(f"WHEN '{k}' THEN {i}" for i, k in enumerate(_RETURN_WINDOW_PREFERENCE))
+        sql = (
+            "SELECT plan_hash, id, run_id, symbol, interval, window_start, window_end,"
+            " n_returns, window_kind FROM trials"
+            f" WHERE source IN ({marks}){scope_sql}"
+            " AND status = 'ok' AND returns_blob IS NOT NULL AND n_returns > 0"
+            f" AND window_kind IN ({preference}) AND window_end <= ?"
+            f" ORDER BY plan_hash, CASE window_kind {rank_sql} END, id DESC"
+        )
+        chosen: dict[str, dict[str, Any]] = {}
+        for r in self._conn.execute(sql, [*srcs, *scope_args, guard]):
+            if r["plan_hash"] in chosen:
+                continue  # rows are ordered best-first within each plan
+            chosen[r["plan_hash"]] = {
+                "plan_hash": r["plan_hash"],
+                "trial_id": int(r["id"]),
+                "run_id": r["run_id"],
+                "symbol": r["symbol"],
+                "interval": r["interval"],
+                "window_start": int(r["window_start"]),
+                "window_end": int(r["window_end"]),
+                "n_returns": int(r["n_returns"]),
+                "window_kind": r["window_kind"],
+            }
+        meta = [chosen[h] for h in sorted(chosen) if h in plans]
+        return meta, plans - set(chosen)
 
     def trial_returns(self, trial_id: int) -> np.ndarray | None:
         """The stored per-bar returns of one trial (None when it has none); ``ValueError`` if

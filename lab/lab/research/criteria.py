@@ -61,9 +61,12 @@ Where each row comes from:
 
 DSR: the report's DSR was deflated with the trial count at the time it ran; every later trial
 raises the bar. So the DSR row recomputes it from the plan's design-window trial (its per-bar
-returns are in the ledger) with ``N`` = distinct plans tried in EVERY run of the ledger
-(research runs AND the web UI's Strategy Tester / ad-hoc API runs; all symbols and intervals;
-``Ledger.count_distinct_plans_research``, a new run never resets the bar) and ``V[SR]`` = the
+returns are in the ledger) with the NOMINAL ``N`` (the run's frozen ``dsr_trial_count``, which
+can only be "nominal"; a frozen "effective" fails closed): distinct plans tried in EVERY run of
+the ledger (research runs AND the web UI's Strategy Tester / ad-hoc API runs; all symbols and
+intervals; ``Ledger.count_distinct_plans_research``, a new run never resets the bar). The
+participation-ratio effective N is never the DSR's N (:mod:`lab.stats.effective_n`); and
+``V[SR]`` = the
 largest of (a) the run's variance of commensurable Sharpes (same interval, window, and costs;
 latest per distinct plan), (b) the same over EVERY research run
 (``Ledger.selection_sharpe_variance_research``), and (c) a cross-interval pool: every research
@@ -75,6 +78,19 @@ interval cannot shrink the variance it is deflated with. With fewer than lab.tom
 and with N > 1 and no estimable ``V[SR]`` the DSR would silently equal the PSR, so the row is
 "missing" too.
 
+Statistics (information only, never a row, never pass/fail): the report's ``statistics`` block
+(:func:`plan_statistics`) shows the nominal N the DSR used beside the effective-N DIAGNOSTIC
+and its time-shuffled null (globally and for this run; computed lazily, and a failure there is
+reported as missing and never breaks the report), the minimum backtest length (MinBTL, for the
+DSR's N at the plan's observed design-window net Sharpe), the minimum track record length
+(MinTRL, from the PSR at the DSR's deflated benchmark SR0 and confidence ``dsr_min``; a DSR
+pass implies at least MinTRL bars), and a CPCV out-of-sample Sharpe path distribution over the
+behaviour family's design-window sweep trials (read from the ledger: no new backtests), twice:
+``cpcv`` over every trial (an upper bound: TPE chose them with the whole design window, every
+CPCV test bar included) and ``cpcv_startup`` over only the sampler's random start-up trials.
+When ``dsr_min`` does not pass and the design window is below MinTRL or MinBTL, its note
+states "design window too short".
+
 Results are historical and not forward-looking.
 """
 
@@ -83,7 +99,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping
-from dataclasses import fields, replace
+from dataclasses import MISSING, asdict, dataclass, fields, replace
 from typing import Any, Literal, NotRequired, TypedDict
 
 import numpy as np
@@ -97,7 +113,7 @@ from lab.plan import parse_plan, plan_hash, tunable_params, with_params
 from lab.plan.validator import PlanValidationError
 from lab.registry.regime import BEAR, BULL, regime_labels
 from lab.report import num, seconds
-from lab.research.contract import SuccessCriteria
+from lab.research.contract import DSR_EFFECTIVE_REFUSED, DSR_TRIAL_COUNTS, SuccessCriteria
 from lab.research.family import (
     FamilyInfo,
     behaviour_family,
@@ -106,13 +122,16 @@ from lab.research.family import (
 )
 from lab.research.logic import literal_vector, logic_hash
 from lab.research.runs import budget_status, check_derivatives_snapshot, check_lab_fingerprint
+from lab.research.trial_count import TRIAL_COUNT_NULL_SEED, TrialCount, trial_counts
 from lab.runner import (
     CandleLoader,
     derivatives_period_caps,
     neighbourhood_overrides,
     pbo_split_count,
 )
-from lab.stats import deflated_sharpe, pbo_cscv
+from lab.stats import DSRResult, deflated_sharpe, pbo_cscv, sharpe_per_bar
+from lab.stats.cpcv import cpcv_paths
+from lab.stats.sharpe import min_backtest_length, min_track_record_length
 from lab.types import TrialRecord, bars_per_year, interval_seconds
 
 __all__ = [
@@ -123,6 +142,7 @@ __all__ = [
     "CriterionStatus",
     "evaluate_plan",
     "frozen_criteria",
+    "plan_statistics",
     "regime_breakdown",
 ]
 
@@ -140,8 +160,9 @@ _V_FLOOR = 1e-18
 
 # SuccessCriteria fields that parameterise another criterion's row instead of being a criterion
 # of their own: the regime definition (trailing window and +/- threshold) used by
-# ``min_profitable_regimes``. They are frozen with the rest of the criteria when a run starts.
-CRITERION_PARAMS: tuple[str, ...] = ("regime_window_days", "regime_threshold")
+# ``min_profitable_regimes``, and ``dsr_trial_count`` (which N ``dsr_min`` deflates with). They
+# are frozen with the rest of the criteria when a run starts.
+CRITERION_PARAMS: tuple[str, ...] = ("regime_window_days", "regime_threshold", "dsr_trial_count")
 
 # Market regimes for the "profitable in 2 of 3 regimes" criterion: a bar's regime is the
 # trailing ``regime_window_days`` simple return against +/- ``regime_threshold`` (both from the
@@ -171,6 +192,9 @@ class CriteriaReport(TypedDict):
     budget: dict[str, Any]
     # derivatives plans only: facts that are NOT criteria (the ungated price-only baseline)
     informational: NotRequired[dict[str, Any]]
+    # information only, never pass/fail (:func:`plan_statistics`): nominal N, the effective-N
+    # diagnostic and its null, MinBTL, MinTRL and the CPCV path distributions
+    statistics: NotRequired[dict[str, Any]]
 
 
 # --------------------------------------------------------------------------- regimes
@@ -242,17 +266,29 @@ def regime_breakdown(
 
 
 def frozen_criteria(ledger: Ledger, run_id: str) -> SuccessCriteria:
-    """The criteria snapshotted when ``run_id`` started. ``ValueError`` if it never started."""
+    """The criteria snapshotted when ``run_id`` started. ``ValueError`` if it never started,
+    or if the snapshot's keys do not fit :class:`SuccessCriteria`: an unknown key, or a missing
+    key that has no default. A missing key WITH a default (``dsr_trial_count``, added after the
+    first runs) reads as its default, so a run frozen before it existed stays on "nominal"."""
     run = ledger.research_run(run_id)
     if run is None:
         raise ValueError(f"research run {run_id!r} was never started; call start_run first")
     frozen = run["config"]["criteria"]
     names = {f.name for f in fields(SuccessCriteria)}
-    if set(frozen) != names:
+    required = {f.name for f in fields(SuccessCriteria) if f.default is MISSING}
+    missing, unknown = sorted(required - set(frozen)), sorted(set(frozen) - names)
+    if missing or unknown:
         raise ValueError(
             f"research run {run_id!r} froze criteria keys that do not match this lab's "
-            f"SuccessCriteria (missing {sorted(names - set(frozen))}, unknown "
-            f"{sorted(set(frozen) - names)}); start a new run"
+            f"SuccessCriteria (missing {missing}, unknown {unknown}); start a new run"
+        )
+    choice = frozen.get("dsr_trial_count", "nominal")
+    if choice == "effective":
+        raise ValueError(f"research run {run_id!r} froze {DSR_EFFECTIVE_REFUSED}; start a new run")
+    if choice not in DSR_TRIAL_COUNTS:
+        raise ValueError(
+            f"research run {run_id!r} froze dsr_trial_count = {choice!r}, not one of "
+            f"{list(DSR_TRIAL_COUNTS)}; start a new run"
         )
     return SuccessCriteria(**frozen)
 
@@ -415,31 +451,69 @@ def _pooled_variance(ledger: Ledger, costs_json: str, interval: str) -> tuple[fl
     return variance, int(values.size), len({iv for _, iv, _ in rows})
 
 
-def _dsr_row(
+@dataclass(frozen=True)
+class TrialN:
+    """The DSR trial count for one ``get_report`` call (:func:`trial_n`): the nominal count of
+    distinct plans tried in every run of the lab (``nominal``; ``n`` is it floored at 1). It
+    never depends on the effective-N diagnostic, which the statistics block computes lazily.
+    ``choice`` is the run's frozen ``dsr_trial_count`` (always "nominal")."""
+
+    choice: str
+    n: int
+    nominal: int
+
+
+def trial_n(c: SuccessCriteria, ledger: Ledger) -> TrialN:
+    """The DSR's N: the nominal distinct-plan count over every run (:class:`TrialN`)."""
+    nominal = ledger.count_distinct_plans_research(sources=SELECTION_SOURCES)
+    return TrialN(c.dsr_trial_count, max(1, nominal), nominal)
+
+
+def _n_basis(tn: TrialN) -> str:
+    """How the DSR's N was chosen, for the dsr_min note."""
+    return (
+        f"N = {tn.n} distinct plans tried in every run of the lab (research runs and the web "
+        "UI; all symbols and intervals; the run's frozen dsr_trial_count = "
+        f'"{tn.choice}"; the effective-N diagnostic in statistics is never the DSR\'s N)'
+    )
+
+
+@dataclass(frozen=True)
+class DsrEval:
+    """The ``dsr_min`` row plus what the statistics block needs from it: the N it deflated
+    with, the design trial (with returns) and the DSR result (its deflated benchmark SR0)."""
+
+    row: CriterionRow
+    n: int | None
+    rec: TrialRecord | None
+    result: DSRResult | None
+
+
+def _dsr_eval(
     c: SuccessCriteria,
     ledger: Ledger,
     run_id: str,
     plan_hash_: str,
     bt: dict[str, Any] | None,
     cfg: LabConfig,
-) -> tuple[CriterionRow, int | None]:
+    tn: TrialN,
+) -> DsrEval:
     name, thr = "dsr_min", c.dsr_min
     if bt is None:
-        return _missing(name, thr, "no backtest evidence: run run_backtest"), None
+        row = _missing(name, thr, "no backtest evidence: run run_backtest")
+        return DsrEval(row, None, None, None)
     rec = _trial(ledger, bt, run_id, plan_hash_)
     reported_n = _get(bt, "stats", "dsr", "n_trials")
     if rec is None:
-        return (
-            _missing(
-                name,
-                thr,
-                "the backtest's ledger trial (with returns) is not available in this run, so "
-                "DSR cannot be re-deflated with the run's current trial count; rerun "
-                "run_backtest",
-            ),
-            None,
+        row = _missing(
+            name,
+            thr,
+            "the backtest's ledger trial (with returns) is not available in this run, so "
+            "DSR cannot be re-deflated with the run's current trial count; rerun "
+            "run_backtest",
         )
-    n = max(1, ledger.count_distinct_plans_research(sources=SELECTION_SOURCES))
+        return DsrEval(row, None, None, None)
+    n = tn.n
     scope: dict[str, Any] = {
         "interval": rec.interval,
         "costs_json": rec.costs_json,
@@ -455,9 +529,8 @@ def _dsr_row(
     variance = max(finite) if finite else math.nan
     need = cfg.research.min_variance_plans
     basis = (
-        f"re-deflated now with N = {n} distinct plans tried in every run of the lab (research "
-        f"runs and the web UI; all symbols and intervals; the report used N = {reported_n}) "
-        f"and V[SR] {_fmt(variance)} = max(V over {len(run_sharpes)} commensurable trial "
+        f"re-deflated now with {_n_basis(tn)}; the report used N = {reported_n}; "
+        f"V[SR] {_fmt(variance)} = max(V over {len(run_sharpes)} commensurable trial "
         f"Sharpes in this run {_fmt(run_v)}, V over {len(all_sharpes)} in every research run "
         f"{_fmt(all_v)} (same interval, design window, and costs), V over {n_pooled} plans "
         f"pooled across {n_intervals} interval(s) {_fmt(pooled_v)} (every research run, same "
@@ -465,40 +538,62 @@ def _dsr_row(
         f"rescaled to {rec.interval} bars)); latest Sharpe per distinct plan"
     )
     if n_pooled < need:
-        return (
-            _missing(
-                name,
-                thr,
-                f"{basis}: only {n_pooled} commensurable plans, fewer than lab.toml [research] "
-                f"min_variance_plans = {need}, so V[SR] is too noisy to deflate with; run more "
-                "commensurable trials (a sweep) or treat as not significant",
-            ),
-            n,
+        row = _missing(
+            name,
+            thr,
+            f"{basis}: only {n_pooled} commensurable plans, fewer than lab.toml [research] "
+            f"min_variance_plans = {need}, so V[SR] is too noisy to deflate with; run more "
+            "commensurable trials (a sweep) or treat as not significant",
         )
+        return DsrEval(row, n, rec, None)
     if n > 1 and (not math.isfinite(variance) or variance <= _V_FLOOR):
-        return (
-            _missing(
-                name,
-                thr,
-                f"{basis}: V[SR] is not estimable, so the DSR would equal the PSR (no "
-                "deflation); run more commensurable trials or treat as not significant",
-            ),
-            n,
+        row = _missing(
+            name,
+            thr,
+            f"{basis}: V[SR] is not estimable, so the DSR would equal the PSR (no "
+            "deflation); run more commensurable trials or treat as not significant",
         )
+        return DsrEval(row, n, rec, None)
     returns = rec.returns if rec.returns is not None else np.empty(0)
-    dsr = num(deflated_sharpe(returns, n_trials=n, sharpe_variance=variance).dsr)
+    result = deflated_sharpe(returns, n_trials=n, sharpe_variance=variance)
+    dsr = num(result.dsr)
     if dsr is None:
-        return _row(name, "fail", None, thr, f"{basis}; DSR undefined"), n
-    return _row(name, "pass" if dsr >= thr else "fail", dsr, thr, basis), n
+        return DsrEval(_row(name, "fail", None, thr, f"{basis}; DSR undefined"), n, rec, result)
+    row = _row(name, "pass" if dsr >= thr else "fail", dsr, thr, basis)
+    return DsrEval(row, n, rec, result)
 
 
-def _sweep_pbo(
-    ledger: Ledger, sweeps: list[dict[str, Any]], cfg: LabConfig
-) -> tuple[float | None, int, int, int]:
-    """CSCV PBO over the design-window Optuna trials of ``sweeps`` (evidence rows with their
-    ``run_id``; their study names), one matrix per distinct (run, sweep window); the MAX over
-    those with at least ``cfg.research.min_pbo_trials`` usable trials where it is computable.
-    Returns ``(pbo or None, trials used, studies, matrices too small)``."""
+def _dsr_row(
+    c: SuccessCriteria,
+    ledger: Ledger,
+    run_id: str,
+    plan_hash_: str,
+    bt: dict[str, Any] | None,
+    cfg: LabConfig,
+    tn: TrialN | None = None,
+) -> tuple[CriterionRow, int | None]:
+    """The ``dsr_min`` row and the N it deflated with (``tn`` default: :func:`trial_n`)."""
+    tn = tn if tn is not None else trial_n(c, ledger)
+    out = _dsr_eval(c, ledger, run_id, plan_hash_, bt, cfg, tn)
+    return out.row, out.n
+
+
+@dataclass(frozen=True)
+class SweepMatrix:
+    """Design-window Optuna trial returns of one (run, sweep window) of a behaviour family."""
+
+    run_id: str
+    start: int
+    end: int
+    studies: frozenset[str]
+    matrix: np.ndarray  # T x M per-bar returns, columns in ledger id order
+    ids: tuple[int, ...]
+
+
+def sweep_matrices(ledger: Ledger, sweeps: list[dict[str, Any]]) -> list[SweepMatrix]:
+    """One returns matrix per distinct (run, sweep window) of ``sweeps`` (evidence rows with
+    their ``run_id``; their study names): the trials CSCV PBO and CPCV are computed on. Read
+    once per report and shared by both."""
     by_window: dict[tuple[str, int, int], set[str]] = {}
     for row in sweeps:
         sw = row["payload"]
@@ -508,10 +603,7 @@ def _sweep_pbo(
         if not isinstance(start, int) or not isinstance(end, int) or not isinstance(names, list):
             continue
         by_window.setdefault((str(row["run_id"]), start, end), set()).update(str(n) for n in names)
-    worst: float | None = None
-    used = 0
-    too_small = 0
-    floor = max(2, cfg.research.min_pbo_trials)
+    out: list[SweepMatrix] = []
     for (run_id, start, end), names in by_window.items():
         matrix, ids = ledger.returns_matrix(
             run_id,
@@ -520,17 +612,38 @@ def _sweep_pbo(
             sources=("optuna",),
             studies=names,
         )
-        if len(ids) < floor:
+        out.append(SweepMatrix(run_id, start, end, frozenset(names), matrix, tuple(ids)))
+    return out
+
+
+def _sweep_pbo(
+    ledger: Ledger,
+    sweeps: list[dict[str, Any]],
+    cfg: LabConfig,
+    matrices: list[SweepMatrix] | None = None,
+) -> tuple[float | None, int, int, int]:
+    """CSCV PBO over the design-window Optuna trials of ``sweeps`` (evidence rows with their
+    ``run_id``; their study names), one matrix per distinct (run, sweep window); the MAX over
+    those with at least ``cfg.research.min_pbo_trials`` usable trials where it is computable.
+    ``matrices`` are :func:`sweep_matrices` of ``sweeps`` when the caller already read them.
+    Returns ``(pbo or None, trials used, studies, matrices too small)``."""
+    mats = matrices if matrices is not None else sweep_matrices(ledger, sweeps)
+    worst: float | None = None
+    used = 0
+    too_small = 0
+    floor = max(2, cfg.research.min_pbo_trials)
+    for m in mats:
+        if len(m.ids) < floor:
             too_small += 1
             continue
-        n_splits = pbo_split_count(matrix.shape[0], cfg.stats.pbo_splits)
-        if n_splits < 2 or not np.isfinite(matrix).all():
+        n_splits = pbo_split_count(m.matrix.shape[0], cfg.stats.pbo_splits)
+        if n_splits < 2 or not np.isfinite(m.matrix).all():
             continue
-        value = num(pbo_cscv(matrix, n_splits=n_splits).pbo)
+        value = num(pbo_cscv(m.matrix, n_splits=n_splits).pbo)
         if value is not None:
             worst = value if worst is None else max(worst, value)
-            used += len(ids)
-    return worst, used, sum(len(v) for v in by_window.values()), too_small
+            used += len(m.ids)
+    return worst, used, sum(len(m.studies) for m in mats), too_small
 
 
 def _pbo_row(
@@ -539,11 +652,12 @@ def _pbo_row(
     bt: dict[str, Any] | None,
     sweeps: list[dict[str, Any]],
     cfg: LabConfig,
+    matrices: list[SweepMatrix] | None = None,
 ) -> CriterionRow:
     name, thr = "pbo_max", c.pbo_max
     neigh = num(_get(bt, "stats", "pbo", "pbo")) if bt is not None else None
     n_neigh = _get(bt, "stats", "pbo", "n_trials") if bt is not None else None
-    swept, n_swept, n_studies, too_small = _sweep_pbo(ledger, sweeps, cfg)
+    swept, n_swept, n_studies, too_small = _sweep_pbo(ledger, sweeps, cfg, matrices)
     floor = cfg.research.min_pbo_trials
     if swept is None:
         if too_small:
@@ -980,6 +1094,351 @@ def _crosscheck_row(c: SuccessCriteria, cross: dict[str, Any] | None) -> Criteri
     )
 
 
+# --------------------------------------------------------------------------- statistics
+
+
+def _finite(x: float) -> float | None:
+    return float(x) if math.isfinite(x) else None
+
+
+def _jsonable(value: Any) -> Any:
+    """Tuples to lists and non-finite floats to None, so the block serialises as plain JSON."""
+    if isinstance(value, Mapping):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, float | np.floating):
+        return _finite(float(value))
+    return value
+
+
+_DIAGNOSTIC_BASIS = (
+    "Diagnostic only, NOT used for the DSR (which deflates with the nominal N above): the "
+    "participation ratio of the plans' return correlations is dominated by the one market "
+    "factor long-only crypto plans share, which V[SR] already reflects, so as N it would count "
+    "that factor twice; it falls when near-copies are added, and with M plans over T days it is "
+    "biased down (Marchenko-Pastur). effective_null is the same ratio after shuffling each "
+    "plan's daily returns in time within its own observed days (seed {seed}): what M "
+    "independent plans on these days would score. Read effective_diagnostic against "
+    "effective_null, not against nominal. Method: {method}"
+)
+
+
+def _trial_count_block(tn: TrialN, ledger: Ledger, run_id: str, cfg: LabConfig) -> dict[str, Any]:
+    """Nominal N (the DSR's) plus the effective-N diagnostic, computed here and only here. Any
+    failure in the diagnostic (candles, sqlite, zlib, memory) is reported as ``missing`` and
+    never reaches the nominal N, the dsr_min row or a holdout decision."""
+    out: dict[str, Any] = {
+        "nominal": tn.nominal,
+        "run_nominal": ledger.count_distinct_plans(run_id, sources=SELECTION_SOURCES),
+        "used_for_dsr": "nominal",
+        "dsr_n": tn.n,
+        "frozen_choice": tn.choice,
+    }
+    try:
+        g: TrialCount = trial_counts(ledger, cfg)
+        r: TrialCount = trial_counts(ledger, cfg, run_id=run_id)
+    except Exception as exc:  # a diagnostic never breaks get_report or holdout_check
+        out["missing"] = (
+            f"effective-N diagnostic not computable: {type(exc).__name__}: {exc} (the DSR's "
+            "nominal N above is unaffected)"
+        )
+        return out
+    out.update(
+        {
+            "effective_diagnostic": _finite(g.effective),
+            "effective_null": _finite(g.effective_null),
+            "plans": g.n_with_returns,
+            "rows": g.rows,
+            "n_without_returns": g.n_without_returns,
+            "run_effective_diagnostic": _finite(r.effective),
+            "run_effective_null": _finite(r.effective_null),
+            "run_plans": r.n_with_returns,
+            "run_rows": r.rows,
+            "basis": _DIAGNOSTIC_BASIS.format(
+                seed=TRIAL_COUNT_NULL_SEED, method=g.basis.rstrip(". ") + ". Information only."
+            ),
+        }
+    )
+    return out
+
+
+def _min_btl_block(dsr: DsrEval, tn: TrialN) -> dict[str, Any]:
+    rec = dsr.rec
+    if rec is None or rec.returns is None:
+        return {"missing": "no design-window backtest trial with returns in this run: run_backtest"}
+    bpy = bars_per_year(rec.interval)
+    target = sharpe_per_bar(rec.returns) * math.sqrt(bpy)
+    if not math.isfinite(target):
+        return {"missing": "the design-window net Sharpe is undefined (no return variance)"}
+    years = min_backtest_length(tn.n, target)
+    design_bars = int(rec.returns.size)
+    design_years = design_bars / bpy
+    basis = (
+        f"MinBTL = (E[max Z] of N = {tn.n} trials / annualised Sharpe)^2 years (Bailey, Borwein, "
+        "Lopez de Prado & Zhu 2014): below it, the plan's observed design-window net Sharpe "
+        f"{target:.3g} ({rec.interval}, 365-day year of {bpy:g} bars) is within what selecting "
+        f"the best of N zero-skill trials produces. Design window {design_bars} bars = "
+        f"{design_years:.3g} years"
+    )
+    if not math.isfinite(years):
+        basis += "; infinite because the observed Sharpe is not positive"
+    return {
+        "years": _finite(years),
+        "bars": _finite(years * bpy),
+        "design_bars": design_bars,
+        "design_years": design_years,
+        "n_trials": tn.n,
+        "target_sharpe_annual": target,
+        "ok": bool(design_years >= years),
+        "basis": basis + ". Information only.",
+    }
+
+
+def _min_trl_block(c: SuccessCriteria, dsr: DsrEval) -> dict[str, Any]:
+    if dsr.rec is None or dsr.rec.returns is None:
+        return {"missing": "no design-window backtest trial with returns in this run: run_backtest"}
+    if dsr.result is None:
+        return {
+            "missing": "the dsr_min row has no deflated benchmark SR0 (it is missing: see its "
+            "note), so MinTRL at that benchmark is not computable"
+        }
+    conf = c.dsr_min
+    if not 0.0 < conf < 1.0:
+        return {
+            "missing": f"confidence = the frozen dsr_min {conf:g} is not strictly between 0 "
+            "and 1, so MinTRL is not defined"
+        }
+    sr0 = dsr.result.sr0_per_bar
+    bars = min_track_record_length(dsr.rec.returns, sr0, conf)
+    if math.isnan(bars):
+        return {"missing": "MinTRL undefined (non-finite moments or non-positive variance term)"}
+    design_bars = int(dsr.rec.returns.size)
+    basis = (
+        "MinTRL = bars needed before the Probabilistic Sharpe Ratio against the DSR's deflated "
+        f"benchmark SR0 = {sr0:.3g} per bar reaches the frozen dsr_min = {conf:g} (Bailey & "
+        "Lopez de Prado 2012 eq. 13, with the plan's skew and kurtosis); with at least MinTRL "
+        "bars the DSR reaches dsr_min (the same inversion)"
+    )
+    if not math.isfinite(bars):
+        basis += "; infinite because the per-bar Sharpe is not above SR0"
+    return {
+        "bars": _finite(bars),
+        "design_bars": design_bars,
+        "target_sharpe_per_bar": sr0,
+        "confidence": conf,
+        "ok": bool(design_bars >= bars),
+        "basis": basis + ". Information only.",
+    }
+
+
+# The ``cpcv`` block's label: its configurations were proposed by TPE, which saw every
+# design-window bar (every CPCV test bar included) through the objective.
+CPCV_UPPER_BOUND_BASIS = "upper bound: candidates were chosen by a search that saw every test bar"
+
+
+def _sweep_for_cpcv(
+    bt: dict[str, Any] | None, matrices: list[SweepMatrix]
+) -> tuple[SweepMatrix | None, str | None]:
+    """The sweep matrix CPCV is read from (the backtest's window first, then the largest), or
+    ``(None, reason)``."""
+    if not matrices:
+        return None, (
+            "no design-window sweep of this plan's behaviour family: run_sweep "
+            "(CPCV reads its Optuna trials; it never runs new backtests)"
+        )
+    usable = [m for m in matrices if len(m.ids) >= 2 and np.isfinite(m.matrix).all()]
+    if not usable:
+        return None, (
+            f"{len(matrices)} sweep matrix(es) of this plan's behaviour family, none "
+            "with at least 2 usable design-window Optuna trials with finite returns"
+        )
+    start, end = _get(bt, "window", "start"), _get(bt, "window", "end")
+    m = max(usable, key=lambda x: (x.start == start and x.end == end, len(x.ids), x.end, x.run_id))
+    return m, None
+
+
+def _startup_trial_ids(ledger: Ledger, m: SweepMatrix) -> tuple[frozenset[int] | None, str]:
+    """Ledger ids of ``m``'s studies' trials that TPE drew at random: Optuna trial number below
+    ``TPE_SAMPLER_SETTINGS["n_startup_trials"]`` within each study. ``params_json["_study"]``
+    names the study and its ``n_trials`` but not the trial number, so a trial's number is its
+    position among the study's ledger rows on the sweep window (ok AND error rows: the lab
+    records exactly one row per trial, in trial order, ``study.optimize`` running
+    sequentially), restarting every ``n_trials`` rows (a repeated sweep reuses the study name).
+    Returns ``(ids, "")`` or ``(None, reason)`` when the numbers cannot be identified."""
+    from lab.search.optuna_search import STUDY_KEY, TPE_SAMPLER_SETTINGS  # lazy: imports optuna
+
+    n_startup = int(TPE_SAMPLER_SETTINGS["n_startup_trials"])
+    rows: dict[str, list[tuple[int, Any]]] = {}
+    for rec in ledger.list(
+        run_id=m.run_id, limit=ledger.count(m.run_id), exclude_window_kinds=("holdout",)
+    ):
+        if rec.source != "optuna" or rec.id is None:
+            continue
+        if (int(rec.window_start.timestamp()), int(rec.window_end.timestamp())) != (m.start, m.end):
+            continue
+        try:
+            params = json.loads(rec.params_json)
+        except ValueError:
+            continue
+        meta = params.get(STUDY_KEY) if isinstance(params, dict) else None
+        if isinstance(meta, dict) and meta.get("study") in m.studies:
+            rows.setdefault(str(meta["study"]), []).append((rec.id, meta.get("n_trials")))
+    ids: set[int] = set()
+    for name in sorted(m.studies):
+        study_rows = sorted(rows.get(name, []))
+        if not study_rows:
+            return None, f"study {name} has no Optuna ledger rows on the sweep window"
+        number = 0
+        for trial_id, n_trials in study_rows:
+            if isinstance(n_trials, bool) or not isinstance(n_trials, int) or n_trials < 1:
+                return None, (
+                    f"study {name}'s ledger rows carry no _study.n_trials, so Optuna trial "
+                    "numbers (and the random start-up trials) cannot be identified"
+                )
+            if number < n_startup:
+                ids.add(trial_id)
+            number = (number + 1) % n_trials
+        if number != 0:
+            return None, (
+                f"study {name} has {len(study_rows)} ledger rows on the sweep window, not whole "
+                "repeats of its n_trials (an interrupted or overlapping sweep), so Optuna trial "
+                "numbers cannot be identified"
+            )
+    return frozenset(ids), ""
+
+
+def _cpcv_result(matrix: np.ndarray, interval: str, source: str, basis: str) -> dict[str, Any]:
+    try:
+        res = cpcv_paths(matrix, bars_per_year=bars_per_year(interval))
+    except ValueError as exc:
+        return {"missing": f"CPCV not computable on the sweep matrix: {exc}"}
+    out = _jsonable(asdict(res))
+    out["basis"] = basis
+    out["configs_source"] = source
+    return out
+
+
+def _cpcv_blocks(
+    ledger: Ledger, bt: dict[str, Any] | None, matrices: list[SweepMatrix]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(cpcv, cpcv_startup)``: the CPCV OOS Sharpe path distribution over every
+    design-window Optuna trial of the family's sweep (an upper bound, see
+    :data:`CPCV_UPPER_BOUND_BASIS`) and over only TPE's random start-up trials."""
+    m, reason = _sweep_for_cpcv(bt, matrices)
+    if m is None:
+        return {"missing": reason}, {"missing": reason}
+    try:
+        interval = ledger.get(m.ids[0]).interval
+    except ValueError as exc:
+        reason = f"CPCV not computable on the sweep matrix: {exc}"
+        return {"missing": reason}, {"missing": reason}
+    span = (
+        f"{pd.Timestamp(m.start, unit='s', tz='UTC'):%Y-%m-%d} to "
+        f"{pd.Timestamp(m.end, unit='s', tz='UTC'):%Y-%m-%d}"
+    )
+    tail = (
+        "In each split the in-sample best configuration is scored on its purged, embargoed "
+        "test groups; the paths are those out-of-sample pieces stitched together. No new "
+        "backtests, nothing recorded, and the DSR's N is unchanged (it counts configurations "
+        "searched, not paths). Information only."
+    )
+    studies = ", ".join(sorted(m.studies))
+    full = _cpcv_result(
+        m.matrix,
+        interval,
+        f"{len(m.ids)} design-window Optuna trials ({interval}, {span}) of study(ies) "
+        f"{studies} in run {m.run_id}: the plan's behaviour-family sweep, read from the ledger "
+        f"(same bars and costs as those trials). {tail}",
+        f"{CPCV_UPPER_BOUND_BASIS} (TPE proposed them from objective values over the whole "
+        "design window, so the out-of-sample paths are not out of the search's sample)",
+    )
+    ids, why = _startup_trial_ids(ledger, m)
+    if ids is None:
+        return full, {"missing": why}
+    cols = [j for j, trial_id in enumerate(m.ids) if trial_id in ids]
+    from lab.search.optuna_search import TPE_SAMPLER_SETTINGS  # lazy: imports optuna
+
+    n_startup = int(TPE_SAMPLER_SETTINGS["n_startup_trials"])
+    if len(cols) < 2:
+        return full, {
+            "missing": f"{len(cols)} usable random start-up trial(s) (Optuna trial number < "
+            f"n_startup_trials = {n_startup}) in the sweep matrix; CPCV needs at least 2"
+        }
+    startup = _cpcv_result(
+        m.matrix[:, cols],
+        interval,
+        f"{len(cols)} of the {len(m.ids)} design-window Optuna trials above ({interval}, "
+        f"{span}, study(ies) {studies}, run {m.run_id}): those with Optuna trial number < "
+        f"n_startup_trials = {n_startup} within their study, numbered by ledger order (one row "
+        f"per trial, ok and error, sequential). {tail}",
+        "random start-up trials only: TPE drew them from the search space before using any "
+        "objective value, so no test bar shaped which configurations are compared",
+    )
+    return full, startup
+
+
+def plan_statistics(
+    c: SuccessCriteria,
+    ledger: Ledger,
+    bt: dict[str, Any] | None,
+    tn: TrialN,
+    dsr: DsrEval,
+    matrices: list[SweepMatrix],
+    *,
+    run_id: str,
+    cfg: LabConfig,
+) -> dict[str, Any]:
+    """The report's ``statistics`` block (information only, never pass/fail): ``trial_count``
+    (the nominal N the DSR used, globally and for this run, beside the effective-N diagnostic
+    and its time-shuffled null), ``min_backtest_length`` (MinBTL for the DSR's N at the plan's
+    observed design-window Sharpe), ``min_track_record_length`` (MinTRL at the DSR's deflated
+    benchmark SR0 and confidence ``dsr_min``), ``cpcv`` (the OOS Sharpe path distribution over
+    the family's sweep trials: an upper bound) and ``cpcv_startup`` (the same over only TPE's
+    random start-up trials). A part that cannot be computed is ``{"missing": reason}``."""
+    cpcv, cpcv_startup = _cpcv_blocks(ledger, bt, matrices)
+    return {
+        "trial_count": _trial_count_block(tn, ledger, run_id, cfg),
+        "min_backtest_length": _min_btl_block(dsr, tn),
+        "min_track_record_length": _min_trl_block(c, dsr),
+        "cpcv": cpcv,
+        "cpcv_startup": cpcv_startup,
+        "note": (
+            "information only: none of these is a criterion row and none changes pass/fail; a "
+            "too-short design window is stated on the dsr_min row"
+        ),
+    }
+
+
+def _length_reason(stats: Mapping[str, Any]) -> str | None:
+    """ "design window too short: ..." when the window is below MinTRL and/or MinBTL (finite
+    ones only: an infinite length is a Sharpe problem, not a length problem), else None."""
+    parts: list[str] = []
+    trl = stats.get("min_track_record_length", {})
+    if trl.get("bars") is not None and trl.get("ok") is False:
+        parts.append(
+            f"{trl['design_bars']} bars < MinTRL {trl['bars']:.0f} bars at the deflated benchmark"
+        )
+    btl = stats.get("min_backtest_length", {})
+    if btl.get("years") is not None and btl.get("ok") is False:
+        parts.append(
+            f"{btl['design_years']:.2f} years < MinBTL {btl['years']:.2f} years for "
+            f"{btl['n_trials']} trials"
+        )
+    return "design window too short: " + "; ".join(parts) if parts else None
+
+
+def with_length_reason(row: CriterionRow, stats: Mapping[str, Any]) -> CriterionRow:
+    """The ``dsr_min`` row with the stated length reason appended when it did not pass and the
+    design window is below MinTRL or MinBTL. Never changes its status."""
+    reason = _length_reason(stats)
+    if row["status"] == "pass" or reason is None:
+        return row
+    return CriterionRow(**{**row, "note": f"{row['note']}; {reason}"})
+
+
 # --------------------------------------------------------------------------- public API
 
 
@@ -1016,12 +1475,15 @@ def evaluate_plan(
     family = _family(ledger, run_id, plan_hash, bt, cfg, loader)
     wfs = [row["payload"] for row in family_evidence(ledger, family, "walk_forward")]
     sweeps = family_evidence(ledger, family, "sweep")
+    matrices = sweep_matrices(ledger, sweeps)
+    tn = trial_n(c, ledger)
+    dsr = _dsr_eval(c, ledger, run_id, plan_hash, bt, cfg, tn)
+    statistics = plan_statistics(c, ledger, bt, tn, dsr, matrices, run_id=run_id, cfg=cfg)
 
-    dsr_row, _ = _dsr_row(c, ledger, run_id, plan_hash, bt, cfg)
     by_name: dict[str, CriterionRow] = {
         "wf_oos_sharpe_min": _wf_row(c, wfs, family),
-        "dsr_min": dsr_row,
-        "pbo_max": _pbo_row(c, ledger, bt, sweeps, cfg),
+        "dsr_min": with_length_reason(dsr.row, statistics),
+        "pbo_max": _pbo_row(c, ledger, bt, sweeps, cfg, matrices),
         "beat_buy_hold": _beat_row(
             "beat_buy_hold", c.beat_buy_hold, bt, "buy_and_hold", "buy-and-hold"
         ),
@@ -1050,6 +1512,7 @@ def evaluate_plan(
         missing=[r["criterion"] for r in rows if r["status"] == "missing"],
         ledger_n=ledger.count_distinct_plans_research(sources=SELECTION_SOURCES),
         budget=budget_status(ledger, run_id, cfg),
+        statistics=statistics,
     )
     ungated = ungated_baseline(bt)
     if ungated is not None:  # derivatives plans only; never a row, never pass/fail

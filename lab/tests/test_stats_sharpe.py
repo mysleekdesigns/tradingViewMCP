@@ -23,6 +23,7 @@ convention, not a calendar assumption in the code.
 
 from __future__ import annotations
 
+import itertools
 import math
 
 import numpy as np
@@ -35,6 +36,8 @@ from lab.stats.sharpe import (
     DSRResult,
     deflated_sharpe,
     expected_max_sharpe,
+    expected_max_z,
+    min_backtest_length,
     min_track_record_length,
     min_track_record_length_from_moments,
     probabilistic_sharpe,
@@ -236,3 +239,126 @@ def test_return_level_functions_match_hedgefund() -> None:
     )
     out = deflated_sharpe(r, n_trials=30, sharpe_variance=0.002)
     assert out.dsr == pytest.approx(hf_sig.deflated_sharpe_ratio(r, 30, 0.002)["dsr"], rel=1e-12)
+
+
+# ------------------------------------------------- expected max Z and MinBTL (Phase 11)
+
+
+@pytest.mark.parametrize("n_trials", [2, 10, 46, 100, 2479, 10**6])
+def test_expected_max_z_times_sigma_is_hedgefunds_expected_max_sharpe(n_trials: int) -> None:
+    # Same formula and operation order, so bit-identical.
+    for var in (PAPER_VAR, 0.37):
+        assert math.sqrt(var) * expected_max_z(n_trials) == hf_sig.expected_max_sharpe(
+            n_trials, var
+        )
+
+
+def test_expected_max_z_matches_an_independent_normal_quantile_for_n_10() -> None:
+    # (1 - g) * Phi^-1(0.9) + g * Phi^-1(1 - 1/(10e)) with Phi^-1 from the standard library's
+    # NormalDist (an implementation independent of scipy): 0.4227843351 * 1.2815515655 +
+    # 0.5772156649 * 1.7892417646 = 1.5745983. rel 1e-12: two double-precision quantile codes.
+    from statistics import NormalDist
+
+    g = 0.5772156649015329
+    inv = NormalDist().inv_cdf
+    want = (1 - g) * inv(0.9) + g * inv(1 - 1 / (10 * math.e))
+    assert want == pytest.approx(1.5745983, abs=1e-7)
+    assert expected_max_z(10) == pytest.approx(want, rel=1e-12)
+
+
+def test_expected_max_z_is_zero_for_at_most_one_trial() -> None:
+    assert expected_max_z(1) == 0.0
+    assert expected_max_z(0.5) == 0.0
+
+
+def test_expected_max_z_accepts_fractional_n_and_is_increasing() -> None:
+    zs = [expected_max_z(n) for n in (1.5, 2.0, 2.5, 433.7, 434.0)]
+    assert all(a < b for a, b in itertools.pairwise(zs))
+
+
+def test_expected_max_z_is_clamped_at_zero_just_above_one_trial() -> None:
+    # The eq. 5 approximation is negative for 1 < N < ~1.3 (raw value at N = 1.1: about
+    # -0.28); the expected maximum of N >= 1 standard normals is never below 0.
+    from statistics import NormalDist
+
+    g, inv = 0.5772156649015329, NormalDist().inv_cdf
+    raw = (1 - g) * inv(1 - 1 / 1.1) + g * inv(1 - 1 / (1.1 * math.e))
+    assert raw < 0.0
+    for n in (1.0001, 1.1, 1.2):
+        assert expected_max_z(n) == 0.0
+    assert expected_max_z(1.3) > 0.0
+
+
+def test_expected_max_z_is_non_decreasing_from_just_above_one() -> None:
+    grid = np.unique(
+        np.concatenate([1.0 + np.geomspace(1e-4, 1.0, 400), np.geomspace(2.0, 1e6, 400)])
+    )
+    zs = [expected_max_z(float(n)) for n in grid]
+    assert zs[0] == 0.0 and all(z >= 0.0 for z in zs)
+    assert all(a <= b for a, b in itertools.pairwise(zs))
+    positive = [z for z in zs if z > 0.0]
+    assert all(a < b for a, b in itertools.pairwise(positive))  # strictly once above the clamp
+
+
+def test_expected_max_z_rejects_non_finite_n() -> None:
+    with pytest.raises(ValueError, match="n_trials"):
+        expected_max_z(float("nan"))
+
+
+@pytest.mark.parametrize("n_trials", [2, 30, 100, 2479])
+def test_deflated_sharpe_unchanged_by_the_expected_max_z_refactor(n_trials: int) -> None:
+    # The pre-Phase-11 code used hedgeFund's expected_max_sharpe for SR0; results must be
+    # bit-identical, not just close.
+    r = np.random.default_rng(31).standard_t(5, 1500) * 0.01 + 0.0008
+    var = 0.0011
+    out = deflated_sharpe(r, n_trials=n_trials, sharpe_variance=var)
+    sr0_old = hf_sig.expected_max_sharpe(n_trials, var)
+    assert out.sr0_per_bar == sr0_old
+    sr = r.mean() / r.std(ddof=1)
+    g3, g4 = sp_stats.skew(r), sp_stats.kurtosis(r, fisher=False)
+    assert out.dsr == psr_from_moments(sr, r.size, g3, g4, sr0_old)
+
+
+def test_min_backtest_length_purgedcv_docstring_example() -> None:
+    # Bailey et al. (2014) via purgedcv's docstring: 10 configurations, target annualised
+    # Sharpe 1 -> about 2.5 years (printed to 1 decimal). Exactly 1.5745983^2 = 2.4793598.
+    assert min_backtest_length(10, 1.0) == pytest.approx(2.5, abs=0.05)
+    assert min_backtest_length(10, 1.0) == pytest.approx(2.4793598, abs=1e-7)
+    assert min_backtest_length(10, 1.0) == pytest.approx(expected_max_z(10) ** 2, rel=1e-15)
+
+
+def test_min_backtest_length_bailey_2014_n_45_example() -> None:
+    # Bailey, Borwein, Lopez de Prado & Zhu (2014), Notices of the AMS 61(5): with 45
+    # independent configurations a backtest needs about 5 years before an annualised Sharpe of
+    # 1 can be told from the best of 45 zero-skill trials. Ours: 4.998087 (abs 1e-6: two
+    # double-precision normal quantiles).
+    assert min_backtest_length(45, 1.0) == pytest.approx(5.0, abs=0.01)
+    assert min_backtest_length(45, 1.0) == pytest.approx(4.998087, abs=1e-6)
+
+
+def test_min_backtest_length_scales_with_inverse_squared_target() -> None:
+    assert min_backtest_length(100, 0.5) == pytest.approx(4 * min_backtest_length(100, 1.0))
+
+
+def test_min_backtest_length_below_the_simple_2_ln_n_bound() -> None:
+    # Bailey et al. (2014): MinBTL < 2 ln N / SR^2 (the bound the Z form tightens).
+    for n in (10, 100, 2479):
+        assert min_backtest_length(n, 1.0) < 2 * math.log(n)
+
+
+def test_min_backtest_length_edge_cases() -> None:
+    assert min_backtest_length(1, 1.0) == 0.0
+    assert min_backtest_length(0.7, 1.0) == 0.0
+    assert min_backtest_length(10, 0.0) == math.inf
+    assert min_backtest_length(10, -1.0) == math.inf
+    assert min_backtest_length(10, float("nan")) == math.inf
+    with pytest.raises(ValueError, match="n_trials"):
+        min_backtest_length(float("inf"), 1.0)
+
+
+def test_min_backtest_length_in_bars_uses_the_365_day_year() -> None:
+    from lab.types import bars_per_year
+
+    years = min_backtest_length(50, 1.0)
+    assert years * bars_per_year("1d") == pytest.approx(years * 365.0)
+    assert years * bars_per_year("4h") == pytest.approx(years * 2190.0)

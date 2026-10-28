@@ -576,7 +576,8 @@ def build_server(
         Params: label — short human name for the run, 1-200 characters.
         Example: start_run(label="btc-4h-trend-pullback")
         Limits: refused without lab/config/success_criteria.toml (no criteria, no research);
-        the frozen criteria and budget never change mid-run."""
+        the frozen criteria (including dsr_trial_count; only "nominal" is accepted) and budget
+        never change mid-run."""
         if pinned_run_id is not None:
             raise ToolError(
                 f"this server is pinned to research run {pinned_run_id}; use that run_id "
@@ -1232,7 +1233,7 @@ def build_server(
     @tool(_READ_ONLY)
     def get_report(run_id: str, plan_hash: str) -> dict[str, Any]:
         """Judge a plan against the run's frozen success criteria: one row per criterion with
-        pass / fail / missing, the DSR N, and the budget.
+        pass / fail / missing, the DSR N, the budget, and a statistics block.
         Use when: after the backtest, sweep, walk-forward, adversarial and crosscheck
         evidence exists; pre_holdout_passed must be true before holdout_check.
         Not for: holdout results (never shown) or re-scoring with other thresholds.
@@ -1240,8 +1241,11 @@ def build_server(
         (from validate_plan or a run_* result).
         Example: get_report(run_id="r-20261028-120000-a1b2c3", plan_hash="3f9a...")
         Limits: read-only, free; criteria are the ones frozen at start_run. Missing evidence
-        shows as missing. Derivatives plans add the ungated baseline as information only (not
-        a criterion); portfolio plans add beat_equal_weight and alpha-to-BTC rows."""
+        shows as missing. statistics (nominal N, an effective-N diagnostic beside its null,
+        MinBTL, MinTRL, CPCV paths of the sweep: all trials, an upper bound, and random
+        start-up trials) is information only, never pass/fail; dsr_min deflates with the
+        nominal N. Derivatives plans add the ungated baseline as information only
+        (not a criterion); portfolio plans add beat_equal_weight and alpha-to-BTC rows."""
         with open_ledger() as led:
             check_run(led, run_id)
             try:

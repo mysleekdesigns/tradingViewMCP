@@ -11,13 +11,25 @@
 
 All windows are half-open ``[start, end)`` on bar open times (tz-aware UTC).
 
+**Combinatorial Purged Cross-Validation** (López de Prado 2018, *Advances in Financial Machine
+Learning*, ch. 7 and ch. 12.4) is an *additional* validator beside walk-forward, index-based
+(bar positions inside the design window, never dates): :func:`cpcv_groups` cuts the bars into
+contiguous groups, :func:`cpcv_splits` builds the ``C(n_groups, n_test_groups)`` purged and
+embargoed train/test masks, and :func:`cpcv_path_assignment` says which split supplies each
+group of each of the ``C(n_groups - 1, n_test_groups - 1)`` out-of-sample paths. The path
+returns themselves are assembled in ``lab.stats.cpcv``.
+
 Results are historical and not forward-looking.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from itertools import combinations
+from math import comb
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 from lab.types import WalkForwardFold, Window
@@ -169,3 +181,120 @@ def design_view(candles: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
     holdout_start = _check_ts(cfg.holdout_start, "holdout_start")
     idx = _check_index(candles)
     return candles.loc[idx < holdout_start]
+
+
+# ------------------------------------------------------------------ CPCV (index-based)
+
+
+@dataclass(frozen=True)
+class CpcvSplit:
+    """One CPCV split: boolean masks over the ``n_bars`` design-window bars."""
+
+    index: int  # position in itertools.combinations order
+    test_groups: tuple[int, ...]
+    train: np.ndarray  # bool, length n_bars: bars a selection may look at
+    test: np.ndarray  # bool, length n_bars: the out-of-sample bars of this split
+
+
+def _check_count(value: object, name: str, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int | np.integer) or value < minimum:
+        raise ValueError(f"{name} must be an int >= {minimum}, got {value!r}")
+    return int(value)
+
+
+def cpcv_groups(n_bars: int, n_groups: int) -> list[tuple[int, int]]:
+    """Contiguous ``[start, end)`` bar blocks covering ``range(n_bars)``.
+
+    Each group has ``n_bars // n_groups`` bars and the first ``n_bars % n_groups`` groups get
+    one extra (the ``purgedcv`` / scikit-learn ``KFold`` convention). Raises ``ValueError``
+    unless ``n_groups >= 2`` and ``n_bars >= n_groups``.
+    """
+    n_groups = _check_count(n_groups, "n_groups", 2)
+    n_bars = _check_count(n_bars, "n_bars", 1)
+    if n_bars < n_groups:
+        raise ValueError(f"n_bars={n_bars} must be >= n_groups={n_groups} (no empty groups)")
+    size, remainder = divmod(n_bars, n_groups)
+    out: list[tuple[int, int]] = []
+    cursor = 0
+    for g in range(n_groups):
+        length = size + (1 if g < remainder else 0)
+        out.append((cursor, cursor + length))
+        cursor += length
+    return out
+
+
+def _check_test_groups(n_groups: int, n_test_groups: int) -> tuple[int, int]:
+    n_groups = _check_count(n_groups, "n_groups", 2)
+    n_test_groups = _check_count(n_test_groups, "n_test_groups", 1)
+    if n_test_groups >= n_groups:
+        raise ValueError(
+            f"n_test_groups must be in [1, n_groups - 1] = [1, {n_groups - 1}], got {n_test_groups}"
+        )
+    return n_groups, n_test_groups
+
+
+def cpcv_splits(
+    n_bars: int,
+    n_groups: int,
+    n_test_groups: int,
+    *,
+    purge_bars: int,
+    embargo_bars: int,
+) -> list[CpcvSplit]:
+    """The ``C(n_groups, n_test_groups)`` CPCV splits, in ``itertools.combinations`` order.
+
+    ``test`` marks the bars of the chosen groups. ``train`` is every other bar except, for each
+    contiguous test block (adjacent test groups merge into one block):
+
+    * **purge**: the ``purge_bars`` bars immediately *before* the block, whose outcomes overlap
+      the block's first bars (AFML 7.4.1);
+    * **embargo**: the ``embargo_bars`` bars immediately *after* the block, which can still
+      carry information from it through serial correlation (AFML 7.4.2).
+
+    Blocks are clipped at the ends of the series. With ``embargo_bars >= purge_bars`` this is
+    exactly ``purgedcv.CombinatorialPurgedCV`` with a ``purge_bars + 1``-bar label horizon and
+    ``embargo_observations=embargo_bars`` (its label-overlap purge also removes ``purge_bars``
+    bars after a block, which the embargo already covers); tested in
+    ``tests/test_stats_crosscheck.py``.
+    """
+    n_groups, n_test_groups = _check_test_groups(n_groups, n_test_groups)
+    purge_bars = _check_count(purge_bars, "purge_bars", 0)
+    embargo_bars = _check_count(embargo_bars, "embargo_bars", 0)
+    groups = cpcv_groups(n_bars, n_groups)
+    splits: list[CpcvSplit] = []
+    for index, combo in enumerate(combinations(range(n_groups), n_test_groups)):
+        test = np.zeros(n_bars, dtype=bool)
+        for g in combo:
+            test[groups[g][0] : groups[g][1]] = True
+        train = ~test
+        # Contiguous test blocks: runs of adjacent group indices.
+        runs: list[list[int]] = []
+        for g in combo:
+            if runs and runs[-1][-1] == g - 1:
+                runs[-1].append(g)
+            else:
+                runs.append([g])
+        for run in runs:
+            start, end = groups[run[0]][0], groups[run[-1]][1]
+            train[max(0, start - purge_bars) : start] = False
+            train[end : min(n_bars, end + embargo_bars)] = False
+        splits.append(CpcvSplit(index=index, test_groups=combo, train=train, test=test))
+    return splits
+
+
+def cpcv_path_assignment(n_groups: int, n_test_groups: int) -> list[list[int]]:
+    """For each of the ``C(n_groups - 1, n_test_groups - 1)`` paths, the split index that
+    supplies each group: ``out[p][g]`` is the split whose test set fills group ``g`` of path
+    ``p``.
+
+    Every group is a test group in exactly ``C(n_groups - 1, n_test_groups - 1)`` splits; its
+    ``j``-th such split (in :func:`cpcv_splits` order) fills path ``j`` (AFML 12.4, the
+    ``purgedcv.reconstruct_paths`` rule). So every path covers every group exactly once.
+    """
+    n_groups, n_test_groups = _check_test_groups(n_groups, n_test_groups)
+    n_paths = comb(n_groups - 1, n_test_groups - 1)
+    per_group: list[list[int]] = [[] for _ in range(n_groups)]
+    for index, combo in enumerate(combinations(range(n_groups), n_test_groups)):
+        for g in combo:
+            per_group[g].append(index)
+    return [[per_group[g][p] for g in range(n_groups)] for p in range(n_paths)]

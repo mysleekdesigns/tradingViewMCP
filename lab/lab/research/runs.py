@@ -26,18 +26,35 @@ from the Parquet files on disk (cached in-process per file list, size and mtime)
 edit without a manifest rebuild is refused too. A series the run did not freeze is refused.
 Snapshots frozen before this layout (no ``series``) fall back to comparing the whole manifest's
 sha256.
+
+Software record (PLAN.md Phase 11): ``config["software"]`` = :func:`software_values` (the
+Optuna, vectorbt, numpy, pandas and Python versions plus the explicit TPE sampler settings,
+:data:`lab.search.optuna_search.TPE_SAMPLER_SETTINGS`), so a rerun months later can tell whether
+it ran on the same stack. The checklist names ``lab_values``, but the record lives BESIDE the
+fingerprint, like the snapshots above: :func:`check_lab_fingerprint` hashes every key of
+:func:`lab_values`, so adding the versions there would change the fingerprint of every existing
+run and refuse it on every run-scoped tool (``get_report`` included). :func:`check_lab_fingerprint`
+also calls :func:`check_software`: a run that froze a software record and whose current software
+differs is refused with the changed entries named ("start a new run"); a run started before the
+record existed (no ``software`` key) is not checked.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import platform
 import secrets
 from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import numpy as np
+import optuna
+import pandas as pd
+import vectorbt as vbt
 
 from lab.config import LabConfig
 from lab.data import derivatives as drv_data
@@ -46,6 +63,7 @@ from lab.data.derivatives_columns import COLUMN_SOURCES, plan_derivative_columns
 from lab.data.universe_build import manifest_path, manifest_sha256
 from lab.ledger import Ledger
 from lab.research.contract import ResearchConfig, RunBudget
+from lab.search.optuna_search import TPE_SAMPLER_SETTINGS
 
 
 class ResearchBudgetError(RuntimeError):
@@ -95,6 +113,23 @@ def lab_fingerprint(cfg: LabConfig) -> dict[str, Any]:
     return {"fingerprint": hashlib.sha256(text.encode("utf-8")).hexdigest(), "values": values}
 
 
+def software_values() -> dict[str, Any]:
+    """The installed software that changes results, as JSON-safe data: ``optuna`` (the TPE
+    sampler's proposals), ``vectorbt`` (the backtest engine), ``numpy`` and ``pandas`` (every
+    feature, return and statistic), ``python`` (``X.Y.Z``; the interpreter the arithmetic and
+    seeded RNGs run on) and ``tpe_sampler`` (the explicit sampler settings, so an Optuna default
+    flip is visible). Frozen as ``config["software"]`` beside the fingerprint (module
+    docstring), never part of :func:`lab_values`."""
+    return {
+        "optuna": str(optuna.__version__),
+        "vectorbt": str(vbt.__version__),
+        "numpy": str(np.__version__),
+        "pandas": str(pd.__version__),
+        "python": platform.python_version(),
+        "tpe_sampler": dict(TPE_SAMPLER_SETTINGS),
+    }
+
+
 def start_research_run(
     ledger: Ledger,
     research: ResearchConfig,
@@ -104,13 +139,15 @@ def start_research_run(
     now: datetime | None = None,
 ) -> str:
     """Create a server-assigned run id and freeze ``research`` (criteria + budget) into the
-    ledger under it, plus ``config["lab"] = lab_fingerprint(cfg)`` when ``cfg`` is given (and
-    the universe manifest / derivatives snapshot, when they exist on disk). Returns the run id.
+    ledger under it, plus ``config["lab"] = lab_fingerprint(cfg)`` and ``config["software"] =
+    software_values()`` when ``cfg`` is given (and the universe manifest / derivatives snapshot,
+    when they exist on disk). Returns the run id.
     Runs started without ``cfg`` fail :func:`check_lab_fingerprint`."""
     run_id = new_run_id(now)
     config = json.loads(research.to_json())
     if cfg is not None:
         config["lab"] = lab_fingerprint(cfg)
+        config["software"] = software_values()
         manifest = universe_manifest(cfg)
         if manifest is not None:
             config["universe_manifest"] = manifest
@@ -128,7 +165,8 @@ def start_research_run(
 
 def check_lab_fingerprint(ledger: Ledger, run_id: str, cfg: LabConfig) -> None:
     """Raise ``ValueError`` unless ``run_id`` exists, froze a lab.toml fingerprint, and that
-    fingerprint equals ``cfg``'s (the message names the changed sections)."""
+    fingerprint equals ``cfg``'s (the message names the changed sections); then
+    :func:`check_software` (the frozen software record, when the run has one)."""
     run = ledger.research_run(run_id)
     if run is None:
         raise ValueError(f"research run {run_id!r} was never started; call start_run first")
@@ -145,6 +183,33 @@ def check_lab_fingerprint(ledger: Ledger, run_id: str, cfg: LabConfig) -> None:
         raise ValueError(
             "lab.toml changed since this run started; start a new run (research run "
             f"{run_id!r}; changed: {', '.join(changed) or 'values'})"
+        )
+    check_software(run["config"], run_id)
+
+
+def check_software(config: Mapping[str, Any], run_id: str) -> None:
+    """Raise ``ValueError`` when the run's frozen ``software`` record differs from
+    :func:`software_values` now; the message names each changed entry (``optuna 5.0.0 ->
+    5.1.0``) and says to start a new run. A run config without a ``software`` key (runs started
+    before the record existed) is not checked, so their evidence stays usable."""
+    if "software" not in config:
+        return
+    frozen = config["software"]
+    now = software_values()
+    if not isinstance(frozen, Mapping):
+        raise ValueError(
+            f"research run {run_id!r} has an unreadable software record ({frozen!r}); start a "
+            "new run"
+        )
+    changed = [
+        f"{key} {frozen.get(key)!r} -> {now.get(key)!r}"
+        for key in sorted(set(frozen) | set(now))
+        if frozen.get(key) != now.get(key)
+    ]
+    if changed:
+        raise ValueError(
+            "the lab's software changed since this run started; start a new run (research run "
+            f"{run_id!r}; changed: {'; '.join(changed)})"
         )
 
 

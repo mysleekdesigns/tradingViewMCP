@@ -770,6 +770,7 @@ crosscheck = [
 ]
 dev = [
     { name = "httpx2" },
+    { name = "purgedcv" },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -793,6 +794,7 @@ requires-dist = [
 crosscheck = [{ name = "nautilus-trader", specifier = ">=1.231.0" }]
 dev = [
     { name = "httpx2", specifier = ">=2.16.0" },
+    { name = "purgedcv", specifier = "==0.1.11" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.17.2" },
 ]
@@ -1318,6 +1320,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/da/9f/abfd2959e9261dd5217ca8551d4de211ca6ab26fe9b72cf44731ff6c4442/pure_eval-0.2.4.tar.gz", hash = "sha256:260c2774686e651b79f8b8e7fc9d80b3599ea6a66334b47d5f4abb69fc2c0ea1", size = 20563, upload-time = "2026-09-10T21:41:22.836Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6d/18/83376915176eb058cb86470eb7396388a13350b09a8f233a79303bbcbc5b/pure_eval-0.2.4-py3-none-any.whl", hash = "sha256:96cae060a313cfaad51bb761278bfb0e62dc0248d9315a81173752dc546cd37a", size = 11893, upload-time = "2026-09-10T21:41:21.532Z" },
+]
+
+[[package]]
+name = "purgedcv"
+version = "0.1.11"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c6/16/4e767e5eebf87c88632b0783d0ca17d9b982768046d9b8bc7af4b6e609a6/purgedcv-0.1.11.tar.gz", hash = "sha256:d5cacc4345eec5fafcbbb2e4a87f6e5496e7dcc2b199db790391f8b3d1c5ac2f", size = 4924265, upload-time = "2026-10-16T08:44:58.05Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3e/a1/2a3b749d40fa15156ade8028fbe71825cf4840f2f4abea5a4eaec6a9020e/purgedcv-0.1.11-py3-none-any.whl", hash = "sha256:b7d80142a10ef615138bcbeb1b0c783ce2cec95b3e4266f14b0470d6a8c813c1", size = 66391, upload-time = "2026-10-16T08:44:56.521Z" },
 ]
 
 [[package]]

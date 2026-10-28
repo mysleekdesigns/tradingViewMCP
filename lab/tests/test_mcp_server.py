@@ -516,6 +516,54 @@ def test_get_report_and_get_budget(tmp_path: Path) -> None:
     assert budget["used"]["proposals"] == 1 and budget["remaining"]["holdout_checks"] == 1
 
 
+def test_get_report_statistics_block_has_every_part_and_records_nothing(tmp_path: Path) -> None:
+    """PLAN.md Phase 11 Done-when: nominal N, effective N, MinBTL, MinTRL and a CPCV path
+    distribution (from the plan's design-window sweep) on get_report, as information only."""
+    lab = Lab(tmp_path)
+    run_id = lab.start()
+    bt = ok(lab.server, "run_backtest", {"run_id": run_id, "plan": EMA_PLAN})
+    sweep = ok(
+        lab.server, "run_sweep", {"run_id": run_id, "plan": EMA_PLAN, "space": SPACE, "n_trials": 8}
+    )
+    before = counts(lab, run_id)
+    rep = ok(lab.server, "get_report", {"run_id": run_id, "plan_hash": bt["plan_hash"]})
+    assert counts(lab, run_id) == before  # no trials, no evidence: N is unchanged
+    st = rep["statistics"]
+    tc = st["trial_count"]
+    assert tc["nominal"] == tc["dsr_n"] == rep["ledger_n"] and tc["used_for_dsr"] == "nominal"
+    # the effective N is a diagnostic beside its time-shuffled null, never the DSR's N
+    assert 1.0 <= tc["effective_diagnostic"] <= tc["nominal"]
+    assert 1.0 <= tc["effective_null"] <= tc["nominal"]
+    assert tc["plans"] >= 1 and tc["rows"] >= 1 and "NOT used for the DSR" in tc["basis"]
+    assert st["min_backtest_length"]["n_trials"] == rep["ledger_n"]
+    assert st["min_backtest_length"]["years"] >= 0.0
+    assert st["min_track_record_length"]["confidence"] == 0.95
+    assert st["min_track_record_length"]["design_bars"] == st["min_backtest_length"]["design_bars"]
+    cp = st["cpcv"]
+    assert "missing" not in cp and cp["n_configs"] == sweep["n_trials"]
+    assert len(cp["path_sharpes"]) == cp["n_paths"] >= 2
+    assert set(cp["quantiles"]) >= {"min", "median", "max"}
+    assert "Optuna trials (4h, 2018-07-01 to 2019-10-01)" in cp["configs_source"]
+    assert run_id in cp["configs_source"] and "No new backtests" in cp["configs_source"]
+    assert cp["basis"].startswith("upper bound: candidates were chosen by a search")
+    # 8 trials < n_startup_trials = 10: every trial of this sweep was a random start-up draw
+    cs = st["cpcv_startup"]
+    assert "missing" not in cs and cs["n_configs"] == 8
+    assert cs["path_sharpes"] == cp["path_sharpes"]
+    assert len(rep["rows"]) == 14  # statistics never adds a criterion row
+
+
+def test_start_run_refuses_an_effective_dsr_trial_count(tmp_path: Path) -> None:
+    """Phase 11 review C1: the participation-ratio effective N is a diagnostic only, so a
+    criteria file choosing it never starts a run (and records nothing)."""
+    lab = Lab(tmp_path, criteria={"dsr_trial_count": "effective"})
+    text = error_text(lab.server, "start_run", {"label": "effective-n"})
+    assert 'dsr_trial_count = "effective" is not accepted' in text
+    assert "diagnostic only" in text and 'use "nominal"' in text
+    with lab.ledger() as led:
+        assert led.research_runs() == []
+
+
 def test_get_ledger_limits_and_counts(tmp_path: Path) -> None:
     lab = Lab(tmp_path)
     run_id = lab.start()

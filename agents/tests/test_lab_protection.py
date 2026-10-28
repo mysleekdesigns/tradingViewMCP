@@ -29,8 +29,11 @@ from research.sdk_runner import SdkAgentRunner, deny_unsafe_tools, unsafe_tool_r
 HOOKS = REPO_ROOT / ".claude" / "hooks"
 LOCKED_PATHS = (
     "lab/lab/engine/backtest.py",
+    "lab/lab/engine/splits.py",  # Phase 11: walk-forward folds and CPCV splits
     "lab/lab/registry/features.py",
     "lab/lab/stats/sharpe.py",
+    "lab/lab/stats/cpcv.py",  # Phase 11: CPCV path Sharpes
+    "lab/lab/stats/effective_n.py",  # Phase 11: effective number of trials
     "lab/config/success_criteria.toml",
 )
 

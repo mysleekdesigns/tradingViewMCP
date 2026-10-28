@@ -32,6 +32,7 @@ from lab.research.runs import (
     lab_fingerprint,
     new_run_id,
     run_usage,
+    software_values,
     start_research_run,
 )
 from tests.test_mcp_server import PROPOSED_CRITERIA, small_cfg, write_criteria
@@ -287,8 +288,10 @@ def test_start_research_run_snapshots_the_lab_config(ledger: Ledger, tmp_path: P
     assert values["costs"]["fee_rate"] == cfg.costs.fee_rate
     text = json.dumps(values, sort_keys=True, separators=(",", ":"))
     assert lab["fingerprint"] == hashlib.sha256(text.encode()).hexdigest()
-    # criteria + budget are still frozen alongside, and the file hash is unchanged
-    assert set(run["config"]) == {"criteria", "budget", "lab"}
+    # criteria + budget are still frozen alongside, and the file hash is unchanged; the software
+    # record (Phase 11) is frozen BESIDE the fingerprint, never inside lab_values
+    assert set(run["config"]) == {"criteria", "budget", "lab", "software"}
+    assert run["config"]["software"] == software_values()
 
 
 @pytest.mark.parametrize(

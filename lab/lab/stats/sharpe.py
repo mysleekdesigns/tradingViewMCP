@@ -1,21 +1,30 @@
-"""Probabilistic and Deflated Sharpe ratios (PLAN.md Phase 7 How §6).
+"""Probabilistic and Deflated Sharpe ratios, MinTRL and MinBTL (PLAN.md Phase 7 How §6, Phase 11).
 
 * PSR / MinTRL - Bailey & López de Prado (2012), "The Sharpe Ratio Efficient Frontier",
   Journal of Risk 15(2), eqs. 8, 11, 13.
 * DSR - Bailey & López de Prado (2014), "The Deflated Sharpe Ratio: Correcting for Selection
   Bias, Backtest Overfitting and Non-Normality", Journal of Portfolio Management 40(5),
   eq. 5 (expected max Sharpe ``SR0``) and eq. 6 (``DSR = PSR(SR0)``).
+* MinBTL - Bailey, Borwein, López de Prado & Zhu (2014), "Pseudo-Mathematics and Financial
+  Charlatanism: The Effects of Backtest Overfitting on Out-of-Sample Performance", Notices of
+  the AMS 61(5): the expected-maximum bound inverted for the backtest length.
 
 Every Sharpe here is **per bar** (not annualised): the formulas are written for the per-period
-statistic and its sample length.
+statistic and its sample length. The one exception is ``min_backtest_length``, which, like the
+paper, takes an annualised target Sharpe and returns years.
 
-Reuse of ``hedgefund.backtest.significance``: ``expected_max_sharpe`` (eq. 5) is imported as
-is (per period, no 252-day assumption). hedgeFund's PSR and MinTRL only accept a return series,
-but the published worked examples are stated as summary moments (SR, n, skew, kurtosis), so
-the formulas live here at moment level (``psr_from_moments``,
-``min_track_record_length_from_moments``) and the return-level functions call them. Tests
-assert they equal hedgeFund's ``probabilistic_sharpe_ratio`` / ``min_track_record_length`` on
-the same returns, so both implementations are pinned to the papers' numbers.
+Reuse of ``hedgefund.backtest.significance``: ``expected_max_sharpe`` (eq. 5) is re-exported as
+is (per period, no 252-day assumption). Its bracket term is also written out here as
+``expected_max_z`` (the standardised expected maximum, accepting a fractional trial count)
+because MinBTL needs it on its own; ``deflated_sharpe`` uses ``expected_max_z`` with the same
+operation order (the clamp at 0 only acts for 1 < N < ~1.3), so its numbers are
+bit-identical to the hedgeFund route for every integer N (tested).
+hedgeFund's PSR and MinTRL only accept a return series, but the published worked examples are
+stated as summary moments (SR, n, skew, kurtosis), so the formulas live here at moment level
+(``psr_from_moments``, ``min_track_record_length_from_moments``) and the return-level functions
+call them. Tests assert they equal hedgeFund's ``probabilistic_sharpe_ratio`` /
+``min_track_record_length`` on the same returns, so both implementations are pinned to the
+papers' numbers. ``tests/test_stats_crosscheck.py`` also checks them against ``purgedcv``.
 
 ``n_trials`` must be the run's full trial count from the ledger (every backtest, every Optuna
 trial), and ``sharpe_variance`` the variance of those trials' per-bar Sharpes.
@@ -23,6 +32,7 @@ trial), and ``sharpe_variance`` the variance of those trials' per-bar Sharpes.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -37,6 +47,8 @@ __all__ = [
     "DSRResult",
     "deflated_sharpe",
     "expected_max_sharpe",
+    "expected_max_z",
+    "min_backtest_length",
     "min_track_record_length",
     "min_track_record_length_from_moments",
     "probabilistic_sharpe",
@@ -53,6 +65,70 @@ class DSRResult:
     sr0_per_bar: float  # expected max per-bar Sharpe of n_trials zero-skill trials
     n_trials: int
     sharpe_variance: float  # variance of the trials' per-bar Sharpes, as given
+
+
+def _check_trial_count(n_trials: float) -> float:
+    if isinstance(n_trials, bool):
+        raise ValueError(f"n_trials must be a number, got {n_trials!r}")
+    n = float(n_trials)
+    if not np.isfinite(n):
+        raise ValueError(f"n_trials must be finite, got {n_trials!r}")
+    return n
+
+
+def expected_max_z(n_trials: float) -> float:
+    """Standardised expected maximum of ``n_trials`` independent N(0, 1) draws.
+
+    The bracket of Bailey & López de Prado (2014) eq. 5 (Euler-Mascheroni approximation)::
+
+        E[max Z] ~ (1 - g) * Phi^-1(1 - 1/N) + g * Phi^-1(1 - 1/(N e)),  g = 0.5772...
+
+    ``SR0 = sqrt(V) * expected_max_z(N)``. ``n_trials`` may be fractional. ``0.0`` for
+    ``N <= 1``: with at most one independent trial nothing was selected (the formula diverges
+    at N = 1). Clamped at ``0.0`` from below: just above ``N = 1`` (``1 < N < ~1.3``) the
+    approximation goes negative, while the expected maximum of ``N >= 1`` draws is never below
+    the mean of one draw (0); the clamp keeps it non-decreasing in ``N``. Raises
+    ``ValueError`` for a non-finite ``n_trials``.
+    """
+    n = _check_trial_count(n_trials)
+    if n <= 1.0:
+        return 0.0
+    gamma = np.euler_gamma
+    z_max = (1.0 - gamma) * sp_stats.norm.ppf(1.0 - 1.0 / n)
+    z_max += gamma * sp_stats.norm.ppf(1.0 - 1.0 / (n * np.e))
+    return max(0.0, float(z_max))
+
+
+def min_backtest_length(n_trials: float, target_sharpe_annual: float) -> float:
+    """Minimum backtest length (MinBTL) in **years**; Bailey, Borwein, López de Prado & Zhu
+    (2014), Notices of the AMS 61(5).
+
+    With ``N`` zero-skill configurations whose annualised Sharpes over ``y`` years have standard
+    deviation ``1 / sqrt(y)``, the expected best annualised Sharpe is about
+    ``expected_max_z(N) / sqrt(y)``. MinBTL is the length at which that luck-only maximum equals
+    ``target_sharpe_annual``::
+
+        MinBTL = (expected_max_z(N) / SR_target)^2        [years]
+
+    Below it, an annualised Sharpe of ``SR_target`` from the best of ``N`` trials is within what
+    selection alone produces. The paper also gives the simpler upper bound
+    ``MinBTL < 2 ln N / SR_target^2``; this is the tighter Z form (the same one ``purgedcv``
+    uses; cross-checked in ``tests/test_stats_crosscheck.py``).
+
+    Convert to bars with ``years * bars_per_year(interval)`` (``lab.types.bars_per_year``,
+    365-day crypto year), never 252.
+
+    ``0.0`` for ``N <= 1`` (no selection); ``math.inf`` for a non-positive or non-finite
+    target (no length makes a zero or negative Sharpe evidence of skill). ``n_trials`` may be
+    fractional; a non-finite one raises ``ValueError``.
+    """
+    n = _check_trial_count(n_trials)
+    target = float(target_sharpe_annual)
+    if not np.isfinite(target) or target <= 0.0:
+        return math.inf
+    if n <= 1.0:
+        return 0.0
+    return float((expected_max_z(n) / target) ** 2)
 
 
 def _returns_array(returns: pd.Series | np.ndarray | Sequence[float]) -> np.ndarray:
@@ -197,7 +273,7 @@ def deflated_sharpe(
     sr0 = (
         0.0
         if n_trials == 1 or not np.isfinite(var) or var == 0
-        else (expected_max_sharpe(n_trials, var))
+        else float(np.sqrt(var) * expected_max_z(n_trials))
     )
     sr, g3, g4, n = _moments(arr)
     psr = psr_from_moments(sr, n, g3, g4, 0.0)

@@ -85,3 +85,20 @@ Phase 10 wave 2 portfolio pipeline (lab/lab/portfolio_runner.py, research/portfo
 - Round 2 conventions: rebalance.offset pinned 0 server-side (schema const 0); delay check = k*every rows of stale inputs on the same rebalance rows; schedule phase = position from the panel's first row (data start, not window start), so folds/holdout share it; stale rank table cuts the design window and refuses the holdout.
 - Fail closed without [portfolio] criteria table (3 rows missing). min_trades = filled rebalances (~1 per decision with min_rebalance 0, so 100 is weak).
 - Phase 10 H4 null verified 2026-10-26: only `research/portfolio_criteria.py` reads `benchmarks.random_selection.percentile`; `vol_only_sidebar` is nested, not ledgered, not read by agents/. Default-off/vol-only null bit-identical to a5fa079 (qr/bitid.py, 4000 cases incl. RNG state). Kept targets the survivors cannot match go to the fresh band draw (need = k - kept matched, turnover unchanged). The lab-lock hook blocks shell commands whose text names `lab/registry` etc. even for reads: use the Read tool or python `inspect`.
+
+Phase 11 (2026-10-28) verified conventions:
+- Software record lives in `config["software"]` BESIDE `config["lab"]` (not inside hashed lab_values, so pre-Phase-11 runs stay readable); runs without the key are not checked. Lab's own code version is NOT recorded.
+- `make_tpe_sampler(seed)` = TPESampler(seed, multivariate=True, constant_liar=True, n_startup_trials=10, n_ei_candidates=24, group=False); identical to 5.0's `TPESampler(seed=seed)` for single-objective (multivariate=None -> not multi-objective -> True). Deprecated knobs (gamma, weights, prior_weight, consider_endpoints/magic_clip) not recorded; version string covers them.
+- purgedcv 0.1.11 conventions: SR ddof=0, skew/kurt bias=False (raw kurt), annualised V / bars_per_year, MinTRL 1+ceil, PBO input (n_configs, n_obs), logit < 0, CPCV purge by label overlap both sides. Measured return-level gap at n=2000, 50 seeds: PSR 1.3e-4, DSR 3.7e-4 (band 1e-3). Its effective_n_trials is a different estimator (autocorrelation time).
+
+Phase 11 part 1 (2026-10-28) verified:
+- MinBTL = expected_max_z(N)^2 / SR_annual^2 years (Bailey-Borwein-LdP-Zhu 2014); paper example N=45, SR 1 -> 4.998 y. Report: target = plan's observed design net Sharpe x sqrt(bars_per_year 365-day), N = the DSR's N.
+- MinTRL at SR0 (DSR's deflated benchmark) and confidence = dsr_min: DSR >= c <=> n >= MinTRL is exact (same moments, same n-1); length reason appended only to non-pass dsr_min rows, never changes status.
+- CPCV: contiguous groups (remainder to first groups), purge before / embargo (ceil 1% T) after each merged test block, AFML path rule; best-in-train per split on train mask only (hidden-bar perturbation test is strong). Reads ledgered sweep trials, adds no trials, DSR N unchanged.
+- frozen_criteria: absent dsr_trial_count -> "nominal"; 11 real runs, none had the key on 2026-10-28; installed lab/config/success_criteria.toml has no key.
+- trial_count: plan set == count_distinct_plans_research (SELECTION_SOURCES); window_kind preference design > WF train > WF test > custom; holdout excluded by kind only (no date guard). Real ledger kinds: design / walk_forward_train / walk_forward_test only. Global compute 9.7 s at M=4,198, T=2,464 days.
+
+Phase 11 round 2 (2026-10-28) verified:
+- holdout_check calls evaluate_plan (so plan_statistics) BEFORE record_holdout_check: any exception in the statistics block refuses without spending. Only the effective-N part is try-wrapped; CPCV/MinBTL/MinTRL failures would break get_report (fail closed).
+- Optuna TPE 5.0 counts COMPLETE + PRUNED trials toward n_startup_trials; lab objectives never raise except TrialPruned (portfolio infeasible), one ledger row per trial; MCP guard+run hold a per-run lock, so same-run sweeps never interleave.
+- plan_return_trials guard `window_end <= holdout_start` is right: Window is half-open [start, end).

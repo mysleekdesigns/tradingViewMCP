@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import optuna
 import pandas as pd
 import pytest
 
@@ -678,3 +679,75 @@ def test_open_position_at_a_fold_boundary_is_charged_its_exit(
 
 def with_fold_params(plan: Plan, params: dict) -> Plan:
     return with_params(plan, params)
+
+
+# --------------------------------------------------------------------------- explicit TPE sampler
+
+
+def _seeded_proposals(sampler: optuna.samplers.BaseSampler, n: int = 25) -> list[dict]:
+    """Params proposed for a fixed single-objective study (int + float space, deterministic
+    objective), so two samplers are compared on exactly what they suggest."""
+    study = optuna.create_study(direction="maximize", sampler=sampler)
+    study.optimize(
+        lambda t: (
+            -((t.suggest_float("x", 0.0, 10.0) - 3.0) ** 2)
+            - (t.suggest_int("n", 1, 50) - 20) ** 2 / 100.0
+            + t.suggest_float("y", -1.0, 1.0)
+        ),
+        n_trials=n,
+    )
+    return [t.params for t in study.trials]
+
+
+@pytest.mark.parametrize("seed", [0, 3, 42])
+def test_explicit_tpe_settings_propose_what_the_default_sampler_did(seed: int) -> None:
+    # 25 trials = 10 random start-up trials + 15 TPE proposals, so the model-based part is
+    # compared too; equality must be exact (same seed, same algorithm).
+    explicit = _seeded_proposals(search_mod.make_tpe_sampler(seed))
+    default = _seeded_proposals(optuna.samplers.TPESampler(seed=seed))
+    assert explicit == default
+
+
+def test_the_sampler_settings_comparison_can_fail() -> None:
+    # guard against a vacuous equality above: flipping one recorded setting changes proposals
+    changed = optuna.samplers.TPESampler(
+        seed=3, **{**search_mod.TPE_SAMPLER_SETTINGS, "multivariate": False}
+    )
+    assert _seeded_proposals(changed) != _seeded_proposals(search_mod.make_tpe_sampler(3))
+
+
+def test_make_tpe_sampler_states_every_recorded_setting() -> None:
+    sampler = search_mod.make_tpe_sampler(7)
+    settings = search_mod.TPE_SAMPLER_SETTINGS
+    assert sampler._multivariate is settings["multivariate"] is True
+    assert sampler._constant_liar is settings["constant_liar"] is True
+    assert sampler._n_startup_trials == settings["n_startup_trials"] == 10
+    assert sampler._n_ei_candidates == settings["n_ei_candidates"] == 24
+    assert sampler._group is settings["group"] is False
+
+
+def test_optuna_search_builds_its_study_with_make_tpe_sampler(
+    tmp_path: Path, candles: pd.DataFrame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeds: list[int | None] = []
+    real = search_mod.make_tpe_sampler
+
+    def spy(seed: int | None) -> optuna.samplers.TPESampler:
+        seeds.append(seed)
+        return real(seed)
+
+    monkeypatch.setattr(search_mod, "make_tpe_sampler", spy)
+    with Ledger(tmp_path / "l.db") as led:
+        run_search(ema_plan(), candles, lab_cfg(tmp_path), led, n=2, seed=9)
+    assert seeds == [9]
+
+
+def test_no_study_builds_a_tpe_sampler_with_implicit_defaults() -> None:
+    # the portfolio search is built the same way; only make_tpe_sampler constructs a TPESampler
+    portfolio_runner = importlib.import_module("lab.portfolio_runner")
+    assert portfolio_runner.make_tpe_sampler is search_mod.make_tpe_sampler
+    assert "samplers.TPESampler(" not in inspect.getsource(portfolio_runner)
+    assert "sampler=make_tpe_sampler(seed)" in inspect.getsource(portfolio_runner)
+    source = inspect.getsource(search_mod)
+    assert source.count("optuna.samplers.TPESampler(") == 1  # inside make_tpe_sampler only
+    assert "sampler=make_tpe_sampler(seed)" in source

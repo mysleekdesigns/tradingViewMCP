@@ -24,6 +24,11 @@ regime_threshold = 0.10             # +/-10% over it separates trending from ran
 neighbourhood_pct = 0.2             # +/-20% parameter neighbours stay profitable
 require_holdout_pass = true         # passes the locked holdout
 require_crosscheck_match = true     # matches in the event-driven cross-check engine
+# Which trial count N the Deflated Sharpe Ratio deflates with (PLAN.md Phase 11), frozen at
+# start_run. Only "nominal" (every distinct plan tried in every run of the lab) is accepted.
+# Why not "effective": the participation ratio counts the shared market factor twice and
+# falls as near-copies are added, so zero-skill plans pass too often (get_report: diagnostic).
+dsr_trial_count = "nominal"
 
 [budget]
 max_hypotheses = 5                  # ideas tested per run

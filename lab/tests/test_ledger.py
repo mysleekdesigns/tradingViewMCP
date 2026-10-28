@@ -672,3 +672,101 @@ def test_returns_matrix_filters_by_source_and_study(ledger: Ledger) -> None:
     assert ids == [a, b]
     m, ids = ledger.returns_matrix("run-a", window_start=W_START, window_end=W_END, studies=[])
     assert m.shape == (0, 0) and ids == []
+
+
+# --------------------------------------------------------------------------- plan_return_trials
+
+# The design split's holdout start for these tests: every default window ends exactly on it
+# (window_end == holdout_start is allowed: bars are [start, end)).
+HOLDOUT = W_END
+
+
+def _plan(ledger: Ledger, h: str, **over: object) -> int:
+    """Record one trial of plan ``h`` (design window, ok, 6 returns unless overridden)."""
+    base = make_record(returns=np.full(6, 0.01))
+    fields: dict[str, object] = {"plan_hash": h * 64, "window_kind": "design", **over}
+    if fields.get("status") == "error":
+        fields.update(returns=None, sharpe_per_bar=None, metrics_json="{}", error="boom")
+    return ledger.record(replace(base, **fields))  # type: ignore[arg-type]
+
+
+def test_plan_return_trials_covers_the_nominal_plan_set(ledger: Ledger) -> None:
+    """Phase 11: one returns trial per plan of the nominal N (global and per run); plans
+    without a usable non-holdout selection trial are listed as missing, never dropped."""
+    _research(ledger, "r1")
+    _plan(ledger, "a", run_id="r1")
+    _plan(ledger, "b", run_id="r1", status="error")  # error only
+    _plan(ledger, "c", run_id="r2", window_kind="holdout", source="manual")  # holdout only
+    _plan(ledger, "d", run_id="r2", status="error")
+    _plan(ledger, "d", run_id="r2", source="adversarial")  # same hash, not a selection source
+    _plan(ledger, "e", run_id="ui", window_kind="custom")
+    _plan(ledger, "f", run_id="r2", source="benchmark")  # not in the plan set at all
+    meta, missing = ledger.plan_return_trials(holdout_start=HOLDOUT)
+    assert {m["plan_hash"] for m in meta} == {"a" * 64, "e" * 64}
+    assert missing == {"b" * 64, "c" * 64, "d" * 64}
+    assert len(meta) + len(missing) == ledger.count_distinct_plans_research() == 5
+    for run in ("r1", "r2", "ui"):
+        meta, missing = ledger.plan_return_trials(run_id=run, holdout_start=HOLDOUT)
+        assert len(meta) + len(missing) == ledger.count_distinct_plans(run)
+    meta, missing = ledger.plan_return_trials(run_id="r2", holdout_start=HOLDOUT)
+    assert meta == [] and missing == {"c" * 64, "d" * 64}
+
+
+def test_plan_return_trials_prefers_design_then_train_then_test_and_never_the_holdout(
+    ledger: Ledger,
+) -> None:
+    design = _plan(ledger, "a", source="api")
+    _plan(ledger, "a", source="api", window_kind="walk_forward_train")  # newer, worse kind
+    _plan(ledger, "a", source="manual", window_kind="holdout")  # newest: never read
+    test = _plan(ledger, "b", source="optuna", window_kind="walk_forward_test")
+    train_old = _plan(ledger, "b", source="optuna", window_kind="walk_forward_train")
+    train_new = _plan(ledger, "b", source="optuna", window_kind="walk_forward_train")
+    _plan(ledger, "c", window_kind="custom")
+    newest_design = _plan(ledger, "c")
+    meta, missing = ledger.plan_return_trials(holdout_start=HOLDOUT)
+    assert missing == set()
+    by_plan = {m["plan_hash"][0]: m for m in meta}
+    assert by_plan["a"]["trial_id"] == design and by_plan["a"]["window_kind"] == "design"
+    assert by_plan["b"]["trial_id"] == train_new and train_new > train_old > test
+    assert by_plan["c"]["trial_id"] == newest_design
+    assert by_plan["a"] == {
+        "plan_hash": "a" * 64,
+        "trial_id": design,
+        "run_id": "run-a",
+        "symbol": "BTCUSDT",
+        "interval": "4h",
+        "window_start": int(W_START.timestamp()),
+        "window_end": int(W_END.timestamp()),
+        "n_returns": 6,
+        "window_kind": "design",
+    }
+    np.testing.assert_array_equal(ledger.trial_returns(design), np.full(6, 0.01))
+
+
+def test_plan_return_trials_rejects_unknown_sources_and_bad_run_ids(ledger: Ledger) -> None:
+    with pytest.raises(ValueError, match="sources"):
+        ledger.plan_return_trials(sources=("nope",), holdout_start=HOLDOUT)
+    with pytest.raises(ValueError, match="run_id"):
+        ledger.plan_return_trials(run_id=3, holdout_start=HOLDOUT)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="holdout_start"):
+        ledger.plan_return_trials(holdout_start=pd.Timestamp("2021-07-01"))  # naive
+
+
+def test_plan_return_trials_never_reads_a_window_that_runs_past_the_holdout(
+    ledger: Ledger,
+) -> None:
+    """A date guard, not only a window_kind filter: a ``custom`` (or any non-holdout kind)
+    window that ends after holdout_start is never chosen, even when it is the plan's newest
+    or best-ranked trial; a plan with only such trials is missing."""
+    late = W_END + pd.Timedelta(days=30)
+    safe = _plan(ledger, "a", window_kind="custom")
+    _plan(ledger, "a", window_kind="custom", window_end=late)  # newer, crosses the holdout
+    _plan(ledger, "b", window_kind="custom", window_end=late)  # only a crossing trial
+    _plan(ledger, "c", window_kind="design", window_end=late)  # best kind, still crossing
+    meta, missing = ledger.plan_return_trials(holdout_start=HOLDOUT)
+    assert [m["trial_id"] for m in meta] == [safe]
+    assert missing == {"b" * 64, "c" * 64}
+    assert all(m["window_end"] <= int(HOLDOUT.timestamp()) for m in meta)
+    # with a later holdout the same rows are readable again (the guard is the date)
+    meta, missing = ledger.plan_return_trials(holdout_start=late)
+    assert {m["plan_hash"][0] for m in meta} == {"a", "b", "c"} and missing == set()

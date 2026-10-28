@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tomllib
-from dataclasses import asdict, dataclass
+from dataclasses import MISSING, asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -40,6 +40,22 @@ class ResearchConfigError(RuntimeError):
     """The success-criteria file is missing or malformed. Research must not start."""
 
 
+# ``[criteria] dsr_trial_count``: which trial count N the DSR row deflates with. Only "nominal"
+# (every distinct plan tried in every run of the lab) is accepted. The eigenvalue
+# participation-ratio "effective" N (lab.research.trial_count) is reported as a diagnostic only:
+# it counts the shared market factor a second time (V[SR] already reflects it), it FALLS when
+# near-copies are added, and it is capped near 1 / (top eigenvalue share)^2 and biased down by
+# M / T, so a zero-skill null passes DSR far more often than nominal. Absent -> "nominal".
+DSR_TRIAL_COUNTS: tuple[str, ...] = ("nominal",)
+
+# Why "effective" is refused, in the config loader and for a hand-forged frozen snapshot.
+DSR_EFFECTIVE_REFUSED = (
+    'dsr_trial_count = "effective" is not accepted: the participation-ratio effective N is a '
+    "diagnostic only (it double-counts the shared market factor and falls as trials are "
+    'added), until an estimator v2 passes its calibration tests; use "nominal"'
+)
+
+
 @dataclass(frozen=True)
 class SuccessCriteria:
     """PLAN.md Phase 8 success criteria. A candidate must pass every one."""
@@ -60,6 +76,13 @@ class SuccessCriteria:
     neighbourhood_pct: float  # ±pct parameter neighbours must stay profitable
     require_holdout_pass: bool
     require_crosscheck_match: bool  # event-driven cross-check engine agrees
+    # DSR N: "nominal" (distinct plans) only; see DSR_TRIAL_COUNTS. Last and defaulted, so a
+    # run frozen before it existed reads "nominal".
+    dsr_trial_count: str = "nominal"
+
+
+# The allowed values of every string-valued criteria key (``_section`` rejects anything else).
+_STR_CHOICES: dict[str, tuple[str, ...]] = {"dsr_trial_count": DSR_TRIAL_COUNTS}
 
 
 @dataclass(frozen=True)
@@ -103,18 +126,30 @@ def _section(raw: dict[str, Any], name: str, cls: type) -> Any:
         raise ResearchConfigError(f"success criteria file has no [{name}] table")
     table = raw[name]
     fields = cls.__dataclass_fields__
-    missing = sorted(set(fields) - set(table))
+    # a field with a default (``dsr_trial_count``) is optional; every other key is required
+    required = {k for k, f in fields.items() if f.default is MISSING}
+    missing = sorted(required - set(table))
     extra = sorted(set(table) - set(fields))
     if missing or extra:
         raise ResearchConfigError(f"[{name}] missing keys {missing}, unknown keys {extra}")
     values: dict[str, Any] = {}
     for key, field in fields.items():
+        if key not in table:
+            continue  # optional: the dataclass default applies
         v = table[key]
         kind = field.type
         if kind == "bool":
             ok = isinstance(v, bool)
         elif kind == "int":
             ok = isinstance(v, int) and not isinstance(v, bool) and v >= 0
+        elif kind == "str":
+            choices = _STR_CHOICES.get(key, ())
+            if key == "dsr_trial_count" and v == "effective":
+                raise ResearchConfigError(f"[{name}] {DSR_EFFECTIVE_REFUSED}")
+            if not (isinstance(v, str) and v in choices):
+                allowed = " | ".join(f'"{c}"' for c in choices)
+                raise ResearchConfigError(f"[{name}] {key} = {v!r} must be one of {allowed}")
+            ok = True
         else:
             ok = isinstance(v, int | float) and not isinstance(v, bool) and v >= 0
             v = float(v)

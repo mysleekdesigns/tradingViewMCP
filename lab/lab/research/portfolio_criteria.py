@@ -8,7 +8,8 @@ from the run's frozen optional ``[portfolio]`` criteria table:
 ==============================  ============================================================
 ``wf_oos_sharpe_min``           as single-symbol: MIN stitched OOS net Sharpe over every
                                 ``walk_forward`` of the behaviour family in every run
-``dsr_min``                     as single-symbol: re-deflated with the global N and the
+``dsr_min``                     as single-symbol: re-deflated with the global nominal N
+                                (the effective N is a diagnostic only) and the
                                 largest V[SR] (portfolio trials only share a cost model with
                                 portfolio trials, so V[SR] is over portfolio plans)
 ``pbo_max``                     as single-symbol: max of the neighbourhood PBO and the
@@ -40,6 +41,9 @@ from the run's frozen optional ``[portfolio]`` criteria table:
 ``alpha_min_annual``            ``[portfolio]``: annualised net alpha to BTC > it
 ==============================  ============================================================
 
+The report carries the same information-only ``statistics`` block as single-symbol plans
+(:func:`lab.research.criteria.plan_statistics`).
+
 Without a frozen ``[portfolio]`` table the three portfolio rows are "missing", so
 ``pre_holdout_passed`` is False (fail closed) and the note tells the owner to install it.
 
@@ -69,7 +73,7 @@ from lab.research.criteria import (
     _cost_row,
     _dd_row,
     _delay_row,
-    _dsr_row,
+    _dsr_eval,
     _fmt,
     _get,
     _holdout_row,
@@ -80,6 +84,10 @@ from lab.research.criteria import (
     _row,
     _side_gaps,
     _wf_row,
+    plan_statistics,
+    sweep_matrices,
+    trial_n,
+    with_length_reason,
 )
 from lab.research.family import FamilyInfo, family_evidence
 from lab.research.logic import as_portfolio_plan
@@ -431,11 +439,15 @@ def evaluate_portfolio_plan(
         family = FamilyInfo(logic_hashes=set(), plan_hashes={plan_hash})
     wfs = [row["payload"] for row in family_evidence(ledger, family, "walk_forward")]
     sweeps = family_evidence(ledger, family, "sweep")
-    dsr_row, _ = _dsr_row(c, ledger, run_id, plan_hash, bt, cfg)
+    # the same DSR N, statistics block and length reason as single-symbol plans
+    matrices = sweep_matrices(ledger, sweeps)
+    tn = trial_n(c, ledger)
+    dsr = _dsr_eval(c, ledger, run_id, plan_hash, bt, cfg, tn)
+    statistics = plan_statistics(c, ledger, bt, tn, dsr, matrices, run_id=run_id, cfg=cfg)
     by_name: dict[str, CriterionRow] = {
         "wf_oos_sharpe_min": _wf_row(c, wfs, family),
-        "dsr_min": dsr_row,
-        "pbo_max": _pbo_row(c, ledger, bt, sweeps, cfg),
+        "dsr_min": with_length_reason(dsr.row, statistics),
+        "pbo_max": _pbo_row(c, ledger, bt, sweeps, cfg, matrices),
         "beat_buy_hold": _beat_row(
             "beat_buy_hold", c.beat_buy_hold, bt, "btc_buy_and_hold", "BTC buy-and-hold"
         ),
@@ -466,4 +478,5 @@ def evaluate_portfolio_plan(
         missing=[r["criterion"] for r in rows if r["status"] == "missing"],
         ledger_n=ledger.count_distinct_plans_research(sources=SELECTION_SOURCES),
         budget=budget_status(ledger, run_id, cfg),
+        statistics=statistics,
     )

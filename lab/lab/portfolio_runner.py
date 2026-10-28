@@ -97,7 +97,12 @@ from lab.plan.validator import PlanValidationError
 from lab.registry import cross_section as xs
 from lab.report import metrics_dict, num, seconds, to_jsonable
 from lab.runner import CandleLoader, DataUnavailableError, neighbourhood_overrides, pbo_split_count
-from lab.search.optuna_search import FAILED_OBJECTIVE, params_json, study_meta
+from lab.search.optuna_search import (
+    FAILED_OBJECTIVE,
+    make_tpe_sampler,
+    params_json,
+    study_meta,
+)
 from lab.stats import (
     deflated_sharpe,
     metrics_from_returns,
@@ -1804,7 +1809,7 @@ def portfolio_sweep(
         return float(m.sharpe)
 
     study = optuna.create_study(
-        direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed), study_name=study_name
+        direction="maximize", sampler=make_tpe_sampler(seed), study_name=study_name
     )
     study.optimize(objective, n_trials=n_trials, catch=())
     finite = [i for i, s in enumerate(sharpes) if math.isfinite(s)]
