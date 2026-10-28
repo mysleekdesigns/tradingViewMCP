@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   HEADER_CSS_HEIGHT,
   REVOKE_DELAY_MS,
+  captureChart,
   composeScreenshot,
   downloadCanvas,
   screenshotFilename,
@@ -158,5 +159,39 @@ describe('downloadCanvas', () => {
     const { doc, canvas, clicks } = setup(null)
     await expect(downloadCanvas(canvas, 'x.png', doc)).rejects.toThrow(/PNG/)
     expect(clicks).toEqual([])
+  })
+})
+
+describe('captureChart', () => {
+  // Models LWC 5.2.1's takeScreenshot: the main canvases always; the top canvases (series
+  // primitives with zOrder 'top', i.e. the drawings, plus the crosshair) only with
+  // addTopLayer; the crosshair only with addTopLayer && includeCrosshair. Both default false.
+  function fakeChart() {
+    const takeScreenshot = vi.fn((addTopLayer = false, includeCrosshair = false) => {
+      const layers = ['candles']
+      if (addTopLayer) layers.push('drawings')
+      if (addTopLayer && includeCrosshair) layers.push('crosshair')
+      return { layers } as unknown as HTMLCanvasElement
+    })
+    return { takeScreenshot }
+  }
+  const layersOf = (c: HTMLCanvasElement) => (c as unknown as { layers: string[] }).layers
+
+  it('asks for the top layer (drawings) and leaves the crosshair out', () => {
+    const chart = fakeChart()
+    const shot = captureChart(chart)
+    expect(chart.takeScreenshot).toHaveBeenCalledTimes(1)
+    expect(chart.takeScreenshot).toHaveBeenCalledWith(true, false)
+    expect(layersOf(shot)).toEqual(['candles', 'drawings'])
+  })
+
+  it('a bare takeScreenshot() would lose the drawings (why captureChart exists)', () => {
+    expect(layersOf(fakeChart().takeScreenshot())).toEqual(['candles'])
+  })
+
+  it('returns the chart canvas unchanged, ready for composeScreenshot', () => {
+    const canvas = fakeCanvas(800, 600).canvas
+    const chart = { takeScreenshot: vi.fn(() => canvas) }
+    expect(captureChart(chart)).toBe(canvas)
   })
 })

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { CHART_MAX_BARS } from '../chart/conflation'
 import { LabError, LAB_OFFLINE_MESSAGE } from '../data/labApi'
 import type { BacktestReport, LabMetrics } from '../data/labTypes'
 import {
@@ -26,6 +27,8 @@ import {
   historyLoadFailed,
   historyLoadReducer,
   historyPlan,
+  historyRoom,
+  unreachableText,
   initialHistoryLoad,
   initTesterState,
   labIntervalFor,
@@ -490,6 +493,13 @@ describe('chart link', () => {
     expect(isChartInterval('3m')).toBe(false)
   })
 
+  it('keeps the backtest history cap separate from the chart scroll-back cap', () => {
+    // Phase 14 raised only the chart's paging cap (conflation makes 100k+ bars cheap to draw);
+    // a backtest history load still stops at MAX_HISTORY_BARS.
+    expect(MAX_HISTORY_BARS).toBe(20_000)
+    expect(CHART_MAX_BARS).toBeGreaterThan(MAX_HISTORY_BARS)
+  })
+
   it('plans the older bars needed to show the design window', () => {
     const h = 3600
     const w = { kind: 'design' as const, start: 0, end: (MAX_HISTORY_BARS + 100) * h }
@@ -622,6 +632,41 @@ describe('dock prefs', () => {
 })
 
 describe('history cap', () => {
+  it('gives one backtest load at most MAX_HISTORY_BARS, never past the chart cap', () => {
+    expect(historyRoom(0)).toBe(MAX_HISTORY_BARS)
+    // 60k bars already loaded (scroll-back paging): a load still fetches up to 20k more.
+    expect(historyRoom(60_000)).toBe(MAX_HISTORY_BARS)
+    expect(historyRoom(CHART_MAX_BARS - 5_000)).toBe(5_000)
+    expect(historyRoom(CHART_MAX_BARS)).toBe(0)
+    expect(historyRoom(CHART_MAX_BARS + 10)).toBe(0)
+    expect(historyRoom(100, 50, 120)).toBe(20)
+  })
+
+  it('plans a 20k-bar load on a chart already holding 60k bars', () => {
+    const h = 3600
+    const first = 1_700_000_000
+    const w = { kind: 'design' as const, start: first - 100_000 * h, end: first - 10_000 * h }
+    expect(historyPlan(first, w, '1h', historyRoom(60_000))).toEqual({
+      needed: true,
+      target: first - MAX_HISTORY_BARS * h,
+      bars: MAX_HISTORY_BARS,
+      partial: true,
+      unreachable: false,
+    })
+    // A chart already at CHART_MAX_BARS has no room left for this load.
+    expect(historyPlan(first, w, '1h', historyRoom(CHART_MAX_BARS))).toMatchObject({
+      bars: 0,
+      partial: true,
+    })
+  })
+
+  it('states the real per-load and chart limits when the window is out of reach', () => {
+    const text = unreachableText(0)
+    expect(text).toContain('20,000 older bars per load')
+    expect(text).toContain('150,000 bars on the chart')
+    expect(text).not.toMatch(/20,000-bar chart limit/)
+  })
+
   it('loads nothing more once the chart holds the maximum bars', () => {
     const w = { kind: 'design' as const, start: 0, end: 200 * 3600 }
     expect(historyPlan(100 * 3600, w, '1h', 0)).toEqual({

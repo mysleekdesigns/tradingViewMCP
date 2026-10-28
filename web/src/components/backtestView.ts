@@ -13,6 +13,7 @@ import type {
   WalkForwardFold,
 } from '../data/labTypes'
 import { isNativeInterval, timeframeSeconds } from '../data/timeframes'
+import { CHART_MAX_BARS } from '../chart/conflation'
 import { INTERVALS, type Interval, type Timeframe } from '../types'
 
 export const EMPTY = '—'
@@ -798,8 +799,23 @@ export function reportMatchesChart(
   return report.symbol === symbol && report.interval === interval
 }
 
-/** The chart refuses to hold more than this many bars for a backtest history load. */
+/**
+ * Most older bars one backtest history load fetches (a per-load budget, not a chart size: the
+ * chart itself holds up to CHART_MAX_BARS in chart/conflation.ts, Phase 14).
+ */
 export const MAX_HISTORY_BARS = 20_000
+
+/**
+ * Older bars one backtest history load may still fetch onto a chart that holds `candleCount`
+ * bars: at most MAX_HISTORY_BARS per load, and never past the chart's CHART_MAX_BARS.
+ */
+export function historyRoom(
+  candleCount: number,
+  perLoad = MAX_HISTORY_BARS,
+  chartCap = CHART_MAX_BARS,
+): number {
+  return Math.max(0, Math.min(perLoad, chartCap - candleCount))
+}
 
 export interface HistoryPlan {
   /** Older bars are needed to show the whole design window. */
@@ -808,10 +824,10 @@ export interface HistoryPlan {
   target: number
   /** Approximate bars still to load. */
   bars: number
-  /** The window is longer than MAX_HISTORY_BARS: only its most recent part can be shown. */
+  /** The window reaches further back than `cap` more bars: only its most recent part can be shown. */
   partial: boolean
   /**
-   * Even the most bars the chart may hold end before the window does: no part of the window
+   * Even the most bars this load may fetch end before the window does: no part of the window
    * can be shown at this interval, so nothing should be fetched.
    */
   unreachable: boolean
@@ -1053,7 +1069,7 @@ export function historyAnnouncement(
 
 /** Why nothing is loaded for an unreachable window, with what to do instead. */
 export function unreachableText(windowEnd: number): string {
-  return `The design window ends ${fmtDate(windowEnd)}; at this interval it lies beyond the ${fmtInt(MAX_HISTORY_BARS)}-bar chart limit. Use 1h, 4h or 1d to see the trade markers.`
+  return `The design window ends ${fmtDate(windowEnd)}; at this interval it lies further back than one history load reaches (at most ${fmtInt(MAX_HISTORY_BARS)} older bars per load, ${fmtInt(CHART_MAX_BARS)} bars on the chart). Use 1h, 4h or 1d to see the trade markers.`
 }
 
 /** Zoom range for one trade, with context on both sides (open trades run to `windowEnd`). */

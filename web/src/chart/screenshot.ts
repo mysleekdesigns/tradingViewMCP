@@ -1,7 +1,20 @@
 // Chart PNG export. `chart.takeScreenshot()` draws only the canvases (the legend is HTML), so a
 // header strip with the symbol, interval, venue, and capture time is painted above the image.
 
+import type { IChartApi } from 'lightweight-charts'
 import { fontFamily, type ChartPalette } from './theme'
+
+/**
+ * The chart image for a PNG export, drawings included. Drawings are series primitives with
+ * zOrder 'top' (drawings/primitives.ts), which LWC paints on each pane's top canvas; a bare
+ * `takeScreenshot()` copies only the main canvases (addTopLayer defaults to false) and would
+ * drop every drawing. `addTopLayer: true` (LWC 5.0.9+) adds the top canvases. The crosshair
+ * also lives there, so it is hidden for the capture (`includeCrosshair: false`): it would only
+ * show where the mouse was when the user clicked Export.
+ */
+export function captureChart(chart: Pick<IChartApi, 'takeScreenshot'>): HTMLCanvasElement {
+  return chart.takeScreenshot(true, false)
+}
 
 export interface ScreenshotHeader {
   /** e.g. "BTCUSDT · 1h · Binance · local server" */

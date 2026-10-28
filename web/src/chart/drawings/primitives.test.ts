@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { DrawingController } from './controller'
-import { DrawingsPrimitive, dashPattern } from './primitives'
+import { DrawingsPrimitive, HOVER_HANDLE_ALPHA, dashPattern } from './primitives'
 import { barTime, fakeAdapter, yOf } from './testAdapter'
 import { DEFAULT_DRAWING_STYLE, type Drawing } from './types'
 
@@ -64,6 +64,23 @@ describe('DrawingsPrimitive', () => {
     expect(primitive.hitTest(700, 10)?.cursorStyle).toBe('crosshair')
   })
 
+  it('names the drawing under the point as the hit-test externalId (hoveredInfo.objectId)', () => {
+    const { primitive, controller } = setup()
+    expect(primitive.hitTest(30, yOf(150))).toMatchObject({
+      externalId: 'drawing:h',
+      zOrder: 'top',
+      cursorStyle: 'pointer',
+    })
+    // Trendline from bar 1 (x 10, y 200) to bar 5 (x 50, y 180): midpoint x 30, y 190.
+    expect(primitive.hitTest(30, 190)?.externalId).toBe('drawing:t')
+    // A tool's crosshair over empty space names no drawing.
+    controller.setTool('rectangle')
+    expect(primitive.hitTest(700, 10)).toMatchObject({
+      externalId: 'drawings',
+      cursorStyle: 'crosshair',
+    })
+  })
+
   it('returns a stable pane view list', () => {
     const { primitive } = setup()
     expect(primitive.paneViews()).toBe(primitive.paneViews())
@@ -107,5 +124,47 @@ describe('DrawingsPrimitive', () => {
     const handles = arcs.filter((a) => a.fill === '#ffffff')
     expect(handles).toHaveLength(2)
     for (const h of handles) expect(h.stroke).toBe(DEFAULT_DRAWING_STYLE.color)
+  })
+
+  it("draws a hovered, unselected drawing's handles faintly; none without hover", () => {
+    const { controller, primitive } = setup()
+
+    function drawnHandles() {
+      const arcs: { alpha: number }[] = []
+      const state = { fillStyle: '' as unknown, strokeStyle: '' as unknown, globalAlpha: 1 }
+      const stack: number[] = []
+      const ctx = new Proxy(state, {
+        get(target, key) {
+          if (key in target) return target[key as keyof typeof target]
+          if (key === 'save') return () => stack.push(target.globalAlpha)
+          if (key === 'restore') return () => (target.globalAlpha = stack.pop() ?? 1)
+          if (key === 'arc') return () => arcs.push({ alpha: target.globalAlpha })
+          return () => undefined
+        },
+        set(target, key, value) {
+          ;(target as Record<string | symbol, unknown>)[key] = value
+          return true
+        },
+      })
+      const scope = { context: ctx, horizontalPixelRatio: 1, verticalPixelRatio: 1 }
+      const target = { useBitmapCoordinateSpace: (f: (s: typeof scope) => void) => f(scope) }
+      primitive.updateAllViews()
+      const renderer = primitive.paneViews()[0].renderer()
+      renderer?.draw(target as unknown as Parameters<NonNullable<typeof renderer>['draw']>[0])
+      return arcs
+    }
+
+    expect(drawnHandles()).toEqual([])
+    controller.setHovered('t')
+    // Two faint handles on the hovered trendline.
+    expect(drawnHandles()).toEqual([{ alpha: HOVER_HANDLE_ALPHA }, { alpha: HOVER_HANDLE_ALPHA }])
+    // Selected: full-strength handles, and the hover does not add a second faint set.
+    controller.setSelected('t')
+    expect(drawnHandles()).toEqual([{ alpha: 1 }, { alpha: 1 }])
+    // Hover another drawing while one is selected: both sets, each at its own strength.
+    controller.setHovered('h')
+    const both = drawnHandles()
+    expect(both.filter((a) => a.alpha === 1)).toHaveLength(2)
+    expect(both.filter((a) => a.alpha === HOVER_HANDLE_ALPHA).length).toBeGreaterThan(0)
   })
 })

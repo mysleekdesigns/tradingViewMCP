@@ -6,6 +6,7 @@ import {
   defaultDraft,
   draftErrors,
   draftFromConfig,
+  formatTimeLabel,
   parseDraft,
   type SettingsDraft,
 } from './indicatorForm'
@@ -33,6 +34,11 @@ interface IndicatorSettingsProps {
   /** Called once on OK with the validated values; the dialog then closes. */
   onApply: (patch: IndicatorPatch) => void
   onClose: () => void
+  /**
+   * A seconds chart is open (1s/5s/…): time inputs then accept seconds (step 1) so a bar time
+   * there can be entered exactly. Otherwise they step by minutes.
+   */
+  secondsCharts?: boolean
 }
 
 /**
@@ -40,7 +46,13 @@ interface IndicatorSettingsProps {
  * Mount with `key={config.uid}`; it captures the previously focused element on mount and
  * restores it on unmount.
  */
-export function IndicatorSettings({ def, config, onApply, onClose }: IndicatorSettingsProps) {
+export function IndicatorSettings({
+  def,
+  config,
+  onApply,
+  onClose,
+  secondsCharts = false,
+}: IndicatorSettingsProps) {
   const [draft, setDraft] = useState<SettingsDraft>(() => draftFromConfig(def, config))
   const hasInputs = def.inputs.length > 0 || def.source !== null
   const [tab, setTab] = useState<Tab>(hasInputs ? 'inputs' : 'style')
@@ -214,6 +226,64 @@ export function IndicatorSettings({ def, config, onApply, onClose }: IndicatorSe
                   const fieldId = `${ids}-in-${input.key}`
                   const errId = `${fieldId}-err`
                   const error = showError(input.key)
+                  if (input.kind === 'time') {
+                    const text = draft.inputs[input.key] ?? ''
+                    const hintId = `${fieldId}-hint`
+                    return (
+                      <div key={input.key} className="ind-field">
+                        <label className="ind-field__label" htmlFor={fieldId}>
+                          {input.label}
+                          <span className="ind-field__kind">Date and time (UTC)</span>
+                        </label>
+                        <div className="ind-field__control">
+                          <div className="ind-field__control--row">
+                            <input
+                              id={fieldId}
+                              className={`ind-input${error ? ' ind-input--invalid' : ''}`}
+                              type="datetime-local"
+                              // Shrinks beside the clear button (the native field is wide).
+                              style={{ minWidth: 0 }}
+                              // A value with seconds (e.g. picked on a 1s chart) needs step 1
+                              // too, or the browser flags it as a step mismatch.
+                              step={secondsCharts || /T\d\d:\d\d:\d\d/.test(text) ? 1 : 60}
+                              value={text}
+                              aria-invalid={error !== undefined}
+                              aria-describedby={error ? errId : text === '' ? hintId : undefined}
+                              onChange={(e) => setInput(input.key, e.target.value)}
+                            />
+                            {text !== '' && (
+                              <button
+                                type="button"
+                                className="icon-btn icon-btn--small"
+                                aria-label={`Clear ${input.label}`}
+                                title="Clear (not set)"
+                                onClick={() => setInput(input.key, '')}
+                              >
+                                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                                  <path
+                                    d="M2 2l6 6M8 2l-6 6"
+                                    stroke="currentColor"
+                                    strokeWidth="1.4"
+                                  />
+                                </svg>
+                              </button>
+                            )}
+                          </div>
+                          {error ? (
+                            <span id={errId} className="ind-field__error" role="alert">
+                              {error}
+                            </span>
+                          ) : (
+                            text === '' && (
+                              <span id={hintId} className="ind-field__kind">
+                                {formatTimeLabel(0)}
+                              </span>
+                            )
+                          )}
+                        </div>
+                      </div>
+                    )
+                  }
                   return (
                     <div key={input.key} className="ind-field">
                       <label className="ind-field__label" htmlFor={fieldId}>

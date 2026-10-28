@@ -3,6 +3,7 @@ import type { Candle } from '../types'
 import {
   buildLegend,
   changePercent,
+  firstVisibleBarTime,
   formatChange,
   formatPrice,
   formatVolume,
@@ -117,5 +118,33 @@ describe('buildLegend', () => {
   })
   it('combined with selection, shows the last candle when nothing is hovered', () => {
     expect(buildLegend(candles, selectLegendIndex(candles))?.time).toBe(300)
+  })
+})
+
+describe('firstVisibleBarTime', () => {
+  const bars = [100, 160, 220].map((time) => ({
+    time,
+    open: 1,
+    high: 1,
+    low: 1,
+    close: 1,
+    volume: 1,
+  }))
+
+  it('is the first whole bar at or after the left edge of the view', () => {
+    expect(firstVisibleBarTime(bars, 0)).toBe(100)
+    expect(firstVisibleBarTime(bars, 0.4)).toBe(160)
+    expect(firstVisibleBarTime(bars, 2)).toBe(220)
+  })
+
+  it('clamps a view that starts before the data to the first bar', () => {
+    expect(firstVisibleBarTime(bars, -12.5)).toBe(100)
+  })
+
+  it('is null without bars, past the last bar, or for a non-finite edge', () => {
+    expect(firstVisibleBarTime(null, 0)).toBeNull()
+    expect(firstVisibleBarTime([], 0)).toBeNull()
+    expect(firstVisibleBarTime(bars, 2.1)).toBeNull()
+    expect(firstVisibleBarTime(bars, Number.NaN)).toBeNull()
   })
 })

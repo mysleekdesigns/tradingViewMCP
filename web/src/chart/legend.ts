@@ -106,3 +106,13 @@ export function buildLegend(candles: readonly Candle[], index: number): LegendVa
     direction,
   }
 }
+
+/**
+ * Open time of the first plotted bar at or after logical index `from` (the left edge of the visible
+ * range), or null when there are no bars or the view starts past the last one.
+ */
+export function firstVisibleBarTime(bars: readonly Candle[] | null, from: number): number | null {
+  if (!bars || bars.length === 0 || !Number.isFinite(from)) return null
+  const index = Math.max(0, Math.ceil(from))
+  return index < bars.length ? bars[index].time : null
+}

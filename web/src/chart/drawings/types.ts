@@ -76,8 +76,13 @@ export interface ChartContextMenuRequest {
   clientY: number
   /** Price under the cursor on the main series' price scale, or null outside it. */
   price: number | null
-  /** Bar-snapped time under the cursor (UNIX seconds), or null. */
+  /** Bar-snapped time under the cursor (UNIX seconds), or null. Extrapolated past the data. */
   time: number | null
+  /**
+   * `time` only when it is a plotted bar (first to last plotted bar inclusive), else null:
+   * bar-anchored actions (anchored VWAP, volume profile) need a real bar under the cursor.
+   */
+  barTime: number | null
   /** Drawing under the cursor, if any (it is also selected). */
   drawingId: string | null
 }

@@ -1,7 +1,8 @@
 import type { Candle } from '../types'
 
 /** Every indicator the registry knows. */
-export type IndicatorId = 'sma' | 'ema' | 'bb' | 'vwap' | 'volma' | 'rsi' | 'macd' | 'stoch'
+export type IndicatorId =
+  'sma' | 'ema' | 'bb' | 'vwap' | 'avwap' | 'vprofile' | 'volma' | 'rsi' | 'macd' | 'stoch'
 
 /**
  * Where an indicator draws:
@@ -26,6 +27,11 @@ export interface InputDef {
   step: number
   /** Whole numbers only (periods). */
   integer: boolean
+  /**
+   * 'time': a bar open time in UNIX seconds, edited as a UTC date and time; 0 means "not set".
+   * Omitted = 'number'.
+   */
+  kind?: 'number' | 'time'
 }
 
 export interface LineDef {
@@ -76,6 +82,37 @@ export interface IndicatorDef {
   range?: { min: number; max: number }
   /** `inputs` always holds every key in `this.inputs` (defaults filled in, clamped). */
   createStepper(inputs: IndicatorInputs, source: PriceSource): IndicatorStepper
+  /**
+   * Range indicators (fixed-range volume profile): one result over a time range, drawn by a
+   * primitive instead of per-bar lines (`lines` is empty, the stepper returns {}). Reads only
+   * bars inside the range, so bars after it never change the result. Null when the range is
+   * not set or holds no volume.
+   */
+  profile?(candles: readonly Candle[], inputs: IndicatorInputs): VolumeProfile | null
+}
+
+/** One price bucket of a volume profile; `low` inclusive, `high` exclusive (the top row inclusive). */
+export interface VolumeProfileRow {
+  low: number
+  high: number
+  volume: number
+  /** Volume of bars that closed at or above their open. */
+  upVolume: number
+}
+
+/** Fixed-range volume profile over the bars with `from <= time <= to`. */
+export interface VolumeProfile {
+  /** Open time (UNIX s) of the first and last bar used. */
+  from: number
+  to: number
+  /** Ascending by price, equal heights, covering [lowest low, highest high] of the range. */
+  rows: VolumeProfileRow[]
+  /** Point of control: middle price of the row with the most volume (lowest such row on ties). */
+  poc: number
+  /** Value area high / low: top of the highest and bottom of the lowest row in the value area. */
+  vah: number
+  val: number
+  totalVolume: number
 }
 
 /** One output point. `time` is the candle's own open time in UNIX seconds. */

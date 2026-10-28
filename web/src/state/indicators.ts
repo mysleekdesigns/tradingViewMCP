@@ -8,7 +8,7 @@ import {
 } from '../data/persistence'
 import { INDICATOR_BY_ID } from '../indicators/registry'
 import { PRICE_SOURCES } from '../indicators/sources'
-import type { IndicatorDef, IndicatorId, PriceSource } from '../indicators/types'
+import type { IndicatorDef, IndicatorId, IndicatorInputs, PriceSource } from '../indicators/types'
 
 export const INDICATORS_STORAGE_KEY = 'tv.indicators.v1'
 
@@ -48,8 +48,12 @@ export type IndicatorPatch = Partial<
 export interface IndicatorsApi {
   /** Order = legend order and pane order. */
   items: readonly IndicatorConfig[]
-  /** Returns the new uid, or null if the type is unknown or MAX_INDICATORS is reached. */
-  add(type: IndicatorId): string | null
+  /**
+   * Returns the new uid, or null if the type is unknown or MAX_INDICATORS is reached. `inputs`
+   * overrides defaults (sanitized like stored values; invalid entries keep the default), e.g.
+   * `add('avwap', { anchor: barTime })`.
+   */
+  add(type: IndicatorId, inputs?: IndicatorInputs): string | null
   remove(uid: string): void
   /** Sanitized through the same rules as parse. */
   update(uid: string, patch: IndicatorPatch): void
@@ -57,7 +61,7 @@ export interface IndicatorsApi {
 }
 
 export type IndicatorsAction =
-  | { type: 'add'; def: IndicatorDef; uid: string }
+  | { type: 'add'; def: IndicatorDef; uid: string; inputs?: IndicatorInputs }
   | { type: 'remove'; uid: string }
   | {
       type: 'update'
@@ -72,7 +76,10 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
-/** Every input key of `def`: finite numbers clamped to [min, max] (integers rounded), else default. */
+/**
+ * Every input key of `def`: finite numbers clamped to [min, max] (integers rounded), else default.
+ * Time inputs (`kind: 'time'`, UNIX seconds, 0 = not set) are always whole seconds.
+ */
 export function sanitizeInputs(def: IndicatorDef, raw: unknown): Record<string, number> {
   const r = isRecord(raw) ? raw : {}
   const out: Record<string, number> = {}
@@ -82,7 +89,7 @@ export function sanitizeInputs(def: IndicatorDef, raw: unknown): Record<string, 
       out[i.key] = i.default
       continue
     }
-    const n = i.integer ? Math.round(v) : v
+    const n = i.integer || i.kind === 'time' ? Math.round(v) : v
     out[i.key] = Math.min(Math.max(n, i.min), i.max)
   }
   return out
@@ -116,14 +123,25 @@ function newUid(type: IndicatorId, taken: ReadonlySet<string>): string {
 }
 
 /**
+ * Inputs that anchor a new time-anchored indicator (Anchored VWAP, volume profile) at `time`: its
+ * first 'time' input set to that bar. Empty for indicators without time inputs or without a time.
+ */
+export function anchorInputs(def: IndicatorDef, time: number | null): Record<string, number> {
+  const input = def.inputs.find((i) => i.kind === 'time')
+  return input && time !== null && Number.isFinite(time) && time > 0 ? { [input.key]: time } : {}
+}
+
+/**
  * A new instance of `def` with default inputs and colours. A second instance of a one-line
  * indicator takes the first INSTANCE_PALETTE colour its siblings do not use. `uid` is used when
- * it is valid and not taken; otherwise a fresh unique uid is generated.
+ * it is valid and not taken; otherwise a fresh unique uid is generated. `inputs` overrides the
+ * defaults: valid entries are clamped like stored values, invalid or unknown ones are ignored.
  */
 export function createIndicatorConfig(
   def: IndicatorDef,
   existing: readonly IndicatorConfig[],
   uid?: string,
+  inputs?: IndicatorInputs,
 ): IndicatorConfig {
   const taken = new Set(existing.map((c) => c.uid))
   const id = uid !== undefined && UID_RE.test(uid) && !taken.has(uid) ? uid : newUid(def.id, taken)
@@ -139,7 +157,7 @@ export function createIndicatorConfig(
   return {
     uid: id,
     type: def.id,
-    inputs: sanitizeInputs(def, undefined),
+    inputs: sanitizeInputs(def, validEntries(inputs, 'number')),
     source: sanitizeSource(def, undefined),
     colors,
     visible: true,
@@ -219,7 +237,7 @@ export function indicatorsReducer(
     case 'add': {
       if (items.length >= MAX_INDICATORS || items.some((c) => c.uid === action.uid)) return items
       if (!UID_RE.test(action.uid)) return items
-      return [...items, createIndicatorConfig(action.def, items, action.uid)]
+      return [...items, createIndicatorConfig(action.def, items, action.uid, action.inputs)]
     }
     case 'remove':
       return items.some((c) => c.uid === action.uid)
@@ -402,7 +420,7 @@ export function useIndicators(
     )
   }, [])
 
-  const add = useCallback((type: IndicatorId): string | null => {
+  const add = useCallback((type: IndicatorId, inputs?: IndicatorInputs): string | null => {
     const def = defsRef.current.get(type)
     const current = itemsRef.current
     if (def === undefined || current.length >= MAX_INDICATORS) return null
@@ -411,6 +429,7 @@ export function useIndicators(
       type: 'add',
       def,
       uid: createIndicatorConfig(def, current).uid,
+      ...(inputs !== undefined ? { inputs } : {}),
     }
     // Track the result now so a second add in the same tick sees this one (cap, colours, uid).
     itemsRef.current = indicatorsReducer(current, action)

@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PersistenceClient } from '../data/persistence'
 import { Sma } from '../indicators/primitives'
+import { INDICATOR_BY_ID } from '../indicators/registry'
 import type { IndicatorDef, IndicatorId, IndicatorStepper } from '../indicators/types'
 import {
+  anchorInputs,
   createIndicatorConfig,
   createIndicatorsSync,
   INDICATORS_STORAGE_KEY,
@@ -503,5 +505,129 @@ describe('listenIndicatorsStorage (W2: cross-tab sync)', () => {
     expect(putLayout).toHaveBeenCalledTimes(1)
     expect(putLayout).toHaveBeenCalledWith('default', { indicators: one('new') })
     off()
+  })
+})
+
+/** Fake range indicator with time inputs (UNIX seconds, 0 = not set) and a number input. */
+const MAX_TIME = 4_102_444_800
+const fakeProfile: IndicatorDef = {
+  id: 'vprofile',
+  name: 'Fake VP',
+  shortName: 'VP',
+  description: 'test',
+  placement: 'overlay',
+  inputs: [
+    {
+      key: 'from',
+      label: 'From',
+      kind: 'time',
+      default: 0,
+      min: 0,
+      max: MAX_TIME,
+      step: 60,
+      integer: false,
+    },
+    {
+      key: 'to',
+      label: 'To',
+      kind: 'time',
+      default: 0,
+      min: 0,
+      max: MAX_TIME,
+      step: 60,
+      integer: true,
+    },
+    { key: 'rows', label: 'Rows', default: 24, min: 4, max: 200, step: 1, integer: true },
+  ],
+  source: null,
+  lines: [],
+  guides: [],
+  createStepper: () => smaStepper(1),
+}
+
+describe('sanitizeInputs: time inputs', () => {
+  it('keeps whole UNIX seconds and rounds fractional ones even when integer is false', () => {
+    expect(sanitizeInputs(fakeProfile, { from: 1_700_000_000, to: 1_700_003_600.4 })).toEqual({
+      from: 1_700_000_000,
+      to: 1_700_003_600,
+      rows: 24,
+    })
+    expect(sanitizeInputs(fakeProfile, { from: 1_700_000_000.6 }).from).toBe(1_700_000_001)
+  })
+
+  it('clamps to [min, max]', () => {
+    expect(sanitizeInputs(fakeProfile, { from: -5, to: MAX_TIME + 10 })).toMatchObject({
+      from: 0,
+      to: MAX_TIME,
+    })
+  })
+
+  it('falls back to the default 0 (not set) for invalid values', () => {
+    expect(sanitizeInputs(fakeProfile, { from: 'yesterday', to: NaN })).toMatchObject({
+      from: 0,
+      to: 0,
+    })
+    expect(sanitizeInputs(fakeProfile, { from: Infinity }).from).toBe(0)
+  })
+})
+
+describe('add with input overrides', () => {
+  it('applies sanitized overrides at creation and keeps defaults for the rest', () => {
+    const items = indicatorsReducer([], {
+      type: 'add',
+      def: fakeProfile,
+      uid: 'vp-1',
+      inputs: { from: 1_700_000_000 },
+    })
+    expect(items[0].inputs).toEqual({ from: 1_700_000_000, to: 0, rows: 24 })
+  })
+
+  it('clamps out-of-range overrides and ignores invalid or unknown ones', () => {
+    const c = createIndicatorConfig(fakeProfile, [], 'vp-1', {
+      from: 1_700_000_000.4,
+      to: NaN,
+      rows: 1000,
+      evil: 5,
+    })
+    expect(c.inputs).toEqual({ from: 1_700_000_000, to: 0, rows: 200 })
+  })
+
+  it('an add without inputs still uses the defaults (existing callers)', () => {
+    const items = indicatorsReducer([], { type: 'add', def: fakeProfile, uid: 'vp-1' })
+    expect(items[0].inputs).toEqual({ from: 0, to: 0, rows: 24 })
+    expect(createIndicatorConfig(fakeEma, []).inputs).toEqual({ period: 20 })
+  })
+
+  it('round-trips a time input through save / load', () => {
+    const items = indicatorsReducer([], {
+      type: 'add',
+      def: fakeProfile,
+      uid: 'vp-1',
+      inputs: { from: 1_700_000_000, to: 1_700_086_400 },
+    })
+    const storage = new MemoryStorage()
+    saveIndicators(items, storage)
+    const defs = new Map<IndicatorId, IndicatorDef>([['vprofile', fakeProfile]])
+    expect(loadIndicators(defs, storage)[0].inputs).toEqual({
+      from: 1_700_000_000,
+      to: 1_700_086_400,
+      rows: 24,
+    })
+  })
+})
+
+describe('anchorInputs', () => {
+  it('sets the first time input of a time-anchored indicator', () => {
+    const avwap = INDICATOR_BY_ID.get('avwap')!
+    const vprofile = INDICATOR_BY_ID.get('vprofile')!
+    expect(anchorInputs(avwap, 1_700_000_040)).toEqual({ anchor: 1_700_000_040 })
+    expect(anchorInputs(vprofile, 1_700_000_040)).toEqual({ from: 1_700_000_040 })
+  })
+
+  it('is empty without a time input or without a usable time', () => {
+    expect(anchorInputs(INDICATOR_BY_ID.get('ema')!, 1_700_000_040)).toEqual({})
+    expect(anchorInputs(INDICATOR_BY_ID.get('avwap')!, null)).toEqual({})
+    expect(anchorInputs(INDICATOR_BY_ID.get('avwap')!, 0)).toEqual({})
+    expect(anchorInputs(INDICATOR_BY_ID.get('avwap')!, Number.NaN)).toEqual({})
   })
 })

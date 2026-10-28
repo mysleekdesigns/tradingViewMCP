@@ -43,7 +43,7 @@ import {
   type OverlayChart,
 } from './backtestOverlay'
 import { IndicatorSeriesManager } from './indicatorSeries'
-import { buildLegend, selectLegendIndex, type LegendValues } from './legend.ts'
+import { buildLegend, firstVisibleBarTime, selectLegendIndex, type LegendValues } from './legend.ts'
 import {
   DEFAULT_APPEARANCE,
   alertLineOptions,
@@ -78,7 +78,15 @@ import {
   type DerivativesOverlay,
 } from './derivativesPanes'
 import { RegimeRibbon, regimeColorsFor } from './regimeRibbon'
-import { composeScreenshot } from './screenshot'
+import { captureChart, composeScreenshot } from './screenshot'
+import { conflationOptions } from './conflation'
+import { resolveHover } from './hover'
+import { VolumeProfileLayer, volumeProfileColorsFor } from './volumeProfileLayer'
+import {
+  attachChartAccessibility,
+  isAccessibilityOverlay,
+  type ChartAccessibility,
+} from './chartAccessibility'
 import { formatDateTime, timezoneLabel } from './timeFormat'
 import {
   clickedBarTime,
@@ -94,7 +102,7 @@ import {
 import { toVolumeData } from './volume'
 import { AlertLinesManager } from './drawings/alertLines'
 import { ChartCoordinateAdapter } from './drawings/chartAdapter'
-import { DrawingController, type PointerInput } from './drawings/controller'
+import { DrawingController, plottedBarTime, type PointerInput } from './drawings/controller'
 import { xToSnappedTime } from './drawings/geometry'
 import { DrawingsPrimitive } from './drawings/primitives'
 import type {
@@ -118,6 +126,8 @@ export interface ChartApi {
    * above `chart.takeScreenshot()` with drawings and primitives, without the crosshair.
    */
   screenshot(): HTMLCanvasElement
+  /** Open time (UNIX s) of the first plotted bar in view, or null before data or off the data. */
+  firstVisibleTime(): number | null
 }
 
 type MainSeries = ISeriesApi<'Candlestick' | 'Line' | 'Area'>
@@ -373,6 +383,7 @@ export function Chart({
   const mainSeriesRef = useRef<MainSeries | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const watermarkRef = useRef<ITextWatermarkPluginApi<Time> | null>(null)
+  const a11yRef = useRef<ChartAccessibility | null>(null)
   /** Heikin-Ashi mode: price line at the real last close (the series' own label is hidden). */
   const realLineRef = useRef<IPriceLine | null>(null)
   /** Candles currently in the series; lets live ticks use update() instead of setData(). */
@@ -414,6 +425,8 @@ export function Chart({
   const [backtestOverlay] = useState(
     () => new BacktestOverlay<MainSeries>((series) => createSeriesMarkers(series, [])),
   )
+  /** Fixed-range volume profiles (range indicators), drawn on the main series. */
+  const [profileLayer] = useState(() => new VolumeProfileLayer(volumeProfileColorsFor(palette)))
   const backtestVersion = useSyncExternalStore(
     backtestOverlay.subscribe,
     backtestOverlay.getSnapshot,
@@ -496,6 +509,15 @@ export function Chart({
       chart.panes()[0],
       watermarkOptions('', fallbackFontFamily, paletteRef.current),
     )
+    // Keyboard and screen-reader access (official plugin); the title follows symbol/interval.
+    a11yRef.current = attachChartAccessibility(chart, {
+      title: 'Price chart',
+      formatPrice: (p) => mainSeriesRef.current?.priceFormatter().format(p) ?? String(p),
+      formatTime: (t) => {
+        const tz = appearanceRef.current.timezone
+        return `${formatDateTime(t, tz, { seconds: t % 60 !== 0 })} ${timezoneLabel(tz, t)}`
+      },
+    })
 
     // LWC re-measures text only when the font string changes, so the chart starts on system
     // fonts and switches to IBM Plex once it has loaded. If it never loads, it stays on them.
@@ -518,6 +540,10 @@ export function Chart({
       // Candle times are UTCTimestamp numbers; anything else means "not over a bar".
       const time = bar && typeof bar.time === 'number' ? bar.time : undefined
       setHoveredTime(time)
+      // 5.2 hit testing: the indicator line or drawing under the cursor (null off the chart).
+      const target = resolveHover(param, (s) => indicatorManager.uidOfSeries(s))
+      indicatorManager.setHighlighted(target?.kind === 'indicator' ? target.uid : null)
+      drawingController.setHovered(target?.kind === 'drawing' ? target.id : null)
     }
     chart.subscribeCrosshairMove(onCrosshairMove)
 
@@ -563,6 +589,8 @@ export function Chart({
       chart.unsubscribeClick(onClick)
       disposed = true
       watermarkRef.current?.detach()
+      a11yRef.current?.detach()
+      a11yRef.current = null
       indicatorManager.detach()
       // chart.remove() below takes the equity series and markers with it.
       backtestOverlay.detachChart(false)
@@ -580,7 +608,7 @@ export function Chart({
       autoOlderRef.current = null
       expectedRangeRef.current = null
     }
-  }, [indicatorManager, coords, backtestOverlay, derivativesPanes])
+  }, [indicatorManager, coords, backtestOverlay, derivativesPanes, drawingController])
 
   // (Re)create the main series for the chart type. On mount the data effect below fills it;
   // on a type switch the candles already shown are re-applied here. Volume is untouched.
@@ -609,11 +637,13 @@ export function Chart({
     drawingsPrimitiveRef.current = primitive
     alertLinesManager.attach(series)
     backtestOverlay.attachSeries(series)
+    profileLayer.attach(series)
     return () => {
       // On unmount the chart may already be removed (with all its series).
       const alive = chartRef.current === chart
       alertLinesManager.detach(alive)
       backtestOverlay.detachSeries(alive)
+      profileLayer.detach(alive)
       if (alive) series.detachPrimitive(primitive)
       if (drawingsPrimitiveRef.current === primitive) drawingsPrimitiveRef.current = null
       coords.setSeries(null, series)
@@ -622,7 +652,7 @@ export function Chart({
       realLineRef.current = null
       haRef.current = null
     }
-  }, [chartType, coords, drawingController, alertLinesManager, backtestOverlay])
+  }, [chartType, coords, drawingController, alertLinesManager, backtestOverlay, profileLayer])
 
   // Faint "BTCUSDT, 1h" behind the candles, as on TradingView.
   useEffect(() => {
@@ -634,6 +664,9 @@ export function Chart({
       ),
     )
   }, [symbol, interval, fontsReady, palette])
+  useEffect(() => {
+    a11yRef.current?.setTitle(`${symbol} ${timeframeLabel(interval)} chart`)
+  }, [symbol, interval])
 
   // Bar length for extrapolating drawing anchors past either end of the data, and seconds on
   // the time axis for seconds timeframes (applied in place; the chart is not recreated).
@@ -661,6 +694,25 @@ export function Chart({
       unbind()
     }
   }, [crosshairSync, crosshairSyncId])
+
+  // Render-only conflation for long histories and seconds/custom timeframes. Keyed on the derived
+  // options, not the candles, and declared before the setData effect below: LWC starts the
+  // background precompute inside setData, so the options must already be in place.
+  const { enableConflation, precomputeConflationOnInit, minBarSpacing } = conflationOptions(
+    candles.length,
+    interval,
+  )
+  useEffect(() => {
+    chartRef.current?.applyOptions({
+      timeScale: {
+        enableConflation,
+        precomputeConflationOnInit,
+        minBarSpacing,
+        conflationThresholdFactor: 1,
+        precomputeConflationPriority: 'background',
+      },
+    })
+  }, [enableConflation, precomputeConflationOnInit, minBarSpacing])
 
   // Push data whenever the candles change. Runs after the creation effects on mount.
   // Live ticks only touch the tail, so they go through update(), which keeps the user's
@@ -718,6 +770,12 @@ export function Chart({
     if (plan.kind !== 'none') syncRefreshRef.current?.()
   }, [candles, indicatorManager, coords, backtestOverlay])
 
+  // Volume profiles follow the configs and the plotted bars (recomputed only when the bars in a
+  // profile's range change). Declared after the data effect, so appliedRef is current.
+  useEffect(() => {
+    profileLayer.sync(indicators, appliedRef.current)
+  }, [indicators, candles, profileLayer])
+
   // Theme / candle colours / time zone. Everything is recoloured in place (applyOptions, one
   // volume setData), so the chart, its series, drawings, indicators and the view all survive.
   // Runs after the creation and data effects, so on mount it only re-applies the same values.
@@ -739,7 +797,17 @@ export function Chart({
     ribbonRef.current?.setColors(regimeColorsFor(palette))
     derivativesPanes.setColors(derivativesColorsFor(palette))
     indicatorManager.setPalette(palette)
-  }, [palette, theme, upColor, downColor, timezone, indicatorManager, derivativesPanes])
+    profileLayer.setColors(volumeProfileColorsFor(palette))
+  }, [
+    palette,
+    theme,
+    upColor,
+    downColor,
+    timezone,
+    indicatorManager,
+    derivativesPanes,
+    profileLayer,
+  ])
 
   // Latest header values for screenshots, read when the user exports (not per render).
   const shotRef = useRef({ symbol, interval, source, candles })
@@ -747,11 +815,14 @@ export function Chart({
     shotRef.current = { symbol, interval, source, candles }
   }, [symbol, interval, source, candles])
   const [api] = useState<ChartApi>(() => ({
+    firstVisibleTime() {
+      const range = chartRef.current?.timeScale().getVisibleLogicalRange()
+      return range ? firstVisibleBarTime(appliedRef.current, range.from) : null
+    },
     screenshot() {
       const chart = chartRef.current
       if (!chart) throw new Error('The chart is not ready yet')
-      // addTopLayer = true keeps drawings and other primitives; the crosshair is left out.
-      const canvas = chart.takeScreenshot(true, false)
+      const canvas = captureChart(chart)
       const { symbol: sym, interval: iv, source: src, candles: bars } = shotRef.current
       const tz = appearanceRef.current.timezone
       const last = buildLegend(bars, bars.length - 1)
@@ -847,6 +918,8 @@ export function Chart({
       // Ctrl-click is a right-click on macOS; leave it to the contextmenu handler.
       if (!e.isPrimary || e.ctrlKey) return
       pressConsumedRef.current = false
+      // The accessibility data table sits over the pane: presses there are the table's.
+      if (isAccessibilityOverlay(e.target)) return
       const p = local(e)
       if (!p || !p.inside) return
       if (!drawingController.pointerDown({ x: p.x, y: p.y, button: e.button })) return
@@ -894,6 +967,7 @@ export function Chart({
       setCursor(null)
     }
     const onContextMenuEvent = (e: MouseEvent) => {
+      if (isAccessibilityOverlay(e.target)) return
       const p = local(e)
       if (!p || !p.inside) return
       const hit = drawingController.contextMenu(p)
@@ -905,7 +979,12 @@ export function Chart({
       }
       if (!handler) return
       e.preventDefault()
-      handler({ clientX: e.clientX, clientY: e.clientY, ...hit })
+      handler({
+        clientX: e.clientX,
+        clientY: e.clientY,
+        ...hit,
+        barTime: plottedBarTime(hit.time, appliedRef.current),
+      })
     }
     const onKeyDown = (e: KeyboardEvent) => {
       const key = chartKey(e, keyboardBlockedRef.current)
@@ -918,7 +997,14 @@ export function Chart({
       if (drawingController.keyDown(e.key)) e.preventDefault()
     }
 
+    // Scrolling the accessibility data table scrolls the table, not the chart: stop the wheel
+    // before LWC's chart-level listener (it would zoom and preventDefault the table's scroll).
+    const onWheel = (e: WheelEvent) => {
+      if (isAccessibilityOverlay(e.target)) e.stopPropagation()
+    }
+
     container.addEventListener('pointerdown', onPointerDown, true)
+    container.addEventListener('wheel', onWheel, true)
     container.addEventListener('pointermove', onPointerMove, true)
     window.addEventListener('pointerup', onPointerUp, true)
     window.addEventListener('pointercancel', onPointerCancel, true)
@@ -926,6 +1012,7 @@ export function Chart({
     window.addEventListener('keydown', onKeyDown)
     return () => {
       container.removeEventListener('pointerdown', onPointerDown, true)
+      container.removeEventListener('wheel', onWheel, true)
       container.removeEventListener('pointermove', onPointerMove, true)
       window.removeEventListener('pointerup', onPointerUp, true)
       window.removeEventListener('pointercancel', onPointerCancel, true)
@@ -1098,6 +1185,7 @@ export function Chart({
   )
   const lastPlotted = candles.length > 0 ? candles[candles.length - 1].time : undefined
   const derivativesColors = derivativesColorsFor(palette)
+  const highlightedUid = indicatorManager.highlightedUid()
   const legendActions = {
     onToggleVisible: onIndicatorToggleVisible,
     onRemove: onIndicatorRemove,
@@ -1114,11 +1202,16 @@ export function Chart({
         values={legend}
         timezone={timezone}
       >
-        <IndicatorLegendRows rows={indicatorRows.filter((r) => r.pane === 0)} {...legendActions} />
+        <IndicatorLegendRows
+          rows={indicatorRows.filter((r) => r.pane === 0)}
+          highlightedUid={highlightedUid}
+          {...legendActions}
+        />
       </Legend>
       <PaneLegends
         rows={indicatorRows.filter((r) => r.pane > 0)}
         paneTops={paneTops}
+        highlightedUid={highlightedUid}
         {...legendActions}
       />
       {equityLegend.length > 0 && typeof equityTop === 'number' && (

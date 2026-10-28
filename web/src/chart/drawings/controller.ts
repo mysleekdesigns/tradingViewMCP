@@ -67,11 +67,36 @@ export interface ContextMenuHit {
   drawingId: string | null
 }
 
+/**
+ * `time` when it is a plotted bar's time (between the first and last plotted bar inclusive),
+ * else null. Snapped context-menu times extrapolate past the data (future whitespace, or before
+ * the first loaded bar); bar-anchored indicators started there would never draw.
+ */
+export function plottedBarTime(
+  time: number | null,
+  bars: readonly { time: number }[] | null,
+): number | null {
+  if (time === null || bars === null || bars.length === 0) return null
+  return time >= bars[0].time && time <= bars[bars.length - 1].time ? time : null
+}
+
 export interface DrawingsView {
   /** Committed drawings with any in-progress move applied, plus the creation preview last. */
   drawings: readonly Drawing[]
   /** Drawing that shows handles (the selection, or the preview while creating). */
   selectedId: string | null
+  /**
+   * Drawing under the mouse (from LWC hit testing) that shows faint handles: set only in cursor
+   * mode while idle, when it exists and is not the selection.
+   */
+  hoveredId: string | null
+}
+
+/** What the pointer is over: the cursor to show and the drawing id behind it, if any. */
+export interface HoverHit {
+  cursor: CursorStyle
+  /** The drawing under the point (or being dragged); null for a tool's crosshair over nothing. */
+  id: string | null
 }
 
 export type CursorStyle = 'crosshair' | 'pointer' | 'grab' | 'grabbing' | 'move'
@@ -119,6 +144,7 @@ export class DrawingController {
 
   private base: readonly Drawing[] = []
   private selected: string | null = null
+  private hovered: string | null = null
   private toolMode: ToolMode
   private symbol: string
   private style: DrawingStyle
@@ -179,7 +205,20 @@ export class DrawingController {
     if (this.state.kind === 'creating') {
       this.setState({ kind: 'idle' })
       this.changed()
+    } else if (this.hovered !== null) {
+      // Hover handles only show in cursor mode.
+      this.changed()
     }
+  }
+
+  /**
+   * Drawing under the mouse, from LWC hit testing (`resolveHover` in Chart). A hovered drawing
+   * that is not selected shows its anchor handles faintly, as in TradingView.
+   */
+  setHovered(id: string | null): void {
+    if (id === this.hovered) return
+    this.hovered = id
+    this.changed()
   }
 
   setSymbol(symbol: string): void {
@@ -201,6 +240,11 @@ export class DrawingController {
 
   get selectedId(): string | null {
     return this.selected
+  }
+
+  /** Last id given to setHovered (whether or not it currently shows handles). */
+  get hoveredId(): string | null {
+    return this.hovered
   }
 
   /** Creating or dragging (or holding a press that created something). */
@@ -234,18 +278,39 @@ export class DrawingController {
       drawings = [...drawings, this.previewDrawing(s)]
       selectedId = s.id
     }
-    this.viewCache = { drawings, selectedId }
+    const hovered = this.hovered
+    const hoveredId =
+      hovered !== null &&
+      s.kind === 'idle' &&
+      this.toolMode === 'cursor' &&
+      hovered !== selectedId &&
+      drawings.some((d) => d.id === hovered)
+        ? hovered
+        : null
+    this.viewCache = { drawings, selectedId, hoveredId }
     return this.viewCache
   }
 
   /** Cursor to show at p when no button is held. */
   cursorAt(p: Point): CursorStyle | null {
-    if (this.state.kind === 'dragging')
-      return this.state.part.part === 'handle' ? 'grabbing' : 'move'
-    if (this.toolMode !== 'cursor' || this.state.kind === 'creating') return 'crosshair'
+    return this.hoverAt(p)?.cursor ?? null
+  }
+
+  /**
+   * Cursor and drawing at p (null = nothing of ours there). Feeds the primitive's hitTest, so
+   * LWC reports the drawing as `hoveredInfo.objectId`. While a tool is active the crosshair
+   * covers the whole pane and no drawing is reported.
+   */
+  hoverAt(p: Point): HoverHit | null {
+    const s = this.state
+    if (s.kind === 'dragging') {
+      return { cursor: s.part.part === 'handle' ? 'grabbing' : 'move', id: s.id }
+    }
+    if (this.toolMode !== 'cursor' || s.kind === 'creating')
+      return { cursor: 'crosshair', id: null }
     const hit = this.hitTest(p)
     if (!hit) return null
-    return hit.part.part === 'handle' ? 'grab' : 'pointer'
+    return { cursor: hit.part.part === 'handle' ? 'grab' : 'pointer', id: hit.id }
   }
 
   /** Topmost drawing at p: the selected drawing's handles first, then the nearest stroke/fill. */

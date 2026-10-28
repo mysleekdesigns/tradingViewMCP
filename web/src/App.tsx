@@ -42,7 +42,7 @@ import {
   isChartInterval,
   loadDockPrefs,
   loadPlanText,
-  MAX_HISTORY_BARS,
+  historyRoom,
   reportMatchesChart,
   saveDockPrefs,
   savePlanText,
@@ -92,6 +92,7 @@ import { createTimeframeProvider, type TimeframeProvider } from './data/timefram
 import { isSecondsTimeframe, timeframeLabel, timeframeSeconds } from './data/timeframes'
 import { venueLabels, type VenueInfo } from './data/venue'
 import { getIndicatorDef } from './indicators/registry'
+import type { IndicatorId } from './indicators/types'
 import { useAlerts } from './state/alerts'
 import {
   alertsUnavailableReason,
@@ -115,7 +116,7 @@ import {
   saveSidebarPanel,
 } from './state/chartTools'
 import { useDrawings, type DrawingsApi } from './state/drawings'
-import { useIndicators } from './state/indicators'
+import { anchorInputs, useIndicators } from './state/indicators'
 import {
   notificationPermission,
   requestNotificationPermission,
@@ -867,12 +868,7 @@ function App() {
   const history = useMemo(
     () =>
       backtestDrawn && report && candleCount !== null
-        ? historyPlan(
-            firstBarTime,
-            report.window,
-            btInterval,
-            Math.max(0, MAX_HISTORY_BARS - candleCount),
-          )
+        ? historyPlan(firstBarTime, report.window, btInterval, historyRoom(candleCount))
         : null,
     [backtestDrawn, report, candleCount, firstBarTime, btInterval],
   )
@@ -920,8 +916,8 @@ function App() {
   // Ask for the next page now and keep asking on an interval: loadOlder is a no-op during its
   // cooldown after a failed page, so a single retry could land inside it and never re-arm.
   // A Retry-After block pauses the loop; it re-arms when the block lifts. The user asked for
-  // this history, so it may go past the bar limit that caps scrolling back (historyPlan
-  // already bounds the target).
+  // this history, so it may page past the chart's scroll-back cap in one go (historyPlan
+  // bounds the target by historyRoom: one load's budget, never past CHART_MAX_BARS).
   useEffect(() => {
     if (!historyActive || loadingOlder || retryBlocked) return
     loadOlder(true)
@@ -1006,6 +1002,25 @@ function App() {
   const openSearch = useCallback((initialQuery = '') => setSearch({ initialQuery }), [])
   const openIndicatorMenu = useCallback(() => setIndicatorMenuOpen(true), [])
   const closeIndicatorMenu = useCallback(() => setIndicatorMenuOpen(false), [])
+  // Time-anchored indicators (Anchored VWAP, volume profile) start at `time`; from the menu that
+  // is the first bar in view of the active chart, so they show something straight away.
+  const addIndicator = useCallback(
+    (type: IndicatorId, time?: number | null) => {
+      const def = getIndicatorDef(type)
+      if (!def) return null
+      const anchor =
+        time !== undefined
+          ? time
+          : (chartApisRef.current.get(activeP.id)?.firstVisibleTime() ?? null)
+      const uid = indicators.add(type, anchorInputs(def, anchor))
+      // The indicator menu reports the limit itself; the chart's right-click menu does not.
+      if (uid === null && time !== undefined) {
+        setNotice('Indicator limit reached. Remove one to add another.')
+      }
+      return uid
+    },
+    [indicators, activeP.id],
+  )
   const closeSettings = useCallback(() => setSettingsUid(null), [])
   const closeSearch = useCallback(() => setSearch(null), [])
 
@@ -1951,6 +1966,8 @@ function App() {
             addHorizontalLine(contextPanel.id, price, contextMenu.request.time)
           }
           onDeleteDrawing={(id) => deleteDrawing(contextPanel.symbol, id)}
+          onAnchoredVwap={(time) => addIndicator('avwap', time)}
+          onVolumeProfile={(time) => addIndicator('vprofile', time)}
           onClose={closeContextMenu}
         />
       )}
@@ -2014,11 +2031,7 @@ function App() {
         />
       )}
       {indicatorMenuOpen && (
-        <IndicatorMenu
-          items={indicators.items}
-          onAdd={indicators.add}
-          onClose={closeIndicatorMenu}
-        />
+        <IndicatorMenu items={indicators.items} onAdd={addIndicator} onClose={closeIndicatorMenu} />
       )}
       {settingsOpen && (
         <SettingsDialog
@@ -2047,6 +2060,7 @@ function App() {
           config={settingsConfig}
           onApply={(patch) => indicators.update(settingsConfig.uid, patch)}
           onClose={closeSettings}
+          secondsCharts={visible.some((p) => isSecondsTimeframe(p.interval))}
         />
       )}
     </div>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DrawingController, type ControllerCallbacks } from './controller'
+import { DrawingController, plottedBarTime, type ControllerCallbacks } from './controller'
 import { barTime, fakeAdapter, yOf } from './testAdapter'
 import {
   DEFAULT_DRAWING_STYLE,
@@ -367,6 +367,19 @@ describe('context menu', () => {
       drawingId: null,
     })
   })
+
+  it('keeps a bar time only when it is a plotted bar', () => {
+    const bars = [{ time: 1_000 }, { time: 1_060 }, { time: 1_120 }]
+    expect(plottedBarTime(1_000, bars)).toBe(1_000)
+    expect(plottedBarTime(1_060, bars)).toBe(1_060)
+    expect(plottedBarTime(1_120, bars)).toBe(1_120)
+    // Snapped times extrapolate into future whitespace and before the first loaded bar.
+    expect(plottedBarTime(1_180, bars)).toBeNull()
+    expect(plottedBarTime(940, bars)).toBeNull()
+    expect(plottedBarTime(null, bars)).toBeNull()
+    expect(plottedBarTime(1_000, [])).toBeNull()
+    expect(plottedBarTime(1_000, null)).toBeNull()
+  })
 })
 
 describe('store rejections', () => {
@@ -480,5 +493,75 @@ describe('prices stay positive', () => {
       { time: barTime(10), price: 50 },
       { time: barTime(15), price: 10 },
     ])
+  })
+})
+
+describe('hover (LWC hit testing)', () => {
+  it('hoverAt reports the cursor and the drawing under the point', () => {
+    const { c } = setup('cursor', [trend])
+    expect(c.hoverAt({ x: 150, y: yOf(150) })).toEqual({ cursor: 'pointer', id: 't1' })
+    expect(c.hoverAt({ x: 500, y: 20 })).toBeNull()
+    c.setSelected('t1')
+    expect(c.hoverAt({ x: 200, y: yOf(150) })).toEqual({ cursor: 'grab', id: 't1' })
+  })
+
+  it('hoverAt reports the dragged drawing while dragging', () => {
+    const { c } = setup('cursor', [trend])
+    c.pointerDown({ x: 150, y: yOf(150) })
+    c.pointerMove({ x: 170, y: yOf(150) })
+    expect(c.hoverAt({ x: 500, y: 20 })).toEqual({ cursor: 'move', id: 't1' })
+  })
+
+  it('with a tool active the crosshair names no drawing, even over one', () => {
+    const { c } = setup('trendline', [trend])
+    expect(c.hoverAt({ x: 150, y: yOf(150) })).toEqual({ cursor: 'crosshair', id: null })
+    expect(c.cursorAt({ x: 150, y: yOf(150) })).toBe('crosshair')
+  })
+
+  it('setHovered shows faint handles only for an unselected drawing in cursor mode', () => {
+    const { c } = setup('cursor', [trend])
+    let renders = 0
+    c.setCallbacks({ onRender: () => renders++ })
+    expect(c.view().hoveredId).toBeNull()
+    c.setHovered('t1')
+    expect(renders).toBe(1)
+    expect(c.hoveredId).toBe('t1')
+    expect(c.view().hoveredId).toBe('t1')
+    // Idempotent: no redraw for the same id.
+    c.setHovered('t1')
+    expect(renders).toBe(1)
+    // The selection already shows full handles.
+    c.setSelected('t1')
+    expect(c.view().hoveredId).toBeNull()
+    c.setSelected(null)
+    expect(c.view().hoveredId).toBe('t1')
+    // Not while a tool is active; back when it ends.
+    c.setTool('rectangle')
+    expect(c.view().hoveredId).toBeNull()
+    c.setTool('cursor')
+    expect(c.view().hoveredId).toBe('t1')
+    c.setHovered(null)
+    expect(c.view().hoveredId).toBeNull()
+    expect(renders).toBeGreaterThanOrEqual(4)
+  })
+
+  it('a hovered id that is not a drawing (deleted, other symbol) shows nothing', () => {
+    const { c } = setup('cursor', [trend])
+    c.setHovered('gone')
+    expect(c.view().hoveredId).toBeNull()
+    c.setHovered('t1')
+    c.setDrawings([])
+    expect(c.view().hoveredId).toBeNull()
+  })
+
+  it('no hover handles while dragging', () => {
+    const other = make('h1', 'hline', [{ time: barTime(0), price: 120 }])
+    const { c } = setup('cursor', [trend, other])
+    c.setHovered('h1')
+    c.pointerDown({ x: 150, y: yOf(150) })
+    c.pointerMove({ x: 170, y: yOf(150) })
+    expect(c.view().hoveredId).toBeNull()
+    c.pointerUp({ x: 170, y: yOf(150) })
+    expect(c.view().hoveredId).toBe('h1')
   })
 })

@@ -1,3 +1,4 @@
+import { anchoredVwapDef } from './anchoredVwap'
 import { bollingerDef } from './bollinger'
 import { emaDef } from './ema'
 import { macdDef } from './macd'
@@ -6,6 +7,7 @@ import { smaDef } from './sma'
 import { stochDef } from './stochastic'
 import type { IndicatorDef, IndicatorId } from './types'
 import { volumeMaDef } from './volumeMa'
+import { volumeProfileDef } from './volumeProfile'
 import { vwapDef } from './vwap'
 
 /** Menu order: overlays first, then volume, then pane oscillators. */
@@ -14,6 +16,8 @@ export const INDICATORS: readonly IndicatorDef[] = [
   emaDef,
   bollingerDef,
   vwapDef,
+  anchoredVwapDef,
+  volumeProfileDef,
   volumeMaDef,
   rsiDef,
   macdDef,

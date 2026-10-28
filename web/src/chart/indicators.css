@@ -33,6 +33,24 @@
   background: var(--legend-bg);
 }
 
+/*
+ * The indicator's line is hovered on the chart (LWC hit testing): the row lights up like a
+ * hovered row, with a faint accent edge so the link to the chart is visible. Only colours
+ * change (the border is always 1px), so nothing shifts.
+ */
+.ind-legend__row--highlighted {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--legend-bg);
+}
+
+.ind-legend__row--highlighted .ind-legend__title {
+  color: var(--text);
+}
+
+.ind-legend__row--highlighted .ind-legend__actions {
+  opacity: 1;
+}
+
 .ind-legend__title {
   color: var(--text-muted);
   white-space: nowrap;
@@ -107,4 +125,25 @@
 .ind-legend__row--hidden:focus-within .ind-legend__btn {
   opacity: 1;
   pointer-events: auto;
+}
+
+/*
+ * Why an anchored indicator draws nothing (anchor not set / older than the loaded history).
+ * Small muted text on the row's own line: the row does not wrap, and a long note is truncated
+ * with its full text as a tooltip, so the row never grows taller and nothing below it moves.
+ */
+.ind-legend__row--note {
+  flex-wrap: nowrap;
+}
+
+.ind-legend__note {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 58ch;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }

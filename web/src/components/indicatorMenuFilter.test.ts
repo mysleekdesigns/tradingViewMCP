@@ -30,8 +30,9 @@ describe('filterIndicators', () => {
       'volma',
       'macd',
     ])
-    // Vol MA is a prefix match; VWAP only matches through its description ("Volume-weighted").
-    expect(ids(filterIndicators(INDICATORS, 'vol'))).toEqual(['volma', 'vwap'])
+    // Volume Profile and Vol MA are prefix matches (registry order); VWAP and Anchored VWAP only
+    // match through their descriptions ("Volume-weighted").
+    expect(ids(filterIndicators(INDICATORS, 'vol'))).toEqual(['vprofile', 'volma', 'vwap', 'avwap'])
   })
 
   it('matches the id and the description', () => {
@@ -52,7 +53,7 @@ describe('groupIndicators', () => {
     const groups = groupIndicators(INDICATORS)
     expect(groups.map((g) => g.label)).toEqual(['Overlays', 'Volume', 'Oscillators'])
     expect(groups.map((g) => ids(g.items))).toEqual([
-      ['sma', 'ema', 'bb', 'vwap'],
+      ['sma', 'ema', 'bb', 'vwap', 'avwap', 'vprofile'],
       ['volma'],
       ['rsi', 'macd', 'stoch'],
     ])
@@ -71,8 +72,8 @@ describe('groupIndicators', () => {
 
   it('flattens groups into display order for keyboard navigation', () => {
     const shown = flattenGroups(groupIndicators(filterIndicators(INDICATORS, 'vol')))
-    // Grouping puts the overlay (VWAP) before the volume indicator.
-    expect(ids(shown)).toEqual(['vwap', 'volma'])
+    // Grouping puts the overlays (ranked inside their group) before the volume indicator.
+    expect(ids(shown)).toEqual(['vprofile', 'vwap', 'avwap', 'volma'])
   })
 })
 

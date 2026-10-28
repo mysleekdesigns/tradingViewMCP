@@ -23,6 +23,7 @@ import type {
 } from '../data/labTypes'
 import type { Timeframe } from '../types'
 import { EXIT_LABELS } from '../chart/backtestOverlay'
+import { CHART_MAX_BARS } from '../chart/conflation'
 import {
   BACKTEST_TIMEFRAME_MESSAGE,
   backtestSupported,
@@ -817,7 +818,7 @@ function ReportBar({
               (h.unreachable ? (
                 <span
                   className="tester__chart-note tester__chart-note--muted tester__chart-note--wrap"
-                  title="Older bars at this interval would exceed what the chart can hold. A higher interval shows the whole window."
+                  title={`One history load fetches at most ${fmtInt(MAX_HISTORY_BARS)} older bars and the chart holds at most ${fmtInt(CHART_MAX_BARS)}; at this interval that does not reach the window. A higher interval shows the whole window.`}
                 >
                   {unreachableText(report.window.end)}
                 </span>
@@ -855,7 +856,7 @@ function ReportBar({
                 </>
               ) : h.partial && h.bars === 0 ? (
                 <span className="tester__chart-note tester__chart-note--muted">
-                  Chart holds at most {fmtInt(MAX_HISTORY_BARS)} bars
+                  Chart holds at most {fmtInt(CHART_MAX_BARS)} bars
                 </span>
               ) : link.historyExhausted ? (
                 <span className="tester__chart-note tester__chart-note--muted">
@@ -867,7 +868,7 @@ function ReportBar({
                   className="tester__btn"
                   title={
                     h.partial
-                      ? `The window is longer than the chart can hold; loads the most recent ${fmtInt(h.bars)} bars`
+                      ? `The window reaches further back than one load fetches; loads the ${fmtInt(h.bars)} next older bars (at most ${fmtInt(MAX_HISTORY_BARS)} per load, ${fmtInt(CHART_MAX_BARS)} on the chart)`
                       : `Loads ~${fmtInt(h.bars)} older bars so every trade is on the chart`
                   }
                   onClick={onLoadHistory}

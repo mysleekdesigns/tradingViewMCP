@@ -203,7 +203,9 @@ describe('auto-load copy', () => {
   it('explains an unreachable window and points to higher intervals', () => {
     const text = unreachableText(WIN.end)
     expect(text).toContain('2025-10-01')
-    expect(text).toContain('20,000-bar chart limit')
+    // States the real limits: a per-load budget and the chart cap, not a 20k-bar chart.
+    expect(text).toContain('20,000 older bars per load')
+    expect(text).toContain('150,000 bars on the chart')
     expect(text).toContain('Use 1h, 4h or 1d')
   })
 })

@@ -100,6 +100,11 @@ describe('chartOptionsFor', () => {
     })
   })
 
+  it('turns on 5.2 hit testing that draws the hovered series on top', () => {
+    expect(chartOptionsFor(light).hoveredSeriesOnTop).toBe(true)
+    expect(chartOptions.hoveredSeriesOnTop).toBe(true)
+  })
+
   it('theme-only options never touch view state or fonts (safe for applyOptions)', () => {
     const o = chartThemeOptionsFor(light)
     expect(o.timeScale).not.toHaveProperty('barSpacing')

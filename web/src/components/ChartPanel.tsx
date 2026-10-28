@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, type ReactNode } from 'react'
 import type { BacktestChartData, FocusPlan } from '../chart/backtestOverlay'
 import { Chart, type ChartApi } from '../chart/Chart'
+import { CHART_MAX_BARS } from '../chart/conflation'
 import { regimeSourceBars } from '../chart/regimeRibbon'
 import type { CrosshairSync } from '../chart/crosshairSync'
 import type { ChartContextMenuRequest, DrawingStyle, ToolMode } from '../chart/drawings/types'
@@ -32,7 +33,6 @@ import {
 import type { Candle, Timeframe } from '../types'
 import './AppShell.css'
 import './Derivatives.css'
-import { MAX_HISTORY_BARS } from './backtestView'
 import { ConnectionIndicator } from './ConnectionStatus'
 import './Layout.css'
 import { NoTradesView } from './NoTradesView'
@@ -208,7 +208,8 @@ export const ChartPanel = memo(function ChartPanel({
     interval,
     limit,
     errorSource,
-    MAX_HISTORY_BARS,
+    // Scroll-back paging cap, sized for conflation (Phase 14); backtest loads use their own.
+    CHART_MAX_BARS,
   )
   const { load } = live
 
@@ -346,10 +347,10 @@ export const ChartPanel = memo(function ChartPanel({
             interval={interval}
             exchange={exchange}
             raw={load.candles}
-            maxBars={MAX_HISTORY_BARS}
+            maxBars={CHART_MAX_BARS}
             loadingOlder={live.loadingOlder}
             historyExhausted={live.historyExhausted}
-            atLimit={atHistoryLimit(load.candles.length, MAX_HISTORY_BARS)}
+            atLimit={atHistoryLimit(load.candles.length, CHART_MAX_BARS)}
             retryBlocked={live.retryBlocked}
             olderCooldown={live.olderCooldown}
             offline={live.status === 'offline'}

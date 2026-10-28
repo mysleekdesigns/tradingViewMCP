@@ -5,16 +5,22 @@ import { INDICATOR_BY_ID } from '../indicators/registry'
 import type { IndicatorDef, IndicatorId } from '../indicators/types'
 import { createIndicatorConfig, type IndicatorConfig } from '../state/indicators'
 import type { Candle } from '../types'
+import { VOLUME_PROFILE_HINDSIGHT } from '../indicators/volumeProfile'
 import {
+  ANCHOR_NOT_LOADED_NOTE,
+  ANCHOR_NOT_SET_NOTE,
+  anchorNote,
   assignPanes,
   buildLegendRow,
   diffIndicators,
   formatIndicatorValue,
   formatInputNumber,
+  formatTimeInput,
   histogramColor,
   indicatorPriceFormat,
   indicatorTitle,
   IndicatorSeriesManager,
+  ownsPane,
   paneGuideValues,
   paneIndicatorUids,
 } from './indicatorSeries'
@@ -168,6 +174,82 @@ describe('legend text', () => {
     expect(indicatorTitle(def('volma'), cfg('volma', 'a'))).toBe('Vol MA 20')
     expect(indicatorTitle(def('stoch'), cfg('stoch', 'a'))).toBe('Stoch 14 1 3')
     expect(indicatorTitle(def('rsi'), cfg('rsi', 'a'))).toBe('RSI 14 close')
+  })
+
+  it('titles show set anchor times as compact UTC and leave out unset ones', () => {
+    const anchored = { anchor: 1_700_000_040 }
+    expect(formatTimeInput(1_700_000_040)).toBe('2023-11-14 22:14')
+    expect(indicatorTitle(def('avwap'), { inputs: anchored, source: 'hlc3' })).toBe(
+      'AVWAP 2023-11-14 22:14 hlc3',
+    )
+    expect(indicatorTitle(def('avwap'), { inputs: { anchor: 0 }, source: 'hlc3' })).toBe(
+      'AVWAP hlc3',
+    )
+    expect(indicatorTitle(def('avwap'), { inputs: {}, source: 'close' })).toBe('AVWAP close')
+    const range = { from: 1_700_000_040, to: 0, rows: 24, valueArea: 70 }
+    expect(indicatorTitle(def('vprofile'), { inputs: range, source: 'close' })).toBe(
+      'VP 2023-11-14 22:14 24 70',
+    )
+    const bounded = { ...range, to: 1_700_086_440 }
+    expect(indicatorTitle(def('vprofile'), { inputs: bounded, source: 'close' })).toBe(
+      'VP 2023-11-14 22:14 2023-11-15 22:14 24 70',
+    )
+    // Two AVWAPs on different anchors are told apart.
+    expect(
+      indicatorTitle(def('avwap'), { inputs: { anchor: 1_700_003_640 }, source: 'hlc3' }),
+    ).not.toBe(indicatorTitle(def('avwap'), { inputs: anchored, source: 'hlc3' }))
+  })
+
+  it('anchor note: not set, before the loaded history, or none', () => {
+    const first = 1_700_000_000
+    const avwap = (anchor: number) => ({ inputs: { anchor } })
+    expect(anchorNote(def('avwap'), avwap(0), first)).toBe(ANCHOR_NOT_SET_NOTE)
+    expect(anchorNote(def('avwap'), { inputs: {} }, first)).toBe(ANCHOR_NOT_SET_NOTE)
+    expect(anchorNote(def('avwap'), avwap(first - 1), first)).toBe(ANCHOR_NOT_LOADED_NOTE)
+    expect(anchorNote(def('avwap'), avwap(first), first)).toBeUndefined()
+    expect(anchorNote(def('avwap'), avwap(first + 3600), first)).toBeUndefined()
+    // No bars yet: only "not set" can be told.
+    expect(anchorNote(def('avwap'), avwap(first - 1), undefined)).toBeUndefined()
+    // VP: `from` is the anchor; `to` (second time input) is not checked.
+    const vp = (from: number) => ({ inputs: { from, to: 0, rows: 24, valueArea: 70 } })
+    expect(anchorNote(def('vprofile'), vp(0), first)).toBe(ANCHOR_NOT_SET_NOTE)
+    expect(anchorNote(def('vprofile'), vp(first - 60), first)).toBe(ANCHOR_NOT_LOADED_NOTE)
+    expect(anchorNote(def('vprofile'), vp(first + 60), first)).toBeUndefined()
+    // Indicators without a time input never get a note.
+    expect(anchorNote(def('ema'), cfg('ema', 'e'), first)).toBeUndefined()
+  })
+
+  it('legend rows carry the anchor note and the range-profile hindsight hint', () => {
+    const first = 1_700_000_000
+    const avwap = { ...cfg('avwap', 'a'), inputs: { anchor: first - 3600 } }
+    const row = buildLegendRow(def('avwap'), avwap, 0, {}, {}, first)
+    expect(row.note).toBe(ANCHOR_NOT_LOADED_NOTE)
+    expect(row.hint).toBeUndefined()
+    expect(buildLegendRow(def('avwap'), cfg('avwap', 'b'), 0, {}).note).toBe(ANCHOR_NOT_SET_NOTE)
+    const set = { ...cfg('avwap', 'c'), inputs: { anchor: first } }
+    expect(buildLegendRow(def('avwap'), set, 0, { avwap: 1 }, {}, first)).not.toHaveProperty('note')
+    const vp = buildLegendRow(def('vprofile'), cfg('vprofile', 'v'), 0, {}, {}, first)
+    expect(vp.note).toBe(ANCHOR_NOT_SET_NOTE)
+    expect(vp.hint).toBe(VOLUME_PROFILE_HINDSIGHT)
+    const ema = buildLegendRow(def('ema'), cfg('ema', 'e'), 0, {}, {}, first)
+    expect(ema).not.toHaveProperty('note')
+    expect(ema).not.toHaveProperty('hint')
+  })
+
+  it('the manager passes the first loaded bar to the anchor note', () => {
+    const candles = makeCandles(50)
+    const chart = new FakeChart()
+    const manager = new IndicatorSeriesManager()
+    manager.attach(chart as unknown as IChartApi)
+    manager.applyPlan(planSeriesSync(null, candles), candles)
+    const before = { ...cfg('avwap', 'a'), inputs: { anchor: candles[0].time - 3600 } }
+    const loaded = { ...cfg('avwap', 'b'), inputs: { anchor: candles[10].time } }
+    manager.sync([before, loaded], candles)
+    const [a, b] = manager.legendRows(undefined)
+    expect(a.note).toBe(ANCHOR_NOT_LOADED_NOTE)
+    expect(a.values[0].text).toBe('—')
+    expect(b.note).toBeUndefined()
+    expect(b.values[0].text).not.toBe('—')
   })
 
   it('values per placement', () => {
@@ -602,5 +684,199 @@ describe('IndicatorSeriesManager', () => {
     const macd = chart.panesList[2].series
     expect(macd[0].priceLines[0]).toMatchObject({ price: 0, color: '#6a6d78' })
     expect(macd[1].options.crosshairMarkerBorderColor).toBe('#ffffff')
+  })
+})
+
+/* ---------------------------------- hover highlight ---------------------------------- */
+
+describe('IndicatorSeriesManager highlight (hit-test hover)', () => {
+  const candles = makeCandles(80)
+
+  function widths(series: FakeSeries[]) {
+    return series.map((s) => (s.kind === 'Line' ? s.options.lineWidth : s.kind))
+  }
+
+  it('maps each indicator series to its uid; other series map to null', () => {
+    const { chart, manager } = setup([cfg('ema', 'e'), cfg('macd', 'm')], candles)
+    const [ema] = chart.panesList[0].series
+    const [hist, macdLine, signal] = chart.panesList[1].series
+    expect(manager.uidOfSeries(ema as never)).toBe('e')
+    for (const s of [hist, macdLine, signal]) expect(manager.uidOfSeries(s as never)).toBe('m')
+    expect(manager.uidOfSeries(new FakeSeries('Line', {}) as never)).toBeNull()
+  })
+
+  it('widens the lines of the highlighted indicator by 1 and restores the exact widths', () => {
+    const { chart, manager } = setup([cfg('ema', 'e'), cfg('macd', 'm')], candles)
+    const macd = chart.panesList[1].series
+    const before = widths(macd)
+    const ema = chart.panesList[0].series[0]
+    const emaWidth = ema.options.lineWidth
+    manager.setHighlighted('m')
+    expect(manager.highlightedUid()).toBe('m')
+    // Histogram bars unchanged; MACD and signal lines +1.
+    expect(widths(macd)).toEqual(before.map((w) => (typeof w === 'number' ? w + 1 : w)))
+    expect(macd[0].calls.some((c) => c.method === 'applyOptions')).toBe(false)
+    expect(ema.options.lineWidth).toBe(emaWidth)
+    manager.setHighlighted(null)
+    expect(widths(macd)).toEqual(before)
+    expect(manager.highlightedUid()).toBeNull()
+  })
+
+  it('moving the highlight restores the previous indicator', () => {
+    const { chart, manager } = setup([cfg('ema', 'e'), cfg('rsi', 'r')], candles)
+    const ema = chart.panesList[0].series[0]
+    const rsi = chart.panesList[1].series[0]
+    const emaW = ema.options.lineWidth as number
+    const rsiW = rsi.options.lineWidth as number
+    manager.setHighlighted('e')
+    manager.setHighlighted('r')
+    expect(ema.options.lineWidth).toBe(emaW)
+    expect(rsi.options.lineWidth).toBe(rsiW + 1)
+  })
+
+  it('is idempotent: repeating the same uid changes nothing and does not notify', () => {
+    const { chart, manager } = setup([cfg('rsi', 'r')], candles)
+    const rsi = chart.panesList[1].series[0]
+    let n = 0
+    manager.subscribe(() => n++)
+    manager.setHighlighted('r')
+    rsi.calls = []
+    manager.setHighlighted('r')
+    expect(rsi.calls).toEqual([])
+    expect(n).toBe(1)
+    manager.setHighlighted(null)
+    manager.setHighlighted(null)
+    expect(n).toBe(2)
+  })
+
+  it('an unknown uid is a no-op', () => {
+    const { chart, manager } = setup([cfg('rsi', 'r')], candles)
+    manager.setHighlighted('r')
+    const rsi = chart.panesList[1].series[0]
+    rsi.calls = []
+    manager.setHighlighted('nope')
+    expect(manager.highlightedUid()).toBe('r')
+    expect(rsi.calls).toEqual([])
+  })
+
+  it('survives a pane rebuild: re-created series come back highlighted, then restore', () => {
+    const rsi = cfg('rsi', 'r')
+    const stoch = cfg('stoch', 's')
+    const { chart, manager } = setup([rsi, stoch], candles)
+    const base = widths(chart.panesList[2].series)
+    manager.setHighlighted('s')
+    // Removing RSI rebuilds every pane indicator; Stoch is re-created in pane 1.
+    manager.sync([stoch], candles)
+    const rebuilt = chart.panesList[1].series
+    expect(manager.uidOfSeries(rebuilt[0] as never)).toBe('s')
+    expect(widths(rebuilt)).toEqual(base.map((w) => (w as number) + 1))
+    manager.setHighlighted(null)
+    expect(widths(rebuilt)).toEqual(base)
+  })
+
+  it('survives colour, input and palette changes and live updates', () => {
+    const ema = cfg('ema', 'e')
+    const { chart, manager } = setup([ema], candles)
+    const s = chart.all()[0]
+    const w = s.options.lineWidth as number
+    manager.setHighlighted('e')
+    manager.sync([{ ...ema, colors: { ema: '#00ff00' } }], candles)
+    manager.sync([{ ...ema, colors: { ema: '#00ff00' }, inputs: { period: 5 } }], candles)
+    manager.setPalette({ background: '#ffffff', mutedText: '#6a6d78' })
+    const ticked = [...candles.slice(0, -1), { ...candles[candles.length - 1], close: 1 }]
+    manager.applyPlan(planSeriesSync(candles, ticked), ticked)
+    expect(s.options.lineWidth).toBe(w + 1)
+    expect(s.options.color).toBe('#00ff00')
+    manager.setHighlighted(null)
+    expect(s.options.lineWidth).toBe(w)
+  })
+
+  it('removing the highlighted indicator clears the highlight; detach clears it too', () => {
+    const ema = cfg('ema', 'e')
+    const rsi = cfg('rsi', 'r')
+    const { manager } = setup([ema, rsi], candles)
+    manager.setHighlighted('r')
+    manager.sync([ema], candles)
+    expect(manager.highlightedUid()).toBeNull()
+    manager.setHighlighted('e')
+    manager.detach()
+    expect(manager.highlightedUid()).toBeNull()
+  })
+})
+
+/* ---------------------------------- defs without lines ---------------------------------- */
+
+describe('IndicatorSeriesManager with a lineless (range) indicator', () => {
+  const candles = makeCandles(80)
+  // Like the fixed-range volume profile: no per-bar lines, drawn by a primitive.
+  function lineless(placement: IndicatorDef['placement']): IndicatorDef {
+    return {
+      id: 'vprofile',
+      name: 'Fake Range Profile',
+      shortName: 'FRP',
+      description: 'test def without lines',
+      placement,
+      inputs: [
+        { key: 'rows', label: 'Rows', default: 24, min: 4, max: 200, step: 1, integer: true },
+      ],
+      source: null,
+      lines: [],
+      guides: [],
+      createStepper() {
+        const stepper = { next: () => ({}), clone: () => stepper }
+        return stepper
+      },
+      profile: () => null,
+    }
+  }
+  function defsWith(extra: IndicatorDef): ReadonlyMap<IndicatorId, IndicatorDef> {
+    return new Map([...INDICATOR_BY_ID, [extra.id, extra]])
+  }
+  const fakeCfg: IndicatorConfig = {
+    ...cfg('ema', 'p'),
+    type: 'vprofile',
+    inputs: { rows: 24 },
+    colors: {},
+  }
+
+  function setupWith(extra: IndicatorDef, configs: IndicatorConfig[]) {
+    const chart = new FakeChart()
+    const manager = new IndicatorSeriesManager(defsWith(extra))
+    manager.attach(chart as unknown as IChartApi)
+    manager.applyPlan(planSeriesSync(null, candles), candles)
+    manager.sync(configs, candles)
+    return { chart, manager }
+  }
+
+  it('creates no series and still yields a legend row with a title and no values', () => {
+    const { chart, manager } = setupWith(lineless('overlay'), [fakeCfg, cfg('ema', 'e')])
+    expect(chart.all()).toHaveLength(1) // the EMA only
+    const rows = manager.legendRows(undefined)
+    expect(rows.map((r) => r.uid)).toEqual(['p', 'e'])
+    expect(rows[0]).toMatchObject({ title: 'FRP 24', pane: 0, visible: true, values: [] })
+    expect(manager.legendRows(candles[10].time)[0].values).toEqual([])
+  })
+
+  it('later syncs, ticks, hide and highlight never build series for it', () => {
+    const { chart, manager } = setupWith(lineless('overlay'), [fakeCfg])
+    manager.sync([{ ...fakeCfg, visible: false }], candles)
+    manager.sync([{ ...fakeCfg, inputs: { rows: 30 } }], candles)
+    const ticked = [...candles.slice(0, -1), { ...candles[candles.length - 1], close: 1 }]
+    manager.applyPlan(planSeriesSync(candles, ticked), ticked)
+    manager.setHighlighted('p')
+    expect(chart.all()).toHaveLength(0)
+    expect(manager.highlightedUid()).toBe('p')
+    expect(manager.legendRows(undefined)[0].title).toBe('FRP 30')
+  })
+
+  it('a lineless pane def takes no pane, so pane indicators keep panes 1..n', () => {
+    const def = lineless('pane')
+    expect(ownsPane(def)).toBe(false)
+    expect(ownsPane(INDICATOR_BY_ID.get('rsi'))).toBe(true)
+    const { chart, manager } = setupWith(def, [fakeCfg, cfg('rsi', 'r')])
+    expect(chart.panesList).toHaveLength(2)
+    expect(manager.paneIndexOf('r')).toBe(1)
+    expect(manager.paneIndexOf('p')).toBe(0)
+    expect(paneIndicatorUids([fakeCfg, cfg('rsi', 'r')], defsWith(def))).toEqual(['r'])
   })
 })

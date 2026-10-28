@@ -1,1 +1,2 @@
 - [Web data honesty conventions](web-data-honesty-conventions.md) — Coinbase live-close/read-back rules, seasonals t-band screen + caption MC, venue gating (Phase 9 w1, rounds 1-4)
+- [Web range indicators](web-range-indicators.md) — Phase 14 AVWAP/volume profile: round-1 issues fixed (r2); cache/runner fuzz harness to rerun on edits

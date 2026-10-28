@@ -7,22 +7,35 @@ export interface IndicatorLegendActions {
   onSettings?: (uid: string) => void
 }
 
-interface RowsProps extends IndicatorLegendActions {
+interface HighlightProps {
+  /**
+   * uid of the indicator under the mouse on the chart (LWC hit testing); its row is highlighted
+   * the way a hovered row looks, as TradingView does.
+   */
+  highlightedUid?: string | null
+}
+
+interface RowsProps extends IndicatorLegendActions, HighlightProps {
   rows: readonly IndicatorLegendRow[]
 }
 
 /** Overlay and volume indicator rows; rendered inside the main (top-left) legend. */
-export function IndicatorLegendRows({ rows, ...actions }: RowsProps) {
+export function IndicatorLegendRows({ rows, highlightedUid = null, ...actions }: RowsProps) {
   return (
     <>
       {rows.map((row) => (
-        <IndicatorLegendItem key={row.uid} row={row} {...actions} />
+        <IndicatorLegendItem
+          key={row.uid}
+          row={row}
+          highlighted={row.uid === highlightedUid}
+          {...actions}
+        />
       ))}
     </>
   )
 }
 
-interface PaneLegendsProps extends IndicatorLegendActions {
+interface PaneLegendsProps extends IndicatorLegendActions, HighlightProps {
   /** Pane-indicator rows (row.pane >= 1). */
   rows: readonly IndicatorLegendRow[]
   /** Top of each pane in px, relative to the chart container; index = pane index. */
@@ -30,7 +43,12 @@ interface PaneLegendsProps extends IndicatorLegendActions {
 }
 
 /** One legend at the top-left of each indicator pane. Hidden until the pane has been measured. */
-export function PaneLegends({ rows, paneTops, ...actions }: PaneLegendsProps) {
+export function PaneLegends({
+  rows,
+  paneTops,
+  highlightedUid = null,
+  ...actions
+}: PaneLegendsProps) {
   return (
     <>
       {rows.map((row) => {
@@ -38,7 +56,7 @@ export function PaneLegends({ rows, paneTops, ...actions }: PaneLegendsProps) {
         if (top === null || top === undefined) return null
         return (
           <div key={row.uid} className="ind-pane-legend" style={{ top: top + 6 }} aria-live="off">
-            <IndicatorLegendItem row={row} {...actions} />
+            <IndicatorLegendItem row={row} highlighted={row.uid === highlightedUid} {...actions} />
           </div>
         )
       })}
@@ -48,12 +66,36 @@ export function PaneLegends({ rows, paneTops, ...actions }: PaneLegendsProps) {
 
 interface ItemProps extends IndicatorLegendActions {
   row: IndicatorLegendRow
+  highlighted: boolean
 }
 
-function IndicatorLegendItem({ row, onToggleVisible, onRemove, onSettings }: ItemProps) {
-  const { uid, title, visible, values } = row
+/**
+ * Row class names: base, hidden, highlighted (indicator hovered on the chart), and with a note
+ * (one line, no wrap).
+ */
+function legendRowClassName(visible: boolean, highlighted: boolean, noted: boolean): string {
+  let name = 'ind-legend__row'
+  if (!visible) name += ' ind-legend__row--hidden'
+  if (highlighted) name += ' ind-legend__row--highlighted'
+  if (noted) name += ' ind-legend__row--note'
+  return name
+}
+
+function IndicatorLegendItem({
+  row,
+  highlighted,
+  onToggleVisible,
+  onRemove,
+  onSettings,
+}: ItemProps) {
+  const { uid, title, visible, values, note, hint } = row
+  const showNote = visible && note !== undefined
   return (
-    <div className={`ind-legend__row${visible ? '' : ' ind-legend__row--hidden'}`}>
+    <div
+      className={legendRowClassName(visible, highlighted, showNote)}
+      data-highlighted={highlighted ? 'true' : undefined}
+      title={hint}
+    >
       <span className="ind-legend__title">{title}</span>
       {visible && (
         <span className="ind-legend__values">
@@ -62,6 +104,11 @@ function IndicatorLegendItem({ row, onToggleVisible, onRemove, onSettings }: Ite
               {v.text}
             </span>
           ))}
+        </span>
+      )}
+      {showNote && (
+        <span className="ind-legend__note" role="note" title={note}>
+          {note}
         </span>
       )}
       <span className="ind-legend__actions">

@@ -155,6 +155,9 @@ export function chartOptionsFor(a: ChartAppearance): DeepPartial<TimeChartOption
   const p = paletteFor(a)
   return {
     autoSize: true,
+    // LWC 5.2 hit testing: the series under the mouse draws above the others (it is also the
+    // one `hoveredInfo` reports, which highlights the indicator and its legend row).
+    hoveredSeriesOnTop: true,
     layout: {
       background: { type: ColorType.Solid, color: p.background },
       textColor: p.text,

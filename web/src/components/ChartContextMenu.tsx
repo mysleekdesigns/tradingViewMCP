@@ -19,6 +19,10 @@ export interface ChartContextMenuProps {
   onAddAlert(price: number): void
   onAddHorizontalLine(price: number): void
   onDeleteDrawing(id: string): void
+  /** Add an anchored VWAP from the bar under the cursor (bar open time, UNIX seconds). */
+  onAnchoredVwap?(time: number): void
+  /** Add a fixed-range volume profile from the bar under the cursor to the latest bar. */
+  onVolumeProfile?(time: number): void
   onClose(): void
 }
 
@@ -47,6 +51,8 @@ export function ChartContextMenu({
   onAddAlert,
   onAddHorizontalLine,
   onDeleteDrawing,
+  onAnchoredVwap,
+  onVolumeProfile,
   onClose,
 }: ChartContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
@@ -57,7 +63,8 @@ export function ChartContextMenu({
     onCloseRef.current = onClose
   })
 
-  const { price, drawingId } = request
+  // Bar-anchored items need a plotted bar under the cursor (not future whitespace).
+  const { price, barTime, drawingId } = request
   const items: MenuItem[] = []
   if (price !== null) {
     const p = formatPrice(price)
@@ -75,6 +82,27 @@ export function ChartContextMenu({
       icon: <ToolIcon tool="hline" />,
       run: () => onAddHorizontalLine(price),
     })
+  }
+  if (barTime !== null) {
+    const before = items.length
+    if (onAnchoredVwap) {
+      items.push({
+        key: 'avwap',
+        label: 'Anchored VWAP from this bar',
+        icon: <AnchoredVwapIcon />,
+        separated: before > 0,
+        run: () => onAnchoredVwap(barTime),
+      })
+    }
+    if (onVolumeProfile) {
+      items.push({
+        key: 'vprofile',
+        label: 'Volume profile from this bar',
+        icon: <VolumeProfileIcon />,
+        separated: before > 0 && items.length === before,
+        run: () => onVolumeProfile(barTime),
+      })
+    }
   }
   if (drawingId !== null) {
     items.push({
@@ -235,6 +263,48 @@ function BellIcon() {
     >
       <path d="M6 15.5V10a5 5 0 0 1 10 0v5.5l1.5 1.5h-13zM9.2 17.5a1.9 1.9 0 0 0 3.6 0" />
       <path d="M17 4.5l1.5-1.2M5 4.5L3.5 3.3" />
+    </svg>
+  )
+}
+
+/** A line anchored at a bar (dot), curving with price like a VWAP. */
+function AnchoredVwapIcon() {
+  return (
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 22 22"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M5 3.5v15" strokeDasharray="1.6 2" />
+      <path d="M7 14.5c2.5-.6 3.5-4.5 6-4.5s3.2 1.8 5.5-.5" />
+      <circle cx="5" cy="15" r="2" fill="var(--draw-icon-bg, var(--chrome))" />
+    </svg>
+  )
+}
+
+/** Horizontal volume rows of different lengths from a left edge, the longest marked (POC). */
+function VolumeProfileIcon() {
+  return (
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 22 22"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3.5 3.5v15" />
+      <path d="M3.5 6h5M3.5 9h9M3.5 15h7M3.5 18h3.5" strokeWidth="2" strokeLinecap="butt" />
+      <path d="M3.5 12h15" strokeWidth="2" strokeLinecap="butt" />
     </svg>
   )
 }

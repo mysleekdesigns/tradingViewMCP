@@ -14,8 +14,9 @@ import type {
   SeriesAttachedParameter,
   Time,
 } from 'lightweight-charts'
+import { drawingObjectId } from '../hover'
 import { colors, fontFamily, handleColorsFor, handleStroke, type HandleColors } from '../theme'
-import type { CursorStyle, DrawingsView } from './controller'
+import type { DrawingsView, HoverHit } from './controller'
 import {
   HANDLE_RADIUS,
   fibLabel,
@@ -35,14 +36,19 @@ type BitmapScope = Parameters<Parameters<RenderTarget['useBitmapCoordinateSpace'
 /** What the primitive needs from the interaction layer. DrawingController satisfies it. */
 export interface DrawingsSource {
   view(): DrawingsView
-  cursorAt(p: { x: number; y: number }): CursorStyle | null
+  hoverAt(p: { x: number; y: number }): HoverHit | null
 }
 
 interface RenderItem {
   drawing: Drawing
   shape: Shape
   selected: boolean
+  /** Under the mouse but not selected: faint handles. */
+  hovered: boolean
 }
+
+/** Opacity of a hovered (not selected) drawing's handles. */
+export const HOVER_HANDLE_ALPHA = 0.5
 
 /** Dash pattern in CSS px for a line style at a given width. */
 export function dashPattern(style: LineStyleName, width: number): number[] {
@@ -77,8 +83,15 @@ class DrawingsRenderer implements IPrimitivePaneRenderer {
       const ctx = scope.context
       ctx.save()
       for (const item of this.items) drawItem(scope, item, this.width)
-      for (const item of this.items)
+      for (const item of this.items) {
         if (item.selected) drawHandles(scope, item, this.width, this.handles)
+        else if (item.hovered) {
+          ctx.save()
+          ctx.globalAlpha = HOVER_HANDLE_ALPHA
+          drawHandles(scope, item, this.width, this.handles)
+          ctx.restore()
+        }
+      }
       ctx.restore()
     })
   }
@@ -158,14 +171,19 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
   }
 
   updateAllViews(): void {
-    const { drawings, selectedId } = this.source.view()
+    const { drawings, selectedId, hoveredId } = this.source.view()
     const width = this.adapter.paneWidth()
     const items: RenderItem[] = []
     const labels: { y: number; text: string; color: string }[] = []
     for (const drawing of drawings) {
       const shape = projectDrawing(drawing, this.adapter)
       if (!shape) continue
-      items.push({ drawing, shape, selected: drawing.id === selectedId })
+      items.push({
+        drawing,
+        shape,
+        selected: drawing.id === selectedId,
+        hovered: drawing.id === hoveredId,
+      })
       if (shape.kind === 'hline' || shape.kind === 'hray') {
         labels.push({
           y: shape.y,
@@ -195,13 +213,17 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
     return this.labelViews
   }
 
-  /** Lets LWC show our cursor: crosshair while a tool is active, pointer/grab over drawings. */
+  /**
+   * LWC hit testing: our cursor (crosshair while a tool is active, pointer/grab over drawings)
+   * and the drawing under the point as `externalId` 'drawing:<id>', which LWC reports as
+   * `hoveredInfo.objectId` ('drawings' when a tool's crosshair is over no drawing).
+   */
   hitTest(x: number, y: number): PrimitiveHoveredItem | null {
-    const cursor = this.source.cursorAt({ x, y })
-    if (!cursor) return null
+    const hit = this.source.hoverAt({ x, y })
+    if (!hit) return null
     return {
-      cursorStyle: cursor,
-      externalId: 'drawings',
+      cursorStyle: hit.cursor,
+      externalId: hit.id === null ? 'drawings' : drawingObjectId(hit.id),
       zOrder: 'top',
       distance: 0,
       itemType: 'primitive',

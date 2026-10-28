@@ -7,10 +7,13 @@ import {
   type IPriceLine,
   type ISeriesApi,
   type LineData,
+  type LineWidth,
+  type SeriesType,
   type UTCTimestamp,
 } from 'lightweight-charts'
 import { INDICATOR_BY_ID } from '../indicators/registry'
 import { IndicatorRunner } from '../indicators/runner'
+import { VOLUME_PROFILE_HINDSIGHT } from '../indicators/volumeProfile'
 import type {
   IndicatorDef,
   IndicatorId,
@@ -77,12 +80,21 @@ function sameStrings(a: Readonly<Record<string, string>>, b: Readonly<Record<str
   return ka.every((k) => a[k]?.toLowerCase() === b[k]?.toLowerCase())
 }
 
-/** uids of pane-placement indicators, in order. Unknown types are skipped. */
+/**
+ * True when an indicator gets its own pane: pane placement and at least one line. A def with no
+ * lines (a range indicator such as the fixed-range volume profile, drawn by a primitive) never
+ * creates series, so it must not take a pane index either.
+ */
+export function ownsPane(def: IndicatorDef | undefined): boolean {
+  return def !== undefined && def.placement === 'pane' && def.lines.length > 0
+}
+
+/** uids of indicators with their own pane, in order. Unknown types are skipped. */
 export function paneIndicatorUids(
   configs: readonly IndicatorConfig[],
   defs: Defs = INDICATOR_BY_ID,
 ) {
-  return configs.filter((c) => defs.get(c.type)?.placement === 'pane').map((c) => c.uid)
+  return configs.filter((c) => ownsPane(defs.get(c.type))).map((c) => c.uid)
 }
 
 export function diffIndicators(
@@ -112,7 +124,7 @@ export function diffIndicators(
     if (old.type !== c.type) {
       diff.remove.push(c.uid)
       diff.create.push(c.uid)
-      if (defs.get(old.type)?.placement === 'pane' || defs.get(c.type)?.placement === 'pane') {
+      if (ownsPane(defs.get(old.type)) || ownsPane(defs.get(c.type))) {
         typeChangedInPane = true
       }
       continue
@@ -129,7 +141,7 @@ export function diffIndicators(
 
 /**
  * Pane index per uid: overlay and volume indicators share the price pane (0); every pane
- * indicator gets its own pane 1..n in config order.
+ * indicator with lines gets its own pane 1..n in config order (a lineless one stays on 0).
  */
 export function assignPanes(
   configs: readonly IndicatorConfig[],
@@ -140,7 +152,7 @@ export function assignPanes(
   for (const c of configs) {
     const def = defs.get(c.type)
     if (def === undefined) continue
-    panes.set(c.uid, def.placement === 'pane' ? next++ : 0)
+    panes.set(c.uid, ownsPane(def) ? next++ : 0)
   }
   return panes
 }
@@ -171,7 +183,16 @@ export function formatInputNumber(n: number): string {
   return String(Number(n.toPrecision(12)))
 }
 
-/** Legend title, e.g. "EMA 20 close", "BB 20 2 close", "MACD 12 26 9 close", "VWAP". */
+/** A time input as compact UTC, e.g. 1_700_000_040 -> "2023-11-14 22:14". */
+export function formatTimeInput(t: number): string {
+  return new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ')
+}
+
+/**
+ * Legend title, e.g. "EMA 20 close", "BB 20 2 close", "MACD 12 26 9 close", "VWAP",
+ * "AVWAP 2023-11-14 22:14 hlc3". Time inputs show as UTC when set (> 0) and are left out when
+ * not set, so two anchored instances can be told apart.
+ */
 export function indicatorTitle(
   def: IndicatorDef,
   config: Pick<IndicatorConfig, 'inputs' | 'source'>,
@@ -179,10 +200,36 @@ export function indicatorTitle(
   const parts = [def.shortName]
   for (const input of def.inputs) {
     const v = config.inputs[input.key] ?? input.default
+    if (input.kind === 'time') {
+      if (Number.isFinite(v) && v > 0) parts.push(formatTimeInput(v))
+      continue
+    }
     parts.push(formatInputNumber(v))
   }
   if (def.source !== null) parts.push(config.source)
   return parts.join(' ')
+}
+
+export const ANCHOR_NOT_SET_NOTE = 'Set the anchor in Settings'
+export const ANCHOR_NOT_LOADED_NOTE =
+  'Anchor is before the loaded history. Scroll left to load older bars, if the market has them.'
+
+/**
+ * Why an anchored indicator (a def with a 'time' input; its first one is the anchor, e.g.
+ * AVWAP `anchor`, VP `from`) draws nothing: the anchor is not set, or it is older than the first
+ * plotted bar (`firstTime`), so its bar is not loaded. Undefined otherwise.
+ */
+export function anchorNote(
+  def: IndicatorDef,
+  config: Pick<IndicatorConfig, 'inputs'>,
+  firstTime: number | undefined,
+): string | undefined {
+  const input = def.inputs.find((i) => i.kind === 'time')
+  if (input === undefined) return undefined
+  const anchor = config.inputs[input.key] ?? input.default
+  if (!(anchor > 0)) return ANCHOR_NOT_SET_NOTE
+  if (firstTime !== undefined && anchor < firstTime) return ANCHOR_NOT_LOADED_NOTE
+  return undefined
 }
 
 /** Volume MA values read like volume (1.23K); everything else like a price. */
@@ -241,11 +288,16 @@ export interface IndicatorLegendRow {
   pane: number
   visible: boolean
   values: IndicatorLegendValue[]
+  /** Why the indicator draws nothing (anchor not set / not loaded); shown inside the row. */
+  note?: string
+  /** Tooltip for the row (range indicators: the hindsight caveat). */
+  hint?: string
 }
 
 /**
  * One legend row. `values` are the line values at the shown bar; `prevValues` those at the bar
- * before (only used to colour a histogram value like its bar).
+ * before (only used to colour a histogram value like its bar). `firstTime` is the open time of
+ * the first plotted bar (for the anchor note); undefined = no bars yet.
  */
 export function buildLegendRow(
   def: IndicatorDef,
@@ -253,8 +305,9 @@ export function buildLegendRow(
   pane: number,
   values: IndicatorValues,
   prevValues: IndicatorValues = {},
+  firstTime?: number,
 ): IndicatorLegendRow {
-  return {
+  const row: IndicatorLegendRow = {
     uid: config.uid,
     title: indicatorTitle(def, config),
     placement: def.placement,
@@ -274,6 +327,10 @@ export function buildLegendRow(
       }
     }),
   }
+  const note = anchorNote(def, config, firstTime)
+  if (note !== undefined) row.note = note
+  if (def.profile !== undefined) row.hint = VOLUME_PROFILE_HINDSIGHT
+  return row
 }
 
 /* ------------------------------------------------------------------------------------------ */
@@ -294,6 +351,8 @@ interface Entry {
   pane: number
   /** Empty until the series are built. Histograms first so they draw below the lines. */
   slots: LineSlot[]
+  /** Series built (a def without lines builds none, so `slots` alone cannot tell). */
+  built: boolean
   guides: IPriceLine[]
 }
 
@@ -347,6 +406,8 @@ export class IndicatorSeriesManager {
   private snapshot: IndicatorSnapshot = { version: 0, paneVersion: 0 }
   private readonly listeners = new Set<() => void>()
   private palette: IndicatorPalette = colors
+  /** Indicator under the mouse (LWC hit testing): its lines draw one pixel wider. */
+  private highlighted: string | null = null
 
   constructor(defs: Defs = INDICATOR_BY_ID) {
     this.defs = defs
@@ -354,6 +415,7 @@ export class IndicatorSeriesManager {
 
   attach(chart: IChartApi): void {
     this.chart = chart
+    this.highlighted = null
     this.entries.clear()
     this.configs = []
     this.candles = null
@@ -363,6 +425,7 @@ export class IndicatorSeriesManager {
   /** Drop every reference without touching the chart (it is about to be removed). */
   detach(): void {
     this.chart = null
+    this.highlighted = null
     this.entries.clear()
     this.configs = []
     this.candles = null
@@ -383,10 +446,11 @@ export class IndicatorSeriesManager {
       const entry = this.entries.get(uid)
       if (entry) this.destroySeries(entry)
       this.entries.delete(uid)
+      if (uid === this.highlighted && !byUid.has(uid)) this.highlighted = null
     }
     if (diff.rebuildPanes) {
       for (const entry of this.entries.values()) {
-        if (entry.def.placement === 'pane') this.destroySeries(entry)
+        if (ownsPane(entry.def)) this.destroySeries(entry)
       }
     }
     if (diff.remove.length > 0 || diff.rebuildPanes) this.removeEmptyPanes()
@@ -397,7 +461,15 @@ export class IndicatorSeriesManager {
       if (!config || !def) continue
       const runner = new IndicatorRunner(def, config.inputs, config.source)
       if (candles) runner.reset(candles)
-      this.entries.set(uid, { config, def, runner, pane: 0, slots: [], guides: [] })
+      this.entries.set(uid, {
+        config,
+        def,
+        runner,
+        pane: 0,
+        slots: [],
+        built: false,
+        guides: [],
+      })
     }
     const recomputed = new Set(diff.recompute)
     for (const uid of diff.recompute) {
@@ -417,11 +489,11 @@ export class IndicatorSeriesManager {
       if (!entry) continue
       entry.config = config
       entry.pane = panes.get(config.uid) ?? 0
-      if (entry.slots.length === 0) {
+      if (!entry.built) {
         this.buildSeries(chart, entry)
         this.setAll(entry, entry.runner.output)
         built.add(config.uid)
-        if (entry.def.placement === 'pane') addedPane = true
+        if (ownsPane(entry.def)) addedPane = true
       } else if (recomputed.has(config.uid)) {
         this.setAll(entry, entry.runner.output)
       }
@@ -493,6 +565,34 @@ export class IndicatorSeriesManager {
     if (plan.kind !== 'none') this.emit(false)
   }
 
+  /** Config uid of the indicator that owns `series`, or null (main series, volume, other). */
+  uidOfSeries(series: ISeriesApi<SeriesType>): string | null {
+    for (const [uid, entry] of this.entries) {
+      for (const slot of entry.slots) if ((slot.series as unknown) === series) return uid
+    }
+    return null
+  }
+
+  /**
+   * Emphasise the indicator under the mouse: its line series draw one pixel wider (histograms
+   * keep their bars). `null` clears it. Restores the def's exact widths on un-hover, and series
+   * re-created later (pane rebuild, type change) pick the state up. Unknown uids are ignored.
+   */
+  setHighlighted(uid: string | null): void {
+    if (uid === this.highlighted) return
+    if (uid !== null && !this.entries.has(uid)) return
+    const previous = this.highlighted
+    this.highlighted = uid
+    if (previous !== null) this.applyLineWidths(previous)
+    if (uid !== null) this.applyLineWidths(uid)
+    this.emit(false)
+  }
+
+  /** The highlighted indicator's uid, or null. */
+  highlightedUid(): string | null {
+    return this.highlighted
+  }
+
   /** Pane index of an indicator (0 = price pane), or -1 if unknown. */
   paneIndexOf(uid: string): number {
     return this.entries.get(uid)?.pane ?? -1
@@ -514,7 +614,7 @@ export class IndicatorSeriesManager {
       if (!entry) continue
       const values = time === undefined ? {} : entry.runner.valuesAt(time)
       const prev = prevTime === undefined ? {} : entry.runner.valuesAt(prevTime)
-      rows.push(buildLegendRow(entry.def, entry.config, entry.pane, values, prev))
+      rows.push(buildLegendRow(entry.def, entry.config, entry.pane, values, prev, candles[0]?.time))
     }
     return rows
   }
@@ -566,7 +666,7 @@ export class IndicatorSeriesManager {
                 ...indicatorLineBase,
                 crosshairMarkerBorderColor: this.palette.background,
                 ...common,
-                lineWidth: line.lineWidth,
+                lineWidth: this.lineWidthFor(config.uid, line),
                 crosshairMarkerBackgroundColor: lineColor(config, line),
               },
               pane,
@@ -576,6 +676,7 @@ export class IndicatorSeriesManager {
       }
       entry.slots.push({ line, series })
     }
+    entry.built = true
     const host = entry.slots[0]?.series
     if (host) {
       for (const value of paneGuideValues(def)) {
@@ -588,7 +689,21 @@ export class IndicatorSeriesManager {
     const chart = this.chart
     if (chart) for (const { series } of entry.slots) chart.removeSeries(series)
     entry.slots = []
+    entry.built = false
     entry.guides = []
+  }
+
+  /** Line width of `line` for indicator `uid`: the def's width, +1 while it is highlighted. */
+  private lineWidthFor(uid: string, line: LineDef): LineWidth {
+    return (uid === this.highlighted ? line.lineWidth + 1 : line.lineWidth) as LineWidth
+  }
+
+  private applyLineWidths(uid: string): void {
+    const entry = this.entries.get(uid)
+    if (!entry || !this.chart) return
+    for (const { line, series } of entry.slots) {
+      if (line.kind === 'line') series.applyOptions({ lineWidth: this.lineWidthFor(uid, line) })
+    }
   }
 
   /** LWC drops empty panes by itself; this makes sure no empty indicator pane is left behind. */
@@ -608,7 +723,7 @@ export class IndicatorSeriesManager {
     if (panes.length < 2) return out
     out.set('', panes[0].getStretchFactor())
     for (const [uid, entry] of this.entries) {
-      const pane = entry.def.placement === 'pane' && entry.slots.length > 0 && panes[entry.pane]
+      const pane = ownsPane(entry.def) && entry.slots.length > 0 && panes[entry.pane]
       if (pane) out.set(uid, pane.getStretchFactor())
     }
     return out
@@ -619,7 +734,7 @@ export class IndicatorSeriesManager {
     const panes = chart.panes()
     panes[0]?.setStretchFactor(saved.get('') ?? mainPaneStretch)
     for (const [uid, entry] of this.entries) {
-      if (entry.def.placement !== 'pane' || entry.pane === 0) continue
+      if (!ownsPane(entry.def) || entry.pane === 0) continue
       panes[entry.pane]?.setStretchFactor(saved.get(uid) ?? indicatorPaneStretch)
     }
   }

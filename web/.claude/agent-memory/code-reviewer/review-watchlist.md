@@ -15,7 +15,7 @@ Fixed in Phase 3 (drop if they stay fixed):
 - Idle-stale churn (fixed after the Phase 3 review): an idle stale reconnect on an opened socket stays 'live'; the post-reconnect gap fill is skipped unless a bar boundary passed; a rollover without a closed tick on the previous bar triggers one gap fill.
 
 Still open:
-- Per tick is O(n): `applyLiveCandle` copy, `planSeriesSync` identity walk, and in Heikin-Ashi mode `heikinAshiFrom` slices the whole prefix. No cap on loaded history.
+- Per tick is O(n): `applyLiveCandle` copy, `planSeriesSync` identity walk, and in Heikin-Ashi mode `heikinAshiFrom` slices the whole prefix. Phase 14 raised the scroll-back cap from 20k to CHART_MAX_BARS = 150k, so n is now 7.5x larger. Live appends still grow past the cap (it only stops paging).
 
 Open after the Phase 4 review:
 - `IndicatorSeriesManager` recolor path applies only `color`; line series keep the old `crosshairMarkerBackgroundColor`.

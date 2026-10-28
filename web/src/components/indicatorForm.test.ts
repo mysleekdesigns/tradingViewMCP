@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { getIndicatorDef } from '../indicators/registry'
-import type { IndicatorDef, IndicatorId, InputDef } from '../indicators/types'
-import { checkInput, defaultDraft, draftErrors, draftFromConfig, parseDraft } from './indicatorForm'
+import type { IndicatorDef, IndicatorId, IndicatorStepper, InputDef } from '../indicators/types'
+import {
+  checkInput,
+  defaultDraft,
+  draftErrors,
+  draftFromConfig,
+  formatTimeLabel,
+  parseDraft,
+  parseTimeInputText,
+  timeInputText,
+} from './indicatorForm'
 
 function def(id: IndicatorId): IndicatorDef {
   const d = getIndicatorDef(id)
@@ -149,5 +158,155 @@ describe('parseDraft', () => {
         for (const i of d.inputs) expect(r.value.inputs[i.key]).toBe(i.default)
       }
     }
+  })
+})
+
+/** A time input as the range indicators declare it (0 = not set, up to 2100-01-01). */
+const MAX_TIME = 4_102_444_800
+const ANCHOR: InputDef = {
+  key: 'anchor',
+  label: 'Anchor',
+  kind: 'time',
+  default: 0,
+  min: 0,
+  max: MAX_TIME,
+  step: 60,
+  integer: true,
+}
+const EMPTY_STEPPER: IndicatorStepper = { next: () => ({}), clone: () => EMPTY_STEPPER }
+// 2023-11-14 22:13:20 UTC
+const T = 1_700_000_000
+
+describe('time inputs (UTC datetime-local)', () => {
+  it('formats UNIX seconds as UTC datetime-local text, minutes only when seconds are 0', () => {
+    expect(timeInputText(1_699_999_980)).toBe('2023-11-14T22:13')
+    expect(timeInputText(T)).toBe('2023-11-14T22:13:20')
+    expect(timeInputText(Date.UTC(2024, 1, 29, 0, 0) / 1000)).toBe('2024-02-29T00:00')
+  })
+
+  it('shows 0 (not set) as the empty field, labelled "Not set"', () => {
+    expect(timeInputText(0)).toBe('')
+    expect(timeInputText(NaN)).toBe('')
+    expect(formatTimeLabel(0)).toBe('Not set')
+    expect(formatTimeLabel(1_699_999_980)).toBe('2023-11-14 22:13 UTC')
+  })
+
+  it('parses datetime-local text as UTC, with or without seconds; empty is 0', () => {
+    expect(parseTimeInputText('2023-11-14T22:13')).toBe(1_699_999_980)
+    expect(parseTimeInputText(' 2023-11-14T22:13:20 ')).toBe(T)
+    expect(parseTimeInputText('2023-11-14T22:13:20.000')).toBe(T)
+    expect(parseTimeInputText('')).toBe(0)
+  })
+
+  it('rejects malformed text and dates that do not exist', () => {
+    for (const bad of [
+      'yesterday',
+      '2023-11-14',
+      '2023-11-14 22:13',
+      '2023-02-30T10:00',
+      '2023-13-01T00:00',
+      '2023-11-14T24:00',
+      '1700000000',
+    ]) {
+      expect(parseTimeInputText(bad)).toBeNull()
+    }
+  })
+
+  it('round-trips seconds -> text -> seconds', () => {
+    for (const s of [1, 60, 86_400, 1_699_999_980, T, 1_709_164_800, MAX_TIME]) {
+      expect(parseTimeInputText(timeInputText(s))).toBe(s)
+    }
+  })
+
+  it('checkInput: empty is not set (0), invalid and out-of-range text are errors', () => {
+    expect(checkInput(ANCHOR, '')).toEqual({ ok: true, value: 0 })
+    expect(checkInput(ANCHOR, '2023-11-14T22:13')).toEqual({ ok: true, value: 1_699_999_980 })
+    expect(checkInput(ANCHOR, 'soon')).toEqual({ ok: false, error: 'Enter a date and time' })
+    expect(checkInput(ANCHOR, '2100-01-01T00:01')).toEqual({
+      ok: false,
+      error: 'Must be between 1970-01-01 00:00:01 UTC and 2100-01-01 00:00 UTC',
+    })
+    expect(checkInput({ ...ANCHOR, min: 60 }, '')).toEqual({
+      ok: false,
+      error: 'Choose a date and time',
+    })
+  })
+
+  it('drafts hold datetime text and parseDraft returns UNIX seconds', () => {
+    const vp: IndicatorDef = {
+      id: 'vprofile',
+      name: 'Fake VP',
+      shortName: 'VP',
+      description: 'test',
+      placement: 'overlay',
+      inputs: [ANCHOR, { ...ANCHOR, key: 'to', label: 'To' }, LENGTH],
+      source: null,
+      lines: [],
+      guides: [],
+      createStepper: () => EMPTY_STEPPER,
+    }
+    const draft = draftFromConfig(vp, {
+      inputs: { anchor: 1_699_999_980, to: 0, period: 30 },
+      source: 'close',
+      colors: {},
+    })
+    expect(draft.inputs).toEqual({ anchor: '2023-11-14T22:13', to: '', period: '30' })
+    expect(defaultDraft(vp).inputs).toEqual({ anchor: '', to: '', period: '20' })
+    expect(parseDraft(vp, draft)).toEqual({
+      ok: true,
+      value: { inputs: { anchor: 1_699_999_980, to: 0, period: 30 }, source: 'close', colors: {} },
+    })
+    expect(
+      draftErrors(vp, { ...draft, inputs: { ...draft.inputs, anchor: '2023-02-30T00:00' } }),
+    ).toEqual({
+      anchor: 'Enter a date and time',
+    })
+  })
+
+  it('rejects a set "To" before "From" on from/to range indicators', () => {
+    const range: IndicatorDef = {
+      id: 'vprofile',
+      name: 'Fake VP',
+      shortName: 'VP',
+      description: 'test',
+      placement: 'overlay',
+      inputs: [
+        { ...ANCHOR, key: 'from', label: 'From' },
+        { ...ANCHOR, key: 'to', label: 'To' },
+      ],
+      source: null,
+      lines: [],
+      guides: [],
+      createStepper: () => EMPTY_STEPPER,
+    }
+    const draft = (from: string, to: string) => ({
+      inputs: { from, to },
+      source: 'close' as const,
+      colors: {},
+    })
+    const later = '2023-11-14T22:13'
+    const earlier = '2023-11-14T22:12'
+    expect(draftErrors(range, draft(later, earlier))).toEqual({ to: 'Must be after From' })
+    expect(parseDraft(range, draft(later, earlier))).toEqual({
+      ok: false,
+      errors: { to: 'Must be after From' },
+    })
+    // Equal times, "To" not set, or "From" not set are all valid.
+    expect(draftErrors(range, draft(later, later))).toEqual({})
+    expect(draftErrors(range, draft(later, ''))).toEqual({})
+    expect(draftErrors(range, draft('', earlier))).toEqual({})
+    expect(parseDraft(range, draft(earlier, later))).toMatchObject({ ok: true })
+    // A field that does not parse shows its own error, not the range error.
+    expect(draftErrors(range, draft(later, 'soon'))).toEqual({ to: 'Enter a date and time' })
+    // The real volume profile declares the same from/to time inputs.
+    const vp = def('vprofile')
+    expect(
+      draftErrors(vp, {
+        ...defaultDraft(vp),
+        inputs: { ...defaultDraft(vp).inputs, from: later, to: earlier },
+      }),
+    ).toMatchObject({ to: 'Must be after From' })
+    // Indicators without a from/to pair get no cross-field check.
+    expect(draftErrors({ ...range, inputs: [ANCHOR] }, draft(later, earlier))).toEqual({})
   })
 })
