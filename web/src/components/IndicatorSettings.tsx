@@ -7,7 +7,12 @@ import {
   draftErrors,
   draftFromConfig,
   formatTimeLabel,
+  hasStyleTab,
+  isToggleOn,
   parseDraft,
+  splitInputs,
+  TOGGLE_OFF,
+  TOGGLE_ON,
   type SettingsDraft,
 } from './indicatorForm'
 import './Indicators.css'
@@ -23,10 +28,12 @@ const SOURCE_LABELS: Record<PriceSource, string> = {
 }
 
 type Tab = 'inputs' | 'style'
-const TABS: readonly { id: Tab; label: string }[] = [
+const ALL_TABS: readonly { id: Tab; label: string }[] = [
   { id: 'inputs', label: 'Inputs' },
   { id: 'style', label: 'Style' },
 ]
+/** Inputs only: defs drawn by a primitive (`lines: []`) have no line colours to edit. */
+const INPUTS_ONLY = ALL_TABS.filter((t) => t.id === 'inputs')
 
 interface IndicatorSettingsProps {
   def: IndicatorDef
@@ -43,6 +50,8 @@ interface IndicatorSettingsProps {
 
 /**
  * Per-instance settings dialog (TradingView style): Inputs and Style tabs, applied on OK only.
+ * On/off inputs (`kind: 'toggle'`) are checkboxes grouped under "Show" after the value fields.
+ * Defs without lines (volume profile, market structure) have no Style tab.
  * Mount with `key={config.uid}`; it captures the previously focused element on mount and
  * restores it on unmount.
  */
@@ -55,7 +64,10 @@ export function IndicatorSettings({
 }: IndicatorSettingsProps) {
   const [draft, setDraft] = useState<SettingsDraft>(() => draftFromConfig(def, config))
   const hasInputs = def.inputs.length > 0 || def.source !== null
-  const [tab, setTab] = useState<Tab>(hasInputs ? 'inputs' : 'style')
+  const styleTab = hasStyleTab(def)
+  const tabs = styleTab ? ALL_TABS : INPUTS_ONLY
+  const { fields, toggles } = useMemo(() => splitInputs(def), [def])
+  const [tab, setTab] = useState<Tab>(hasInputs || !styleTab ? 'inputs' : 'style')
   /** Fields the user has edited; errors show for these (and all fields after a failed OK). */
   const [touched, setTouched] = useState<ReadonlySet<string>>(() => new Set())
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -108,16 +120,16 @@ export function IndicatorSettings({
       return
     }
     e.preventDefault()
-    const i = TABS.findIndex((t) => t.id === tab)
-    const n = TABS.length
+    const i = tabs.findIndex((t) => t.id === tab)
+    const n = tabs.length
     const next =
       e.key === 'Home'
         ? 0
         : e.key === 'End'
           ? n - 1
           : (i + (e.key === 'ArrowRight' ? 1 : -1) + n) % n
-    setTab(TABS[next].id)
-    document.getElementById(tabId(TABS[next].id))?.focus()
+    setTab(tabs[next].id)
+    document.getElementById(tabId(tabs[next].id))?.focus()
   }
 
   const onDialogKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -189,7 +201,7 @@ export function IndicatorSettings({
           </div>
 
           <div className="ind-tabs" role="tablist" aria-label={`${def.name} settings`}>
-            {TABS.map((t) => (
+            {tabs.map((t) => (
               <button
                 key={t.id}
                 id={tabId(t.id)}
@@ -222,7 +234,7 @@ export function IndicatorSettings({
             {tab === 'inputs' && (
               <div className="ind-fields">
                 {!hasInputs && <p className="ind-fields__none">This indicator has no inputs.</p>}
-                {def.inputs.map((input) => {
+                {fields.map((input) => {
                   const fieldId = `${ids}-in-${input.key}`
                   const errId = `${fieldId}-err`
                   const error = showError(input.key)
@@ -335,10 +347,45 @@ export function IndicatorSettings({
                     </div>
                   </div>
                 )}
+                {toggles.length > 0 && (
+                  <fieldset className="ind-toggles">
+                    <legend className="ind-toggles__title">Show</legend>
+                    <div className="ind-toggles__grid">
+                      {toggles.map((input) => {
+                        const fieldId = `${ids}-in-${input.key}`
+                        const errId = `${fieldId}-err`
+                        const error = showError(input.key)
+                        return (
+                          <div key={input.key} className="ind-toggle">
+                            <label className="ind-toggle__label" htmlFor={fieldId}>
+                              <input
+                                id={fieldId}
+                                className={`ind-check${error ? ' ind-check--invalid' : ''}`}
+                                type="checkbox"
+                                checked={isToggleOn(draft.inputs[input.key])}
+                                aria-invalid={error !== undefined}
+                                aria-describedby={error ? errId : undefined}
+                                onChange={(e) =>
+                                  setInput(input.key, e.target.checked ? TOGGLE_ON : TOGGLE_OFF)
+                                }
+                              />
+                              <span>{input.label}</span>
+                            </label>
+                            {error && (
+                              <span id={errId} className="ind-field__error" role="alert">
+                                {error}
+                              </span>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </fieldset>
+                )}
               </div>
             )}
 
-            {tab === 'style' && (
+            {tab === 'style' && styleTab && (
               <div className="ind-fields">
                 {def.lines.map((line) => {
                   const fieldId = `${ids}-color-${line.key}`
@@ -377,7 +424,11 @@ export function IndicatorSettings({
               type="button"
               className="btn btn--ghost ind-settings__defaults"
               onClick={resetDefaults}
-              title="Reset inputs and colours to the defaults (applied on OK)"
+              title={
+                styleTab
+                  ? 'Reset inputs and colours to the defaults (applied on OK)'
+                  : 'Reset inputs to the defaults (applied on OK)'
+              }
             >
               Defaults
             </button>

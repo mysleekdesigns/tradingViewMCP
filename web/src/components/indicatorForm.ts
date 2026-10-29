@@ -72,9 +72,54 @@ export function formatTimeLabel(seconds: number): string {
   return text === '' ? 'Not set' : `${text.replace('T', ' ')} UTC`
 }
 
-/** Field text for one input value (datetime-local text for time inputs). */
+/** Draft text of a toggle that is on / off. */
+export const TOGGLE_ON = '1'
+export const TOGGLE_OFF = '0'
+
+/** True for an on/off input (`kind: 'toggle'`), edited as a checkbox and stored as 1 / 0. */
+export function isToggle(input: InputDef): boolean {
+  return input.kind === 'toggle'
+}
+
+/** Draft text for a toggle value: '1' for 1, '0' for 0, the default's text for anything else. */
+export function toggleText(input: InputDef, value: number): string {
+  if (value === 1) return TOGGLE_ON
+  if (value === 0) return TOGGLE_OFF
+  return input.default === 1 ? TOGGLE_ON : TOGGLE_OFF
+}
+
+/** Whether a toggle's draft text is on (only exactly '1'). */
+export function isToggleOn(text: string | undefined): boolean {
+  return text === TOGGLE_ON
+}
+
+/**
+ * The Inputs tab's layout: value fields (numbers, times) in definition order, then the on/off
+ * toggles, which the dialog groups under a "Show" heading.
+ */
+export function splitInputs(def: IndicatorDef): {
+  fields: readonly InputDef[]
+  toggles: readonly InputDef[]
+} {
+  return {
+    fields: def.inputs.filter((i) => !isToggle(i)),
+    toggles: def.inputs.filter(isToggle),
+  }
+}
+
+/**
+ * Whether the dialog shows a Style tab: only for defs with lines to colour. Defs drawn by a
+ * primitive (volume profile, market structure; `lines: []`) are themed by the chart instead.
+ */
+export function hasStyleTab(def: IndicatorDef): boolean {
+  return def.lines.length > 0
+}
+
+/** Field text for one input value (datetime-local text for time inputs, '1'/'0' for toggles). */
 export function inputText(input: InputDef, value: number): string {
-  return input.kind === 'time' ? timeInputText(value) : formatInputValue(value)
+  if (input.kind === 'time') return timeInputText(value)
+  if (input.kind === 'toggle') return toggleText(input, value)
+  return formatInputValue(value)
 }
 
 /** Draft for an existing instance. */
@@ -118,10 +163,18 @@ function checkTimeInput(input: InputDef, raw: string): InputCheck {
 
 /**
  * Parses one field. No silent clamping or rounding: out-of-range or fractional values are errors.
- * Time inputs (`kind: 'time'`) take datetime-local text in UTC (see `parseTimeInputText`).
+ * Time inputs (`kind: 'time'`) take datetime-local text in UTC (see `parseTimeInputText`);
+ * toggles (`kind: 'toggle'`) take exactly '1' (on) or '0' (off).
  */
 export function checkInput(input: InputDef, raw: string): InputCheck {
   if (input.kind === 'time') return checkTimeInput(input, raw)
+  if (input.kind === 'toggle') {
+    // Only the checkbox's own '1' / '0'; nothing else (2, 0.5, 'true') is an on/off value.
+    const text = raw.trim()
+    if (text === TOGGLE_ON) return { ok: true, value: 1 }
+    if (text === TOGGLE_OFF) return { ok: true, value: 0 }
+    return { ok: false, error: 'Choose on or off' }
+  }
   const text = raw.trim()
   if (text === '') return { ok: false, error: 'Enter a number' }
   if (!NUMBER_RE.test(text)) return { ok: false, error: 'Enter a number' }

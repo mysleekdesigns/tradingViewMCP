@@ -7,11 +7,13 @@ import {
 } from '../data/timeframeProvider'
 import type { Candle, ConnectionStatus, Interval, Timeframe } from '../types'
 import {
+  closedThroughOf,
   DEFAULT_BAN_BLOCK_S,
   DEFAULT_RATE_LIMIT_BLOCK_S,
   describeError,
   GAP_FILL_RETRY_DELAYS_MS,
   LiveCandlesController,
+  RECOVERY_MIN_SPACING_MS,
   type LiveCandlesSnapshot,
   type LoadState,
 } from './liveCandles'
@@ -35,7 +37,7 @@ class FakeProvider implements MarketDataProvider {
   requests: Deferred[] = []
   subscriptions = 0
   unsubscribes = 0
-  private onCandle: ((c: Candle, closed: boolean) => void) | null = null
+  private onCandle: ((c: Candle, closed: boolean, provisional?: boolean) => void) | null = null
   private onStatus: ((s: ConnectionStatus) => void) | null = null
   private onRepair: ((time: number) => void) | null = null
 
@@ -54,7 +56,7 @@ class FakeProvider implements MarketDataProvider {
   subscribeCandles(
     _symbol: string,
     _interval: Interval,
-    onCandle: (c: Candle, closed: boolean) => void,
+    onCandle: (c: Candle, closed: boolean, provisional?: boolean) => void,
     opts?: CandleSubscribeOptions,
   ): () => void {
     this.subscriptions++
@@ -83,6 +85,11 @@ class FakeProvider implements MarketDataProvider {
 
   tick(c: Candle, closed = false): void {
     this.onCandle?.(c, closed)
+  }
+
+  /** A closed bar the source will send once more (Coinbase's pending second read-back). */
+  provisionalClose(c: Candle): void {
+    this.onCandle?.(c, true, true)
   }
 
   status(s: ConnectionStatus): void {
@@ -203,7 +210,7 @@ describe('LiveCandlesController', () => {
   })
 
   it('gap-fills over REST when the socket comes back after a drop, merging the result', async () => {
-    const { provider, controller, candles, latest } = setup()
+    const { provider, controller, candles, latest, setClock } = setup()
     controller.start()
     provider.status('live')
     provider.last().resolve(rest)
@@ -213,6 +220,8 @@ describe('LiveCandlesController', () => {
     provider.status('reconnecting')
     provider.status('offline')
     expect(provider.requests).toHaveLength(1)
+    // Back during bar 4H: the gap fill is sent after 3H and 4H opened, so it covers them.
+    setClock(4 * H * 1000 + 5_000)
     provider.status('live')
     expect(provider.requests).toHaveLength(2)
     expect(latest().refreshing).toBe(true)
@@ -1294,9 +1303,13 @@ describe('rollover without a closed tick on the previous bar', () => {
     provider.tick(bar(2 * H, 150))
     const before = candles()
     const n = snapshots.length
-    // Same values, now final: applyLiveCandle returns the same array (no snapshot)...
+    expect(snapshots[n - 1].closedThrough).toBe(H)
+    // Same values, now final: applyLiveCandle returns the same array, and the one snapshot
+    // only moves closedThrough onto the bar (Phase 16: final values are confirmed now)...
     provider.tick(bar(2 * H, 150), true)
-    expect(snapshots).toHaveLength(n)
+    expect(snapshots).toHaveLength(n + 1)
+    expect(snapshots[n].load).toBe(snapshots[n - 1].load)
+    expect(snapshots[n].closedThrough).toBe(2 * H)
     expect(candles()).toBe(before)
     // ...but the close was recorded, so the rollover needs no repair.
     provider.tick(bar(3 * H, 160))
@@ -1650,6 +1663,806 @@ describe('custom timeframes (CandleSource)', () => {
     provider.status('reconnecting')
     provider.status('live')
     expect(provider.requests).toHaveLength(2)
+    controller.stop()
+  })
+})
+
+describe('closedThrough (the last bar with final values, contiguous)', () => {
+  async function loaded(rows: Candle[] = rest) {
+    const ctx = setup()
+    ctx.controller.start()
+    ctx.provider.status('live')
+    ctx.provider.last().resolve(rows)
+    await flush()
+    return ctx
+  }
+
+  it('closedThroughOf: the bar before the earliest unconfirmed one, the last bar, or null', () => {
+    const c = [bar(0, 1), bar(H, 2), bar(2 * H, 3), bar(3 * H, 4)]
+    expect(closedThroughOf([], new Set())).toBeNull()
+    expect(closedThroughOf(c, new Set())).toBe(3 * H)
+    expect(closedThroughOf(c, new Set([3 * H]))).toBe(2 * H)
+    expect(closedThroughOf(c, new Set([3 * H, H]))).toBe(0)
+    expect(closedThroughOf(c, new Set([0, 3 * H]))).toBeNull()
+  })
+
+  it('is null before the first load and while it fails', async () => {
+    const { provider, controller, latest } = setup()
+    controller.start()
+    expect(latest().closedThrough).toBeNull()
+    provider.tick(bar(2 * H, 150), true)
+    expect(latest().closedThrough).toBeNull()
+    provider.last().reject(new MarketDataError('network', 'down'))
+    await flush()
+    expect(latest().closedThrough).toBeNull()
+  })
+
+  it('REST load: the second-to-last REST row (the newest may still be forming)', async () => {
+    const { latest } = await loaded()
+    expect(latest().closedThrough).toBe(H)
+  })
+
+  it('a single-row REST load has no final bar', async () => {
+    const { latest } = await loaded([bar(2 * H, 102)])
+    expect(latest().closedThrough).toBeNull()
+  })
+
+  it('an x:true tick advances it onto the bar; the next bar opening keeps it there', async () => {
+    const { provider, latest } = await loaded()
+    provider.tick(bar(2 * H, 150))
+    expect(latest().closedThrough).toBe(H)
+    provider.tick(bar(2 * H, 151), true)
+    expect(latest().closedThrough).toBe(2 * H)
+    provider.tick(bar(3 * H, 160))
+    expect(latest().closedThrough).toBe(2 * H)
+    provider.tick(bar(3 * H, 161), true)
+    expect(latest().closedThrough).toBe(3 * H)
+  })
+
+  it('an x:true tick that arrived during the first load still counts', async () => {
+    const { provider, controller, latest } = setup()
+    controller.start()
+    provider.tick(bar(2 * H, 150), true)
+    provider.last().resolve(rest)
+    await flush()
+    expect(latest().closedThrough).toBe(2 * H)
+  })
+
+  it('a partial bar left by a drop holds it back while ticks for later bars arrive', async () => {
+    const { provider, latest, candles } = await loaded()
+    provider.tick(bar(2 * H, 150)) // 2H forming
+    provider.status('reconnecting')
+    provider.status('live') // gap fill in flight
+    expect(provider.requests).toHaveLength(2)
+    provider.tick(bar(5 * H, 180)) // appended right after the partial 2H
+    expect(candles().map((c) => c.time)).toEqual([0, H, 2 * H, 5 * H])
+    expect(latest().closedThrough).toBe(H)
+    // A closed tick for a later bar cannot jump over the partial one.
+    provider.tick(bar(5 * H, 181), true)
+    expect(latest().closedThrough).toBe(H)
+  })
+
+  it('advances once the gap fill brings the final values (its newest row stays unconfirmed)', async () => {
+    const { provider, latest } = await loaded()
+    provider.tick(bar(2 * H, 150))
+    provider.status('reconnecting')
+    provider.status('live')
+    provider.tick(bar(5 * H, 180))
+    provider.last().resolve([bar(2 * H, 152), bar(3 * H, 153), bar(4 * H, 154), bar(5 * H, 179)])
+    await flush()
+    expect(latest().closedThrough).toBe(4 * H)
+    provider.tick(bar(5 * H, 182), true)
+    expect(latest().closedThrough).toBe(5 * H)
+  })
+
+  it('a pending x:true tick for the newest gap-fill row makes it final', async () => {
+    const { provider, latest } = await loaded()
+    provider.tick(bar(2 * H, 150))
+    provider.status('reconnecting')
+    provider.status('live')
+    provider.tick(bar(3 * H, 170), true)
+    provider.last().resolve([bar(2 * H, 152), bar(3 * H, 170)])
+    await flush()
+    expect(latest().closedThrough).toBe(3 * H)
+  })
+
+  it('the missed-close repair (rollover without x:true) holds it until the repair lands', async () => {
+    const { provider, latest } = await loaded()
+    provider.tick(bar(2 * H, 150))
+    provider.tick(bar(3 * H, 160)) // 2H never closed: repair requested
+    expect(provider.requests).toHaveLength(2)
+    expect(latest().closedThrough).toBe(H)
+    provider.last().resolve([bar(H, 101), bar(2 * H, 155), bar(3 * H, 158)])
+    await flush()
+    expect(latest().closedThrough).toBe(2 * H)
+  })
+
+  it('a failed gap fill leaves it at the last confirmed bar', async () => {
+    const { provider, controller, latest } = await loaded()
+    provider.tick(bar(2 * H, 150))
+    provider.status('reconnecting')
+    provider.status('live')
+    provider.tick(bar(5 * H, 180))
+    provider.last().reject(new MarketDataError('network', 'down'))
+    await flush()
+    expect(latest().refreshError).not.toBeNull()
+    expect(latest().closedThrough).toBe(H)
+    provider.tick(bar(5 * H, 181), true)
+    provider.tick(bar(6 * H, 190))
+    expect(latest().closedThrough).toBe(H)
+    controller.stop() // drops the scheduled retry
+  })
+
+  it('a bar final before a reload stays final as the newest row of its result', async () => {
+    const { provider, controller, latest } = await loaded()
+    provider.tick(bar(2 * H, 151), true)
+    controller.reload()
+    provider.last().resolve(rest.map((c) => (c.time === 2 * H ? bar(2 * H, 151) : c)))
+    await flush()
+    expect(latest().closedThrough).toBe(2 * H)
+  })
+
+  it('a forming tick that rewrites an older bar makes it unconfirmed again', async () => {
+    const { provider, latest } = await loaded()
+    provider.tick(bar(2 * H, 150), true)
+    provider.tick(bar(3 * H, 160))
+    expect(latest().closedThrough).toBe(2 * H)
+    provider.tick(bar(2 * H, 151)) // a late partial value replaces the final one on screen
+    expect(latest().closedThrough).toBe(H)
+  })
+
+  it('older pages are final: a null closedThrough moves to the last prepended bar', async () => {
+    const { provider, controller, latest } = await loaded([bar(10 * H, 110)])
+    expect(latest().closedThrough).toBeNull()
+    controller.loadOlder()
+    provider.last().resolve([bar(8 * H, 108), bar(9 * H, 109)])
+    await flush()
+    expect(latest().closedThrough).toBe(9 * H)
+  })
+
+  it('a replaced window forgets the dropped bars', async () => {
+    const { provider, latest } = await loaded()
+    provider.tick(bar(2 * H, 150))
+    provider.status('reconnecting')
+    provider.status('live')
+    provider.last().resolve([bar(10 * H, 200), bar(11 * H, 201), bar(12 * H, 202)])
+    await flush()
+    expect(latest().closedThrough).toBe(11 * H)
+  })
+})
+
+describe('closedThrough: provisional closes (Coinbase read-back pending)', () => {
+  async function loaded() {
+    const ctx = setup()
+    ctx.controller.start()
+    ctx.provider.status('live')
+    ctx.provider.last().resolve(rest) // 2H newest: closedThrough H
+    await flush()
+    return ctx
+  }
+
+  it('a provisional close is not final; the settling send (same values) makes it final', async () => {
+    const { provider, latest } = await loaded()
+    provider.tick(bar(2 * H, 150))
+    provider.provisionalClose(bar(2 * H, 151))
+    expect(latest().closedThrough).toBe(H)
+    provider.tick(bar(3 * H, 160)) // the next bar opens before the second read-back
+    expect(latest().closedThrough).toBe(H)
+    // A provisional close is still a close: the rollover asks for no repair.
+    expect(provider.requests).toHaveLength(1)
+    provider.tick(bar(2 * H, 151), true) // settled, unchanged
+    expect(latest().closedThrough).toBe(2 * H)
+    expect(provider.requests).toHaveLength(1)
+  })
+
+  it('a corrected settling send replaces the provisional values and makes the bar final', async () => {
+    const { provider, latest, candles } = await loaded()
+    provider.provisionalClose(bar(2 * H, 151))
+    provider.tick(bar(3 * H, 160))
+    provider.tick(bar(2 * H, 149), true)
+    expect(candles().find((c) => c.time === 2 * H)?.close).toBe(149)
+    expect(latest().closedThrough).toBe(2 * H)
+  })
+
+  it('a provisional close received during a request is re-applied as provisional', async () => {
+    const { provider, controller, latest } = await loaded()
+    controller.reload()
+    provider.provisionalClose(bar(2 * H, 151))
+    provider.last().resolve(rest)
+    await flush()
+    expect(latest().closedThrough).toBe(H)
+    provider.tick(bar(2 * H, 151), true)
+    expect(latest().closedThrough).toBe(2 * H)
+  })
+
+  it('a provisional close on a bar that was final makes it not final again', async () => {
+    const { provider, latest } = await loaded()
+    provider.tick(bar(2 * H, 151), true)
+    expect(latest().closedThrough).toBe(2 * H)
+    provider.provisionalClose(bar(2 * H, 152))
+    expect(latest().closedThrough).toBe(H)
+  })
+})
+
+describe('closedThrough: hole cap after a drop (bars may be missing)', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  const rows = [bar(0, 100), bar(H, 101), bar(2 * H, 102), bar(3 * H, 103), bar(4 * H, 104)]
+  const down = () => new MarketDataError('network', 'down')
+
+  /** Bars 0..4H loaded, bar 4H final (x:true), then a drop; reconnect at 7H+5s: gap fill. */
+  async function droppedAfterFinal4() {
+    const ctx = setup(5)
+    ctx.setClock(4 * H * 1000 + 10_000)
+    ctx.controller.start()
+    ctx.provider.status('live')
+    ctx.provider.last().resolve(rows)
+    await vi.advanceTimersByTimeAsync(0)
+    ctx.provider.tick(bar(4 * H, 104), true)
+    expect(ctx.latest().closedThrough).toBe(4 * H)
+    ctx.provider.status('reconnecting')
+    ctx.setClock(7 * H * 1000 + 5_000)
+    ctx.provider.status('live')
+    expect(ctx.provider.requests).toHaveLength(2)
+    return ctx
+  }
+
+  /** Fail the current gap fill and every automatic retry. */
+  async function exhaustRetries(provider: FakeProvider) {
+    provider.last().reject(down())
+    await vi.advanceTimersByTimeAsync(0)
+    for (const delay of GAP_FILL_RETRY_DELAYS_MS) {
+      await vi.advanceTimersByTimeAsync(delay)
+      provider.last().reject(down())
+      await vi.advanceTimersByTimeAsync(0)
+    }
+    expect(provider.requests).toHaveLength(5) // load + gap fill + 3 retries
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(provider.requests).toHaveLength(5)
+  }
+
+  it('probe: retries give up, bars 5H and 6H never arrive, bar 7H closes: stays at 4H', async () => {
+    const { provider, controller, latest, candles } = await droppedAfterFinal4()
+    await exhaustRetries(provider)
+    provider.tick(bar(7 * H, 170)) // opens 7H right after 4H (one recovery gap fill, below)
+    provider.tick(bar(7 * H, 171), true)
+    expect(candles().map((c) => c.time)).toEqual([0, H, 2 * H, 3 * H, 4 * H, 7 * H])
+    // Contiguous over the bars present would say 7H; the hole 5H..6H caps it at 4H.
+    expect(closedThroughOf(candles(), new Set())).toBe(7 * H)
+    expect(latest().closedThrough).toBe(4 * H)
+    // The recovery gap fill fails too: still capped, and no automatic retry of it.
+    expect(provider.requests).toHaveLength(6)
+    provider.last().reject(down())
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(provider.requests).toHaveLength(6)
+    expect(latest().closedThrough).toBe(4 * H)
+    controller.stop()
+  })
+
+  it('a gap fill that covers the hole lifts the cap', async () => {
+    const { provider, controller, latest, candles } = await droppedAfterFinal4()
+    provider.tick(bar(7 * H, 171), true)
+    expect(latest().closedThrough).toBe(4 * H)
+    provider.last().resolve([bar(4 * H, 104), bar(5 * H, 105), bar(6 * H, 106), bar(7 * H, 107)])
+    await vi.advanceTimersByTimeAsync(0)
+    // 7H's pending x:true tick is re-applied on top of the newest row: final.
+    expect(candles().map((c) => c.time)).toEqual([0, H, 2 * H, 3 * H, 4 * H, 5 * H, 6 * H, 7 * H])
+    expect(latest().closedThrough).toBe(7 * H)
+    controller.stop()
+  })
+
+  it('a window that starts after the cap (on a bar appended since) replaces instead of merging', async () => {
+    const { provider, controller, latest, candles } = await droppedAfterFinal4()
+    provider.tick(bar(7 * H, 171), true)
+    provider.last().resolve([bar(7 * H, 171), bar(8 * H, 180)])
+    await vi.advanceTimersByTimeAsync(0)
+    // Merging would keep 0..4H, 7H, 8H with 5H and 6H silently missing.
+    expect(candles().map((c) => c.time)).toEqual([7 * H, 8 * H])
+    expect(latest().closedThrough).toBe(7 * H)
+    controller.stop()
+  })
+
+  it('a failed gap fill keeps the cap; a later successful reload lifts it', async () => {
+    const { provider, controller, latest } = await droppedAfterFinal4()
+    provider.tick(bar(7 * H, 171), true)
+    provider.last().reject(down())
+    await vi.advanceTimersByTimeAsync(0)
+    expect(latest().closedThrough).toBe(4 * H)
+    controller.reload() // supersedes the scheduled retry
+    provider
+      .last()
+      .resolve([
+        bar(3 * H, 103),
+        bar(4 * H, 104),
+        bar(5 * H, 105),
+        bar(6 * H, 106),
+        bar(7 * H, 171),
+      ])
+    await vi.advanceTimersByTimeAsync(0)
+    // The newest REST row (7H) was final on screen before the reload: it stays final.
+    expect(latest().closedThrough).toBe(7 * H)
+    controller.stop()
+  })
+
+  it('a repair for a bar never delivered caps it until a later request lands', async () => {
+    vi.useRealTimers()
+    const { provider, controller, latest, setClock } = setup()
+    controller.start()
+    provider.status('live')
+    provider.last().resolve(rest)
+    await flush()
+    provider.tick(bar(2 * H, 150), true)
+    expect(latest().closedThrough).toBe(2 * H)
+    setClock(4 * H * 1000 + 5_000) // 3H ended; 4H opened
+    provider.repair(3 * H) // 3H will never be emitted
+    expect(provider.requests).toHaveLength(2)
+    provider.tick(bar(4 * H, 170))
+    provider.tick(bar(4 * H, 171), true) // appended right after 2H
+    expect(latest().closedThrough).toBe(2 * H)
+    provider.last().resolve([bar(2 * H, 150), bar(3 * H, 160), bar(4 * H, 171)])
+    await flush()
+    expect(latest().closedThrough).toBe(4 * H)
+    controller.stop()
+  })
+
+  it('closedThroughOf with a cap: the last bar at or before it', () => {
+    const c = [bar(0, 1), bar(H, 2), bar(4 * H, 3), bar(7 * H, 4)]
+    expect(closedThroughOf(c, new Set(), 4 * H)).toBe(4 * H)
+    expect(closedThroughOf(c, new Set(), 5 * H)).toBe(4 * H)
+    expect(closedThroughOf(c, new Set([H]), 5 * H)).toBe(0)
+    expect(closedThroughOf(c, new Set(), -1)).toBeNull()
+    expect(closedThroughOf(c, new Set(), Number.NEGATIVE_INFINITY)).toBeNull()
+  })
+})
+
+describe('closedThrough: automatic recovery when it is stuck', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  const down = () => new MarketDataError('network', 'down')
+
+  /**
+   * Loaded, 2H forming; a drop; reconnect at 3H+5s (gap fill); 3H opens during it (the
+   * missed-close repair replaces it); that repair and its 3 retries all fail; 3H closes.
+   * 2H stays partial, so closedThrough is stuck at H.
+   */
+  async function retriesExhausted() {
+    const ctx = setup()
+    ctx.setClock(2 * H * 1000 + 10_000)
+    ctx.controller.start()
+    ctx.provider.status('live')
+    ctx.provider.last().resolve(rest)
+    await vi.advanceTimersByTimeAsync(0)
+    ctx.provider.tick(bar(2 * H, 150)) // 2H partial
+    ctx.provider.status('reconnecting')
+    ctx.setClock(3 * H * 1000 + 5_000)
+    ctx.provider.status('live')
+    expect(ctx.provider.requests).toHaveLength(2)
+    ctx.provider.tick(bar(3 * H, 160)) // 2H never closed: the repair supersedes the gap fill
+    expect(ctx.provider.requests).toHaveLength(3)
+    ctx.provider.last().reject(down())
+    await vi.advanceTimersByTimeAsync(0)
+    for (const delay of GAP_FILL_RETRY_DELAYS_MS) {
+      await vi.advanceTimersByTimeAsync(delay)
+      ctx.provider.last().reject(down())
+      await vi.advanceTimersByTimeAsync(0)
+    }
+    expect(ctx.provider.requests).toHaveLength(6)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(ctx.provider.requests).toHaveLength(6) // given up
+    ctx.provider.tick(bar(3 * H, 161), true)
+    expect(ctx.latest().closedThrough).toBe(H)
+    return ctx
+  }
+
+  it('after the retries gave up, the next bar opening runs one gap fill; success advances it', async () => {
+    const { provider, controller, latest, setClock } = await retriesExhausted()
+    setClock(4 * H * 1000 + 5_000)
+    provider.tick(bar(4 * H, 170))
+    expect(provider.requests).toHaveLength(7)
+    provider.tick(bar(4 * H, 171))
+    provider.tick(bar(4 * H, 172))
+    expect(provider.requests).toHaveLength(7) // ticks on the same bar add nothing
+    provider.last().resolve([bar(2 * H, 152), bar(3 * H, 161), bar(4 * H, 172)])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(latest().refreshError).toBeNull()
+    expect(latest().closedThrough).toBe(3 * H)
+    // Healthy again: the next bars open without any request.
+    provider.tick(bar(4 * H, 173), true)
+    setClock(5 * H * 1000 + 5_000)
+    provider.tick(bar(5 * H, 180))
+    expect(provider.requests).toHaveLength(7)
+    expect(latest().closedThrough).toBe(4 * H)
+    controller.stop()
+  })
+
+  it('no request storm: one recovery per bar interval, a failed one is not retried on a timer', async () => {
+    const { provider, controller, setClock } = await retriesExhausted()
+    const at = 4 * H * 1000 + 5_000
+    setClock(at)
+    provider.tick(bar(4 * H, 170))
+    expect(provider.requests).toHaveLength(7)
+    provider.last().reject(down())
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(provider.requests).toHaveLength(7)
+    provider.tick(bar(4 * H, 171), true)
+    // A bar opening less than one interval after the last recovery: nothing.
+    setClock(at + H * 1000 - 1)
+    provider.tick(bar(5 * H, 180))
+    expect(provider.requests).toHaveLength(7)
+    provider.tick(bar(5 * H, 181), true)
+    setClock(at + H * 1000)
+    provider.tick(bar(6 * H, 190))
+    expect(provider.requests).toHaveLength(8)
+    controller.stop()
+  })
+
+  it('a repair queued behind a failed recovery does not block later recoveries', async () => {
+    const { provider, controller, latest, setClock } = await retriesExhausted()
+    setClock(4 * H * 1000 + 5_000)
+    provider.tick(bar(4 * H, 170)) // recovery (retries already used up)
+    expect(provider.requests).toHaveLength(7)
+    provider.repair(3 * H) // while the recovery is in flight: queued behind it
+    provider.last().reject(down()) // no retry left: the queued repair must not stay pending
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(provider.requests).toHaveLength(7)
+    provider.tick(bar(4 * H, 171), true)
+    expect(latest().closedThrough).toBe(H)
+    // The next bar one spacing later runs one recovery (stuck behind 2H and the repair cap).
+    setClock(5 * H * 1000 + 5_000)
+    provider.tick(bar(5 * H, 180))
+    expect(provider.requests).toHaveLength(8)
+    provider.tick(bar(5 * H, 181))
+    expect(provider.requests).toHaveLength(8)
+    provider.last().reject(down())
+    await vi.advanceTimersByTimeAsync(0)
+    provider.tick(bar(5 * H, 182), true)
+    // Less than one interval after that recovery: nothing; one interval later: one more.
+    setClock(6 * H * 1000 + 4_000)
+    provider.tick(bar(6 * H, 190))
+    expect(provider.requests).toHaveLength(8)
+    provider.tick(bar(6 * H, 191), true)
+    setClock(7 * H * 1000 + 5_000)
+    provider.tick(bar(7 * H, 200))
+    expect(provider.requests).toHaveLength(9)
+    provider
+      .last()
+      .resolve([
+        bar(2 * H, 152),
+        bar(3 * H, 161),
+        bar(4 * H, 171),
+        bar(5 * H, 182),
+        bar(6 * H, 191),
+        bar(7 * H, 200),
+      ])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(latest().closedThrough).toBe(6 * H)
+    controller.stop()
+  })
+
+  it('never while a gap-fill retry is scheduled or a Retry-After block is active', async () => {
+    const { provider, controller, setClock, latest } = setup()
+    setClock(2 * H * 1000 + 10_000)
+    controller.start()
+    provider.status('live')
+    provider.last().resolve(rest)
+    await vi.advanceTimersByTimeAsync(0)
+    provider.tick(bar(2 * H, 150))
+    provider.status('reconnecting')
+    setClock(3 * H * 1000 + 5_000)
+    provider.status('live') // hole cap at 2H
+    provider.last().reject(down())
+    await vi.advanceTimersByTimeAsync(0)
+    provider.tick(bar(2 * H, 151), true) // late close: the rollover needs no repair
+    provider.tick(bar(3 * H, 160)) // cap active, but a retry is scheduled: no recovery
+    expect(provider.requests).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(GAP_FILL_RETRY_DELAYS_MS[0])
+    expect(provider.requests).toHaveLength(3)
+    provider.last().reject(new MarketDataError('rate-limited', '429', 429, 600))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(latest().retryBlocked).toBe(true)
+    provider.tick(bar(3 * H, 161), true)
+    setClock(4 * H * 1000 + 5_000)
+    provider.tick(bar(4 * H, 170)) // blocked: no recovery
+    expect(provider.requests).toHaveLength(3)
+    controller.stop()
+  })
+
+  it('a missed x:true right after a REST apply is repaired when the bar after next opens', async () => {
+    const { provider, controller, latest, setClock } = setup()
+    setClock(3 * H * 1000 + 5_000)
+    controller.start()
+    provider.status('live')
+    provider.last().resolve(rest) // 2H is the newest row (not final)
+    await vi.advanceTimersByTimeAsync(0)
+    provider.tick(bar(3 * H, 160)) // the first tick after REST is on 3H: 2H's x:true was missed
+    provider.tick(bar(3 * H, 161), true)
+    expect(provider.requests).toHaveLength(1)
+    expect(latest().closedThrough).toBe(H)
+    setClock(4 * H * 1000 + 5_000)
+    provider.tick(bar(4 * H, 170)) // 2H (older than the previous last bar 3H) is still stuck
+    expect(provider.requests).toHaveLength(2)
+    provider.last().resolve([bar(2 * H, 152), bar(3 * H, 161), bar(4 * H, 170)])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(latest().closedThrough).toBe(3 * H)
+    controller.stop()
+  })
+
+  it('short bars: recoveries are at least RECOVERY_MIN_SPACING_MS apart, not one per bar', async () => {
+    const provider = new FakeProvider()
+    let clock = 10_000
+    const controller = new LiveCandlesController(
+      {
+        provider,
+        symbol: 'BTCUSDT',
+        interval: '1s',
+        limit: 3,
+        source: 'Binance',
+        now: () => clock,
+      },
+      () => {},
+    )
+    controller.start()
+    provider.status('live')
+    provider.last().resolve([bar(7, 1), bar(8, 2), bar(9, 3)]) // 9 newest: not final
+    await vi.advanceTimersByTimeAsync(0)
+    provider.tick(bar(10, 4)) // 9's close was missed (first tick after REST)
+    provider.tick(bar(10, 4), true)
+    // Every later second opens a bar while 9 is stuck; each recovery fails at once.
+    let failed = 1
+    for (let t = 11; t <= 70; t++) {
+      clock = t * 1000
+      provider.tick(bar(t, 5))
+      if (provider.requests.length > failed) {
+        failed = provider.requests.length
+        provider.last().reject(new MarketDataError('network', 'down'))
+        await vi.advanceTimersByTimeAsync(0)
+      }
+      provider.tick(bar(t, 5), true)
+    }
+    // Recoveries at 11 s and 41 s (11 + 30): 60 bars opened, 2 requests.
+    expect(RECOVERY_MIN_SPACING_MS).toBe(30_000)
+    expect(provider.requests).toHaveLength(3)
+    controller.stop()
+  })
+})
+
+describe('closedThrough: bars skipped without a reported drop (Binance idle reconnect)', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  const rows = [bar(0, 100), bar(H, 101), bar(2 * H, 102), bar(3 * H, 103), bar(4 * H, 104)]
+  const down = () => new MarketDataError('network', 'down')
+
+  /** 0..4H loaded at 4H+10s, 4H's x:true arrives: closedThrough 4H, status 'live' throughout. */
+  async function final4() {
+    const ctx = setup(5)
+    ctx.setClock(4 * H * 1000 + 10_000)
+    ctx.controller.start()
+    ctx.provider.status('live')
+    ctx.provider.last().resolve(rows)
+    await vi.advanceTimersByTimeAsync(0)
+    ctx.provider.tick(bar(4 * H, 104), true)
+    expect(ctx.latest().closedThrough).toBe(4 * H)
+    return ctx
+  }
+
+  it('P4: a tick that skips 5H caps at 4H and runs one gap fill; its result lifts the cap', async () => {
+    const { provider, controller, latest, candles, setClock } = await final4()
+    // The socket went quiet and reconnected silently: 5H was never streamed.
+    setClock(6 * H * 1000 + 5_000)
+    provider.tick(bar(6 * H, 160))
+    expect(provider.requests).toHaveLength(2)
+    provider.tick(bar(6 * H, 161), true)
+    expect(provider.requests).toHaveLength(2)
+    // Before the fix: [0..4H, 6H] with closedThrough 6H, computed across the missing 5H.
+    expect(candles().map((c) => c.time)).toEqual([0, H, 2 * H, 3 * H, 4 * H, 6 * H])
+    expect(latest().closedThrough).toBe(4 * H)
+    provider.last().resolve([bar(4 * H, 104), bar(5 * H, 105), bar(6 * H, 161)])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(candles().map((c) => c.time)).toEqual([0, H, 2 * H, 3 * H, 4 * H, 5 * H, 6 * H])
+    expect(latest().closedThrough).toBe(6 * H)
+    controller.stop()
+  })
+
+  it('a skipped interval without trades is settled by that one REST call', async () => {
+    const { provider, controller, latest, setClock, snapshots } = await final4()
+    setClock(6 * H * 1000 + 5_000)
+    provider.tick(bar(6 * H, 160), true)
+    provider.last().resolve([bar(4 * H, 104), { ...bar(5 * H, 104), volume: 0 }, bar(6 * H, 160)])
+    await vi.advanceTimersByTimeAsync(0)
+    const load = snapshots[snapshots.length - 1].load
+    expect(load.kind === 'ready' ? load.bars.map((c) => c.time) : []).toEqual([
+      0,
+      H,
+      2 * H,
+      3 * H,
+      4 * H,
+      6 * H,
+    ])
+    expect(latest().closedThrough).toBe(6 * H)
+    expect(provider.requests).toHaveLength(2)
+    controller.stop()
+  })
+
+  it('a failed skip gap fill keeps the cap and is not retried on a timer', async () => {
+    const { provider, controller, latest, setClock } = await final4()
+    setClock(6 * H * 1000 + 5_000)
+    provider.tick(bar(6 * H, 160), true)
+    provider.last().reject(down())
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(provider.requests).toHaveLength(2)
+    expect(latest().closedThrough).toBe(4 * H)
+    controller.stop()
+  })
+
+  it('consecutive bars are not a skip: no request', async () => {
+    const { provider, controller, latest, setClock } = await final4()
+    setClock(5 * H * 1000 + 5_000)
+    provider.tick(bar(5 * H, 150), true)
+    setClock(6 * H * 1000 + 5_000)
+    provider.tick(bar(6 * H, 160))
+    expect(provider.requests).toHaveLength(1)
+    expect(latest().closedThrough).toBe(5 * H)
+    controller.stop()
+  })
+
+  it('a skip while an older request is in flight queues one gap fill behind it', async () => {
+    const { provider, controller, latest, setClock } = await final4()
+    setClock(4 * H * 1000 + 20_000)
+    controller.reload() // sent during 4H: it cannot hold 5H
+    setClock(6 * H * 1000 + 5_000)
+    provider.tick(bar(6 * H, 160), true)
+    expect(provider.requests).toHaveLength(2)
+    provider.last().resolve(rows)
+    await vi.advanceTimersByTimeAsync(0)
+    // The reload landed but was sent before the skip: still capped, and the queued fill runs.
+    expect(latest().closedThrough).toBe(4 * H)
+    expect(provider.requests).toHaveLength(3)
+    provider.last().resolve([bar(4 * H, 104), bar(5 * H, 105), bar(6 * H, 160)])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(latest().closedThrough).toBe(6 * H)
+    controller.stop()
+  })
+
+  it('a skip during a Retry-After block waits for the block, then fills once', async () => {
+    const { provider, controller, latest, setClock } = await final4()
+    controller.reload()
+    provider.last().reject(new MarketDataError('rate-limited', '429', 429, 30))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(latest().retryBlocked).toBe(true)
+    setClock(6 * H * 1000 + 5_000)
+    provider.tick(bar(6 * H, 160), true)
+    expect(provider.requests).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(provider.requests).toHaveLength(3)
+    provider.last().resolve([bar(4 * H, 104), bar(5 * H, 105), bar(6 * H, 160)])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(latest().closedThrough).toBe(6 * H)
+    controller.stop()
+  })
+
+  it('short bars: skip gap fills are at least RECOVERY_MIN_SPACING_MS apart', async () => {
+    const provider = new FakeProvider()
+    let clock = 10_000
+    const controller = new LiveCandlesController(
+      {
+        provider,
+        symbol: 'BTCUSDT',
+        interval: '1s',
+        limit: 3,
+        source: 'Binance',
+        now: () => clock,
+      },
+      () => {},
+    )
+    controller.start()
+    provider.status('live')
+    provider.last().resolve([bar(7, 1), bar(8, 2), bar(9, 3)])
+    await vi.advanceTimersByTimeAsync(0)
+    provider.tick(bar(9, 3), true)
+    // Every other second is skipped; each fill fails at once.
+    let made = 1
+    for (let t = 11; t <= 71; t += 2) {
+      clock = t * 1000 + 500
+      provider.tick(bar(t, 5), true)
+      if (provider.requests.length > made) {
+        made = provider.requests.length
+        provider.last().reject(new MarketDataError('network', 'down'))
+        await vi.advanceTimersByTimeAsync(0)
+      }
+    }
+    // 31 skips in 60 s: fills at 11.5 s, 41.5 s and 71.5 s.
+    expect(provider.requests).toHaveLength(4)
+    controller.stop()
+  })
+})
+
+describe('closedThrough: hole cap guards', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  const rows = [bar(0, 100), bar(H, 101), bar(2 * H, 102), bar(3 * H, 103), bar(4 * H, 104)]
+  const down = () => new MarketDataError('network', 'down')
+
+  async function final4() {
+    const ctx = setup(5)
+    ctx.setClock(4 * H * 1000 + 10_000)
+    ctx.controller.start()
+    ctx.provider.status('live')
+    ctx.provider.last().resolve(rows)
+    await vi.advanceTimersByTimeAsync(0)
+    ctx.provider.tick(bar(4 * H, 104), true)
+    return ctx
+  }
+
+  it('a second drop after a failed gap fill keeps the lower cap', async () => {
+    const { provider, controller, latest, setClock } = await final4()
+    provider.status('reconnecting')
+    setClock(7 * H * 1000 + 5_000)
+    provider.status('live') // cap 4H
+    provider.tick(bar(7 * H, 171), true) // appended after the possible hole
+    provider.last().reject(down())
+    await vi.advanceTimersByTimeAsync(0)
+    provider.status('reconnecting')
+    setClock(8 * H * 1000 + 5_000)
+    provider.status('live') // the last bar is now 7H: a cap at 7H must not replace 4H
+    expect(provider.requests).toHaveLength(3) // this reconnect needed its own gap fill
+    expect(latest().closedThrough).toBe(4 * H)
+    controller.stop()
+  })
+
+  it('a request in flight when the cap was set does not lift it', async () => {
+    const { provider, controller, latest, setClock } = await final4()
+    setClock(5 * H * 1000 + 5_000)
+    controller.reload() // in flight
+    provider.repair(4 * H) // cap at 4H - 1: closedThrough 3H
+    expect(latest().closedThrough).toBe(3 * H)
+    expect(provider.requests).toHaveLength(2)
+    provider.last().resolve([bar(3 * H, 103), bar(4 * H, 104), bar(5 * H, 150)])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(latest().closedThrough).toBe(3 * H)
+    // The repair queued behind it lands and lifts the cap.
+    expect(provider.requests).toHaveLength(3)
+    provider.last().resolve([bar(3 * H, 103), bar(4 * H, 104), bar(5 * H, 150)])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(latest().closedThrough).toBe(4 * H)
+    controller.stop()
+  })
+
+  it('an empty REST result does not lift the cap', async () => {
+    const { provider, controller, latest, setClock } = await final4()
+    provider.status('reconnecting')
+    setClock(7 * H * 1000 + 5_000)
+    provider.status('live')
+    provider.tick(bar(7 * H, 171), true)
+    provider.last().resolve([])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(latest().closedThrough).toBe(4 * H)
+    controller.stop()
+  })
+
+  it('onRepair caps at the bar before the repaired one', async () => {
+    const { provider, controller, latest, setClock } = await final4()
+    setClock(5 * H * 1000 + 5_000)
+    provider.tick(bar(5 * H, 150), true) // 5H on screen and closed, but the source gives up on it
+    expect(latest().closedThrough).toBe(5 * H)
+    provider.repair(5 * H)
+    expect(latest().closedThrough).toBe(4 * H)
+    controller.stop()
+  })
+
+  it('a provisional close held before the first load stays provisional', async () => {
+    const { provider, controller, latest } = setup()
+    controller.start()
+    provider.status('live')
+    provider.provisionalClose(bar(2 * H, 151)) // before REST lands: held in pending
+    provider.last().resolve(rest)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(latest().closedThrough).toBe(H)
+    provider.tick(bar(2 * H, 151), true) // settled
+    expect(latest().closedThrough).toBe(2 * H)
     controller.stop()
   })
 })

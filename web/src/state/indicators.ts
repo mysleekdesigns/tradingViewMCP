@@ -78,7 +78,9 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 /**
  * Every input key of `def`: finite numbers clamped to [min, max] (integers rounded), else default.
- * Time inputs (`kind: 'time'`, UNIX seconds, 0 = not set) are always whole seconds.
+ * Time inputs (`kind: 'time'`, UNIX seconds, 0 = not set) are always whole seconds. Toggles
+ * (`kind: 'toggle'`) keep exactly 0 or 1; anything else (0.6, 2, -1) is the default, never
+ * rounded or clamped into an on/off value.
  */
 export function sanitizeInputs(def: IndicatorDef, raw: unknown): Record<string, number> {
   const r = isRecord(raw) ? raw : {}
@@ -87,6 +89,10 @@ export function sanitizeInputs(def: IndicatorDef, raw: unknown): Record<string, 
     const v = r[i.key]
     if (typeof v !== 'number' || !Number.isFinite(v)) {
       out[i.key] = i.default
+      continue
+    }
+    if (i.kind === 'toggle') {
+      out[i.key] = v === 0 || v === 1 ? v : i.default
       continue
     }
     const n = i.integer || i.kind === 'time' ? Math.round(v) : v
@@ -204,7 +210,7 @@ export function applyPatch(
 ): IndicatorConfig {
   const inputs =
     patch.inputs !== undefined
-      ? sanitizeInputs(def, { ...item.inputs, ...validEntries(patch.inputs, 'number') })
+      ? sanitizeInputs(def, { ...item.inputs, ...validInputEntries(def, patch.inputs) })
       : item.inputs
   const colors =
     patch.colors !== undefined
@@ -216,6 +222,17 @@ export function applyPatch(
       : item.source
   const visible = typeof patch.visible === 'boolean' ? patch.visible : item.visible
   return { ...item, inputs, colors, source, visible }
+}
+
+/** Numeric patch entries, minus toggles that are not exactly 0 or 1 (those keep the current value). */
+function validInputEntries(def: IndicatorDef, raw: unknown): Record<string, unknown> {
+  const out = validEntries(raw, 'number')
+  for (const i of def.inputs) {
+    if (i.kind === 'toggle' && i.key in out && out[i.key] !== 0 && out[i.key] !== 1) {
+      delete out[i.key]
+    }
+  }
+  return out
 }
 
 /** Keep only entries that would pass sanitization, so a bad value does not reset a good one. */

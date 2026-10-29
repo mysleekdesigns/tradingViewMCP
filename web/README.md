@@ -125,3 +125,165 @@ still required.
 Placement and drag feel versus ours; magnet modes on live 1m candles; look on dark and light
 themes; PNG export with library drawings; cursor and hover through LWC 5.2 hit testing;
 performance with a few hundred drawings.
+
+## Market structure overlay (Phase 16)
+
+**Visual only, no edge claim.** The overlay draws confirmed swing points, break of structure
+(BOS) and change of character (ChoCh) markers, and flip zones with their first retest. The claims
+behind these ideas come from NQ/ES futures research ("Price action strategies research",
+`../agents/research/reports/`) and are unverified for crypto. Nothing here is a backtest or a
+signal. The compute lives in `src/indicators/marketStructure.ts` (`computeMarketStructure`, and
+`MarketStructureEngine` for one closed bar at a time).
+
+**Parity source.** Two hand-built fixtures in `web/src/indicators/`, together:
+
+- `marketStructure.fixture.ts`: a 44-bar series. Every pivot, BOS, ChoCh, zone, retest,
+  invalidation and drop in it is worked out by hand in its comments.
+- `marketStructure.rules.fixture.ts`: 14 short rule cases (5 to 8 bars, `left` = `right` = 1),
+  each pinning one rule the long fixture leaves loose: closes not wicks, break ties, retest and
+  invalidation edge ties, breaks before same-bar swings, invalidation before the `maxZones` drop,
+  an outside bar that is both swings, a zero-height zone, and equal highs further apart than
+  `left`. Each has its hand working in comments.
+
+Any future lab feature that reuses these rules (for example a causal swing feature in the lab's
+feature registry) must reproduce both fixtures' expected values exactly.
+
+### Inputs and defaults
+
+| Input                             | Default | Range  | Meaning                                                                      |
+| --------------------------------- | ------- | ------ | ---------------------------------------------------------------------------- |
+| Left bars (`left`)                | 5       | 1–50   | bars before a pivot that it must be strictly beyond                          |
+| Right bars (`right`)              | 5       | 1–50   | bars after a pivot that it must be at or beyond; also the confirmation delay |
+| Max active zones (`maxZones`)     | 10      | 1–50   | active flip zones kept; a new zone past this ends the oldest                 |
+| Swings / BOS / ChoCh / Flip zones | on      | on/off | display toggles only; they never change the computation                      |
+
+### Rules
+
+Only closed bars are used. The forming bar (the last REST row, or a WebSocket kline with
+`x: false`) never creates, moves or removes a swing, marker or zone. Comparisons are exact
+floating-point comparisons on the given prices. All times are bar open times in UNIX seconds.
+
+**Traded bars only.** The engine runs on the bars the chart plots: bars with volume 0 (Binance
+returns a row for an interval without trades) are skipped, never filled or synthesised. So `left`
+and `right` count traded bars, and a pivot's `right` bars after it are the next `right` traded
+bars, whatever the clock time between them. A lab port must do the same (drop zero-volume rows
+first, then apply the rules) to match the fixtures.
+
+**Final values only (live).** The live controller exposes `closedThrough`
+(`LiveCandlesSnapshot.closedThrough`): the open time of the latest bar such that it and every
+bar before it has final values. A bar is final when its values came from a closed (`x: true`)
+tick that is not provisional, from a REST row that was not the newest row of its response, from
+an older-history page, or from the newest REST row when the bar was already final before that
+response. Its values are not final while they came from a forming (`x: false`) tick, from a
+provisional closed tick, or from the newest REST row. It is contiguous: it never passes a bar
+that is not final. The overlay uses only plotted bars with time `<= closedThrough`, so:
+
+- After a REST load it is the second-to-last row; it moves onto a bar when that bar's `x: true`
+  tick arrives (usually just before the next bar opens).
+- **Provisional closes (Coinbase).** Coinbase has no closed-kline message: the stream builds the
+  bar from trades, reads it back over REST when the bucket ends, and, unless its live view is
+  known complete, reads it back once more about 5 s later and may correct it. That first closed
+  bar is passed as provisional (`onCandle(c, true, true)`), so it is not final; the second
+  send (closed, no flag, corrected or with the same values, also when that read fails) settles
+  it. A provisional close never makes an event or a zone that the correction would remove.
+  Binance and the server never mark a close provisional. After a Coinbase stall, the buckets
+  it skipped are read from REST; the newest of them is provisional too and is read back once
+  more, like any other close.
+- **Custom timeframes** (aggregated from base bars, e.g. 3m from 1m, 30s from 1s) pass the
+  flag on: a bucket that closes while one of its base bars is a provisional close is sent
+  closed and provisional (again only if its values change), and closed without the flag once
+  the base source settles that bar. A base tick that skips base bars (missed without any
+  reported drop) is handled like a drop: no bucket is closed from the base bars seen, and a
+  bucket entered mid-way is not treated as complete; they are read from REST first, and a
+  bucket whose read fails is handed to the controller's repair (`onRepair`, below).
+- A bar that was forming when the socket dropped keeps its partial values until the reconnect
+  gap fill brings the final ones. Ticks for later bars do not move `closedThrough` past it, so
+  its partial values never make an event or a zone that the gap fill would later remove.
+- **Hole cap.** A drop can also lose whole bars, even when the last bar before it was final.
+  When a reconnect needs a gap fill, `closedThrough` is capped at the last bar on screen at that
+  moment (and at the bar before a bar an aggregated source gave up on, `onRepair`) until a
+  non-empty REST result requested after that moment lands. Ticks for later bars (appended after
+  the possible hole) never move it past the cap, so the engine never computes across missing
+  bars. A REST window that starts after the cap is not merged over the hole; it replaces the
+  window.
+- **Skipped bars without a drop.** On Binance a socket that goes quiet reconnects without
+  leaving 'live', so a bar can be missed with no drop reported. A tick that opens a bar more
+  than one interval after the last bar on screen sets the same cap at that last bar and runs
+  one gap fill: queued behind a request already in flight that was sent before the skipped
+  bars opened (by the local clock, with 2 s of slack), held through a Retry-After window, and
+  at most one such fill per 30 s. A failed one is not retried on a timer; the recovery below
+  takes over. An interval without trades costs that one REST call: Binance returns its
+  zero-volume row, which settles it (Coinbase has no row for it, and a non-empty answer still
+  lifts the cap).
+- **Retries and recovery.** A failed gap fill (or missed-close repair) is retried automatically
+  after 2, 4 and 8 s (after the Retry-After window on a 429/418). While those run, the
+  structure stays at the last confirmed bar. If they all fail, the controller recovers by
+  itself: whenever a new bar opens while `closedThrough` is stuck behind a non-final bar older
+  than the previous last bar, or behind a hole cap, and no request is in flight, scheduled or
+  blocked, it runs one more gap fill (no timer retries of its own; at most one per bar interval
+  and never more often than every 30 s). A repair queued behind a request that then failed
+  does not block it. This also repairs a missed `x: true` right after a
+  REST load, one bar later. A stalled overlay is honest; a repainting one is not.
+- The last bar of a halted pair (no more ticks, no closed tick) is never used: it waits.
+
+Bar replay passes the replay cursor bar (replay shows closed bars only), capped at the live
+`closedThrough` of the same stream (`structureClosedThrough` in `src/chart/structureBars.ts`).
+Any pushed bar that is no longer the same object (a revised bar anywhere in the pushed history,
+older history, another window, a replay step back) starts the computation over.
+
+**Swings (fractal pivots).**
+
+- Swing high at bar `p`: `high[p] > high[p-i]` for every `i` in `1..left` (strict) **and**
+  `high[p] >= high[p+j]` for every `j` in `1..right` (ties allowed). A pivot needs `p >= left`.
+- Swing low at bar `p`, mirrored: `low[p] < low[p-i]` for every `i` in `1..left` (strict) and
+  `low[p] <= low[p+j]` for every `j` in `1..right`.
+- Ties: of an equal-high pair (or equal-low pair) **within `left` bars of each other**, the
+  **earlier** bar is the pivot; the later bar fails the strict left test. Equal highs (or lows)
+  further apart than `left` bars can both be pivots. One bar can be both a swing high and a swing
+  low (an outside bar); the high is recorded first.
+- A swing is confirmed on the close of bar `p + right`. Its `confirmTime` is that bar's time.
+  Nothing about it exists before then: a swing level is drawn from its confirmation bar, and a
+  pivot dot is only shown once the swing is confirmed.
+
+**Per bar `t`, processed in this order:**
+
+1. **Zones** created before `t` that are still active:
+   - First retest: if the zone has no retest yet and `high[t] >= bottom` and `low[t] <= top`,
+     then `retestTime = t`.
+   - Invalidation: a support zone with `close[t] < bottom`, or a resistance zone with
+     `close[t] > top`, ends at `t` with reason `invalidated`. One bar can be both the first
+     retest and the invalidation.
+2. **Breaks**, against `H` = the most recently confirmed swing high and `L` = the most recently
+   confirmed swing low (both confirmed at bars before `t`, because step 3 runs after this one).
+   Only the latest swing of each kind can be broken. An older swing superseded by a newer one is
+   never broken, even if a later close goes through it. Each swing breaks at most once. Closes
+   only, never wicks; strict comparisons.
+   - `H` first: if `H` is unbroken and `close[t] > H.price`, an `up` event is recorded. It is a
+     `choch` if the structure was `down`, otherwise a `bos` (the first break from `none` is a
+     `bos`). The structure becomes `up`, `H` is marked broken at `t`, and a **support** zone is
+     created from `H`'s pivot bar: `top = high[p_H]`, `bottom = max(open[p_H], close[p_H])`.
+   - Then `L`: if `L` is unbroken and `close[t] < L.price`, a `down` event is recorded. It is a
+     `choch` if the structure was `up`, otherwise a `bos`. The structure becomes `down`, `L` is
+     marked broken at `t`, and a **resistance** zone is created from `L`'s pivot bar:
+     `bottom = low[p_L]`, `top = min(open[p_L], close[p_L])`.
+   - Zones of zero height are kept.
+   - Zone creation: if `maxZones` zones are already active (after step 1's invalidations on
+     this bar), the oldest active zone (the one created earliest) ends at `t` with reason
+     `dropped`, and then the new zone is added.
+   - Two breaks on one bar cannot happen. It would need `H.price < close[t] < L.price` with both
+     unbroken, but a swing low's confirmation bar closes at or above `L.price` and a swing high's
+     at or below `H.price`, so whichever was confirmed later would already have broken the other
+     (and one pivot bar gives `H.price >= L.price`). So the `H`-then-`L` order never changes the
+     output, and no zone ever ends on its own creation bar.
+3. **Swings confirmed at `t`** (pivot `p = t - right`): swing high first, then swing low. Each
+   becomes the new `H` / `L`.
+
+The structure state is `none` until the first break. After that it is `up` or `down`, following
+the latest event. Touch counts are not shown or scored.
+
+**Timing guarantees (tested).** Every output dated at bar `t` uses only bars `<= t`: changing any
+bar after `t` leaves every swing, event and zone dated `<= t` unchanged. Each swing's
+`confirmTime` is exactly `right` bars after its `pivotTime`. Each event is later than its swing's
+confirmation bar, and each retest or invalidation is later than its zone's creation bar.
+Pushing closed bars one at a time into `MarketStructureEngine` gives the same result as a full
+recompute. 100k bars compute in well under 1.5 s at the defaults.

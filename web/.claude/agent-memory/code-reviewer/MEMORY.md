@@ -3,3 +3,4 @@
 - [Server review notes](server-review-notes.md) — Phase 6 alerts engine/hub/notifier conventions + open risks (restart re-fire, status, webhook)
 - [Phase 12 derivatives review](phase12-derivatives-review.md) — funding/OI panes: pane-order conventions, open replay-refetch + no-retry items
 - [Phase 14 chart upgrades review](phase14-chart-upgrades-review.md) — round 2: W1-W3 fixed; notes = per-bar VP rebuild, per-load unreachable, future-anchor note; a11y/hover conventions
+- [Phase 16 market structure review](phase16-market-structure-review.md) — round 3: give-up stall closed; open: repairPending blocks recovery, provisional lost in aggregation

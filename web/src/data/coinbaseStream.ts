@@ -279,9 +279,12 @@ export interface CandleStreamOptions {
   ) => Promise<Candle[]>
   /**
    * Bars in time order. A closed bar may be sent once more later with the same time (a
-   * corrected REST read-back); consumers replace the bar with that time.
+   * corrected REST read-back); consumers replace the bar with that time. `provisional` is
+   * true on a closed bar that will be sent once more (a second REST read-back is pending):
+   * its values may still change. That second send is closed without the flag, even when the
+   * values did not change, and settles the bar. Never set on a forming bar.
    */
-  onCandle: (c: Candle, closed: boolean) => void
+  onCandle: (c: Candle, closed: boolean, provisional?: boolean) => void
   onStatus?: (s: ConnectionStatus) => void
   /** Wait after a bucket rolls before reading the closed bar from REST (late trades, REST lag). */
   reconcileDelayMs?: number
@@ -409,16 +412,19 @@ type CloseItem =
  * - Heartbeats (1/s) and trade times advance the clock. When a bucket ends, the bar is read
  *   back from REST after `reconcileDelayMs` and emitted with `closed=true` (merged with the
  *   live view, or the live view alone if REST fails; then, unless the live view is known
- *   complete, one more read-back after `reconcileRetryMs` re-emits the bar if it changed).
+ *   complete, that close is marked provisional and one more read-back after
+ *   `reconcileRetryMs` re-emits the bar closed and final: corrected if it changed, the same
+ *   values otherwise, or when the read-back fails).
  *   The close is the live one only when a trade on the current subscription set it and the
  *   feed stayed continuous (no step over MAX_FEED_GAP_S) through the bucket's end; otherwise
  *   the fuller view (more volume) decides. A longer step counts as a fresh start.
  * - If the bucket a subscription started in ends with no live bar (its seed failed and no
- *   trade landed since), it is read back from REST alone and emitted closed if REST has a row;
- *   one more read-back after `reconcileRetryMs` (the row failed, was missing or lagged)
- *   re-emits it if it changed.
+ *   trade landed since), it is read back from REST alone and emitted closed (provisional) if
+ *   REST has a row; one more read-back after `reconcileRetryMs` (the row failed, was missing
+ *   or lagged) re-emits it closed and final (or emits it then, if only that read has a row).
  * - A clock jump of more than one bucket (a stall, sleep/wake) backfills the skipped buckets
- *   over REST, emitted closed in time order before the next forming bar. A failed backfill
+ *   over REST, emitted closed in time order before the next forming bar; the newest backfilled
+ *   row is provisional and settled by one more read-back, as above. A failed backfill
  *   is retried once after `reconcileRetryMs`. If that fails too and the socket is live, the
  *   status pulses 'reconnecting' -> 'live' so the consumer runs its own REST gap fill. If the
  *   socket is not live, the run (and every later bar) is held until the socket's next 'live',
@@ -429,7 +435,8 @@ type CloseItem =
  *   bucket are folded into a bar still awaiting its close, else dropped.
  * - A subscribe rejected with "not a valid product" stops ('offline'); other rejections fail
  *   the socket and back off, and MAX_SUBSCRIBE_REJECTIONS in a row stop ('offline').
- * - The forming bar is display-only; only `closed=true` bars are final.
+ * - The forming bar is display-only. A `closed=true` bar is final unless it is marked
+ *   provisional; a provisional close is settled by a later closed send of the same bar.
  */
 export function openCoinbaseCandleStream(opts: CandleStreamOptions): () => void {
   const reconcileDelayMs = opts.reconcileDelayMs ?? DEFAULT_RECONCILE_DELAY_MS
@@ -485,25 +492,30 @@ export function openCoinbaseCandleStream(opts: CandleStreamOptions): () => void 
     timers.add(timer)
   }
 
-  const deliver = (c: Candle, closed: boolean): void => {
+  const deliver = (c: Candle, closed: boolean, provisional: boolean): void => {
     try {
-      opts.onCandle(c, closed)
+      // The flag is only passed when set, so a consumer that ignores it sees (c, closed).
+      if (provisional) opts.onCandle(c, closed, true)
+      else opts.onCandle(c, closed)
     } catch (err) {
       console.error('subscribeCandles: onCandle threw', err)
     }
   }
 
-  const emitCandle = (c: Candle, closed: boolean): void => {
+  const emitCandle = (c: Candle, closed: boolean, provisional = false): void => {
     if (disposed || c.time < lastEmittedTime) return
     lastEmittedTime = c.time
-    deliver(c, closed)
+    deliver(c, closed, provisional)
   }
 
-  /** A corrected closed bar; it may be older than the latest emitted bar (same time = replace). */
-  const emitCorrection = (c: Candle): void => {
+  /**
+   * The settled (final) closed bar after the second read-back, changed or not; it may be
+   * older than the latest emitted bar (same time = replace).
+   */
+  const emitSettled = (c: Candle): void => {
     if (disposed) return
     if (c.time >= lastEmittedTime) emitCandle(c, true)
-    else deliver(c, true)
+    else deliver(c, true, false)
   }
 
   const emitForming = (): void => {
@@ -535,14 +547,20 @@ export function openCoinbaseCandleStream(opts: CandleStreamOptions): () => void 
 
   /**
    * One more read-back of a closed bar whose live view is not known complete. `emitted` is
-   * the bar already sent (null if none was); re-emit only if the merged result differs.
+   * the bar already sent provisional (null if none was). The result is sent closed and final
+   * (no provisional flag): the merged bar, the `emitted` bar unchanged when the merge equals
+   * it or REST fails or lacks the row, or nothing when neither exists.
    */
   const scheduleReadBack = (time: number, emitted: Candle | null, liveHasClose: boolean): void => {
     later(() => {
       void readBack(time).then((rest) => {
-        if (disposed || rest === undefined || rest === null) return
+        if (disposed) return
+        if (rest === undefined || rest === null) {
+          if (emitted !== null) emitSettled(emitted)
+          return
+        }
         const fixed = emitted === null ? rest : mergeBars(rest, emitted, liveHasClose)
-        if (emitted === null || !sameBar(fixed, emitted)) emitCorrection(fixed)
+        emitSettled(emitted !== null && sameBar(fixed, emitted) ? emitted : fixed)
       })
     }, reconcileRetryMs)
   }
@@ -603,7 +621,13 @@ export function openCoinbaseCandleStream(opts: CandleStreamOptions): () => void 
           // Pulse while the pre-gap bar is still the consumer's last bar, then move on.
           if (rows === null) requestConsumerGapFill()
           closeQueue.shift()
-          if (rows !== null) for (const r of rows) emitCandle(r, true)
+          if (rows !== null && rows.length > 0) {
+            // The newest row of the run ended last and can lag (CDN cache) like any fresh
+            // read-back: provisional, read back once more and settled like a per-bar close.
+            const newest = rows[rows.length - 1]
+            for (const r of rows) emitCandle(r, true, r === newest)
+            scheduleReadBack(newest.time, newest, false)
+          }
           continue
         }
         const time = head.kind === 'bar' ? head.bar.time : head.time
@@ -614,17 +638,19 @@ export function openCoinbaseCandleStream(opts: CandleStreamOptions): () => void 
         if (live === undefined || live.kind === 'gap') break
         if (live.kind === 'rest') {
           // No live view of this bucket: REST alone (a quiet bucket has no row: emit nothing).
-          // A row can fail, be missing or lag (CDN cache): read back once more either way.
-          if (rest !== undefined && rest !== null) emitCandle(rest, true)
+          // A row can fail, be missing or lag (CDN cache): read back once more either way, so
+          // this close is provisional.
+          if (rest !== undefined && rest !== null) emitCandle(rest, true, true)
           scheduleReadBack(time, rest ?? null, false)
           continue
         }
         const known = rest === undefined || rest === null ? undefined : rest
         const emitted = known === undefined ? live.bar : mergeBars(known, live.bar, live.coveredEnd)
-        emitCandle(emitted, true)
         // A REST row can lag (CDN cache) as well as fail: read back once more unless the live
-        // view is known complete.
-        if (!(live.fromOpen && live.coveredEnd)) scheduleReadBack(time, emitted, live.coveredEnd)
+        // view is known complete. Until then this close is provisional.
+        const complete = live.fromOpen && live.coveredEnd
+        emitCandle(emitted, true, !complete)
+        if (!complete) scheduleReadBack(time, emitted, live.coveredEnd)
       }
     } finally {
       reconciling = false

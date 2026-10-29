@@ -123,6 +123,8 @@ let localNow = T + 30
 function setup(opts?: { resolveProduct?: (s: AbortSignal) => Promise<string> }) {
   const calls: FetchCall[] = []
   const candles: [Candle, boolean][] = []
+  /** The `provisional` argument of each onCandle call, parallel to `candles`. */
+  const provisional: (boolean | undefined)[] = []
   const statuses: ConnectionStatus[] = []
   /** The last emitted candle at each status report (what the consumer has on screen then). */
   const lastAtStatus: ([Candle, boolean] | undefined)[] = []
@@ -137,7 +139,10 @@ function setup(opts?: { resolveProduct?: (s: AbortSignal) => Promise<string> }) 
       calls.push({ limit, endTime, result })
       return result.promise
     },
-    onCandle: (c, closed) => candles.push([c, closed]),
+    onCandle: (c, closed, p) => {
+      candles.push([c, closed])
+      provisional.push(p)
+    },
     onStatus: (s) => {
       statuses.push(s)
       lastAtStatus.push(candles[candles.length - 1])
@@ -145,7 +150,7 @@ function setup(opts?: { resolveProduct?: (s: AbortSignal) => Promise<string> }) 
     reconcileDelayMs: 1_000,
     now: () => localNow * 1000,
   })
-  return { calls, candles, statuses, lastAtStatus, unsubscribe }
+  return { calls, candles, provisional, statuses, lastAtStatus, unsubscribe }
 }
 
 /** Flush resolved promises (and zero-delay fake timers). */
@@ -487,10 +492,13 @@ describe('openCoinbaseCandleStream', () => {
     expect(s.calls[2]).toMatchObject({ limit: 1, endTime: T })
     s.calls[2].result.resolve([])
     await flush()
+    // Closed provisional, then (REST still has no row) the same bar settled as final.
     expect(s.candles).toEqual([
       [bar(T, 100, 100, 100, 100, 1), false],
       [bar(T, 100, 100, 100, 100, 1), true],
+      [bar(T, 100, 100, 100, 100, 1), true],
     ])
+    expect(s.provisional).toEqual([undefined, true, undefined])
     last().serverMessage(match(2, T + 301, '101', '1'))
     expect(s.candles[s.candles.length - 1]).toEqual([bar(T + 300, 101, 101, 101, 101, 1), false])
     s.unsubscribe()
@@ -815,13 +823,15 @@ describe('openCoinbaseCandleStream: when the live close is trusted', () => {
     await flush()
     // Not set on this subscription: the fuller view (REST, 14 > 11) gives the close.
     expect(closedAt(s, T)).toEqual([bar(T, 100, 110, 90, 105, 14)])
-    // Not known complete, so read back once more; an unchanged row is not re-emitted.
+    // Not known complete, so read back once more; an unchanged row is re-sent with the same
+    // values only to settle the provisional close.
     await vi.advanceTimersByTimeAsync(5_000)
     const reads = callsAt(s, T)
     expect(reads).toHaveLength(2)
     reads[1].result.resolve([bar(T, 100, 110, 90, 105, 14)])
     await flush()
-    expect(closedAt(s, T)).toHaveLength(1)
+    expect(closedAt(s, T)).toEqual([bar(T, 100, 110, 90, 105, 14), bar(T, 100, 110, 90, 105, 14)])
+    expect(s.provisional.slice(-2)).toEqual([true, undefined])
     s.unsubscribe()
   })
 
@@ -906,6 +916,144 @@ describe('openCoinbaseCandleStream: when the live close is trusted', () => {
     await vi.advanceTimersByTimeAsync(10_000)
     expect(callsAt(s, T)).toHaveLength(1)
     expect(closedAt(s, T)).toEqual([bar(T, 100, 100, 100, 100, 1)])
+    s.unsubscribe()
+  })
+})
+
+describe('openCoinbaseCandleStream: provisional closes (a second read-back is pending)', () => {
+  /** [closed, provisional] of every emission of bucket `time`. */
+  const flagsAt = (s: ReturnType<typeof setup>, time: number) =>
+    s.candles.flatMap(([c, closed], i) => (c.time === time ? [[closed, s.provisional[i]]] : []))
+
+  it('a close not known complete is provisional; the corrected second read-back settles it', async () => {
+    const s = setup()
+    await openAndSeed(s, [bar(T, 100, 110, 90, 105, 10)])
+    last().serverMessage(match(1, T + 50, '111', '1'))
+    beats(T + 51, T + 60)
+    await vi.advanceTimersByTimeAsync(1_000)
+    callsAt(s, T)[0].result.resolve([bar(T, 100, 110, 90, 105, 10)])
+    await flush()
+    last().serverMessage(match(2, T + 61, '120', '2')) // the next bar forms meanwhile
+    await vi.advanceTimersByTimeAsync(5_000)
+    callsAt(s, T)[1].result.resolve([bar(T, 100, 111, 88, 111, 13)])
+    await flush()
+    expect(closedAt(s, T)).toEqual([bar(T, 100, 111, 90, 111, 11), bar(T, 100, 111, 88, 111, 13)])
+    expect(flagsAt(s, T).filter(([closed]) => closed)).toEqual([
+      [true, true],
+      [true, undefined],
+    ])
+    s.unsubscribe()
+  })
+
+  it('a failed second read-back settles the provisional bar with its values', async () => {
+    const s = setup()
+    await openAndSeed(s, [bar(T, 100, 110, 90, 105, 10)])
+    last().serverMessage(match(1, T + 50, '111', '1'))
+    beats(T + 51, T + 60)
+    await vi.advanceTimersByTimeAsync(1_000)
+    callsAt(s, T)[0].result.reject(new Error('boom'))
+    await flush()
+    await vi.advanceTimersByTimeAsync(5_000)
+    callsAt(s, T)[1].result.reject(new Error('boom'))
+    await flush()
+    expect(closedAt(s, T)).toEqual([bar(T, 100, 111, 90, 111, 11), bar(T, 100, 111, 90, 111, 11)])
+    expect(flagsAt(s, T).filter(([closed]) => closed)).toEqual([
+      [true, true],
+      [true, undefined],
+    ])
+    s.unsubscribe()
+  })
+
+  it('a live view known complete closes final at once (no flag, no second send)', async () => {
+    const s = setup()
+    await openAndSeed(s, [])
+    beats(T - 5, T)
+    last().serverMessage(match(1, T + 1, '100', '1'))
+    beats(T + 2, T + 60)
+    await vi.advanceTimersByTimeAsync(1_000)
+    callsAt(s, T)[0].result.resolve([bar(T, 100, 100, 100, 100, 1)])
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(flagsAt(s, T).filter(([closed]) => closed)).toEqual([[true, undefined]])
+    s.unsubscribe()
+  })
+
+  it('forming bars never carry the flag; only the newest stall-backfill row does', async () => {
+    const s = setup()
+    await openAndSeed(s, [])
+    last().serverMessage(match(1, T + 30, '100', '1'))
+    last().serverMessage(heartbeat(T + 200))
+    last().serverMessage(match(2, T + 201, '140', '1'))
+    await vi.advanceTimersByTimeAsync(1_000)
+    callsAt(s, T)[0].result.resolve([bar(T, 100, 100, 100, 100, 1)])
+    await flush()
+    await vi.advanceTimersByTimeAsync(1_000)
+    s.calls[2].result.resolve([
+      bar(T + 60, 110, 110, 110, 110, 1),
+      bar(T + 120, 120, 121, 119, 120, 1),
+    ])
+    await flush()
+    expect(flagsAt(s, T + 60)).toEqual([[true, undefined]])
+    // The newest row of the run ended last: REST may still lag on it, like any read-back.
+    expect(flagsAt(s, T + 120)).toEqual([[true, true]])
+    expect(flagsAt(s, T + 180)).toEqual([[false, undefined]])
+    expect(s.candles.every(([, closed], i) => closed || s.provisional[i] === undefined)).toBe(true)
+    s.unsubscribe()
+  })
+
+  it('the provisional newest stall-backfill row is read back once more and settled', async () => {
+    const s = setup()
+    await openAndSeed(s, [])
+    last().serverMessage(match(1, T + 30, '100', '1'))
+    last().serverMessage(heartbeat(T + 200))
+    await vi.advanceTimersByTimeAsync(1_000)
+    callsAt(s, T)[0].result.resolve([bar(T, 100, 100, 100, 100, 1)])
+    await flush()
+    await vi.advanceTimersByTimeAsync(1_000)
+    const [gap] = callsAt(s, T + 120)
+    expect(gap).toMatchObject({ limit: 2, endTime: T + 120 })
+    gap.result.resolve([bar(T + 120, 120, 121, 119, 120, 1)])
+    await flush()
+    await vi.advanceTimersByTimeAsync(4_999)
+    expect(callsAt(s, T + 120)).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    const readBack = callsAt(s, T + 120)[1]
+    expect(readBack).toMatchObject({ limit: 1, endTime: T + 120 })
+    // The lagging first answer missed a late trade: the fuller row corrects it.
+    readBack.result.resolve([bar(T + 120, 120, 125, 119, 124, 2)])
+    await flush()
+    expect(closedAt(s, T + 120)).toEqual([
+      bar(T + 120, 120, 121, 119, 120, 1),
+      bar(T + 120, 120, 125, 119, 124, 2),
+    ])
+    expect(flagsAt(s, T + 120)).toEqual([
+      [true, true],
+      [true, undefined],
+    ])
+    s.unsubscribe()
+  })
+
+  it('a failed read-back of the newest stall-backfill row settles it with its values', async () => {
+    const s = setup()
+    await openAndSeed(s, [])
+    last().serverMessage(match(1, T + 30, '100', '1'))
+    last().serverMessage(heartbeat(T + 200))
+    await vi.advanceTimersByTimeAsync(1_000)
+    callsAt(s, T)[0].result.resolve([bar(T, 100, 100, 100, 100, 1)])
+    await flush()
+    await vi.advanceTimersByTimeAsync(1_000)
+    callsAt(s, T + 120)[0].result.resolve([bar(T + 120, 120, 121, 119, 120, 1)])
+    await flush()
+    await vi.advanceTimersByTimeAsync(5_000)
+    callsAt(s, T + 120)[1].result.reject(new Error('down'))
+    await flush()
+    expect(flagsAt(s, T + 120)).toEqual([
+      [true, true],
+      [true, undefined],
+    ])
+    expect(closedAt(s, T + 120)).toEqual([
+      bar(T + 120, 120, 121, 119, 120, 1),
+      bar(T + 120, 120, 121, 119, 120, 1),
+    ])
     s.unsubscribe()
   })
 })
@@ -1158,14 +1306,18 @@ describe('openCoinbaseCandleStream: unseeded bucket with no live trade', () => {
     s.unsubscribe()
   })
 
-  it('a second read-back of it that matches the first is not re-emitted', async () => {
+  it('a second read-back of it that matches the first re-sends the same bar, settled', async () => {
     const s = setup()
     await unseeded(s)
     callsAt(s, T)[0].result.resolve([bar(T, 100, 104, 99, 103, 5)])
     await vi.advanceTimersByTimeAsync(5_000)
     callsAt(s, T)[1].result.resolve([bar(T, 100, 104, 99, 103, 5)])
     await vi.advanceTimersByTimeAsync(10_000)
-    expect(s.candles).toEqual([[bar(T, 100, 104, 99, 103, 5), true]])
+    expect(s.candles).toEqual([
+      [bar(T, 100, 104, 99, 103, 5), true],
+      [bar(T, 100, 104, 99, 103, 5), true],
+    ])
+    expect(s.provisional).toEqual([true, undefined])
     expect(callsAt(s, T)).toHaveLength(2)
     s.unsubscribe()
   })

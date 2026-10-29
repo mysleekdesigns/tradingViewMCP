@@ -112,6 +112,94 @@ describe('sanitizeInputs', () => {
   })
 })
 
+/** Fake event def (like market structure): one numeric input and two on/off toggles. */
+const fakeToggles: IndicatorDef = {
+  id: 'mstructure',
+  name: 'Fake Structure',
+  shortName: 'MS',
+  description: 'test',
+  placement: 'overlay',
+  inputs: [
+    { key: 'left', label: 'Left bars', default: 5, min: 1, max: 50, step: 1, integer: true },
+    {
+      key: 'showSwings',
+      label: 'Swings',
+      default: 1,
+      min: 0,
+      max: 1,
+      step: 1,
+      integer: true,
+      kind: 'toggle',
+    },
+    {
+      key: 'showZones',
+      label: 'Flip zones',
+      default: 0,
+      min: 0,
+      max: 1,
+      step: 1,
+      integer: true,
+      kind: 'toggle',
+    },
+  ],
+  source: null,
+  lines: [],
+  guides: [],
+  createStepper() {
+    const stepper: IndicatorStepper = { next: () => ({}), clone: () => stepper }
+    return stepper
+  },
+  structure: () => ({ swings: [], events: [], zones: [], state: 'none' }),
+}
+
+describe('toggle inputs', () => {
+  const TOGGLE_DEFS = new Map<IndicatorId, IndicatorDef>([['mstructure', fakeToggles]])
+
+  it('keep a stored 0 or 1 exactly', () => {
+    expect(sanitizeInputs(fakeToggles, { left: 7, showSwings: 0, showZones: 1 })).toEqual({
+      left: 7,
+      showSwings: 0,
+      showZones: 1,
+    })
+  })
+  it('fall back to the default for anything but 0 or 1, without rounding or clamping', () => {
+    for (const bad of [0.6, 0.4, 2, -1, 1.0000001, NaN, Infinity, '1', true, null]) {
+      expect(sanitizeInputs(fakeToggles, { showSwings: bad, showZones: bad })).toEqual({
+        left: 5,
+        showSwings: 1,
+        showZones: 0,
+      })
+    }
+  })
+  it('are sanitized the same way when loaded from storage', () => {
+    const raw = [
+      { uid: 'ms-1', type: 'mstructure', inputs: { left: 3, showSwings: 5, showZones: 1 } },
+    ]
+    expect(parseIndicators(raw, TOGGLE_DEFS)[0].inputs).toEqual({
+      left: 3,
+      showSwings: 1,
+      showZones: 1,
+    })
+  })
+  it('an update with 0 / 1 applies; an invalid toggle keeps the current value', () => {
+    const items = [createIndicatorConfig(fakeToggles, [], 'ms')]
+    const off = indicatorsReducer(items, {
+      type: 'update',
+      defs: TOGGLE_DEFS,
+      uid: 'ms',
+      patch: { inputs: { showSwings: 0, showZones: 1 } },
+    })
+    expect(off[0].inputs).toEqual({ left: 5, showSwings: 0, showZones: 1 })
+    const bogus = indicatorsReducer(off, {
+      type: 'update',
+      defs: TOGGLE_DEFS,
+      uid: 'ms',
+      patch: { inputs: { left: 9, showSwings: 0.5, showZones: 2 } },
+    })
+    expect(bogus[0].inputs).toEqual({ left: 9, showSwings: 0, showZones: 1 })
+  })
+})
+
 describe('sanitizeColors', () => {
   it('keeps valid #rrggbb (lower-cased) and defaults the rest per line', () => {
     expect(sanitizeColors(fakeBb, { upper: '#ABCDEF', lower: 'red' })).toEqual({

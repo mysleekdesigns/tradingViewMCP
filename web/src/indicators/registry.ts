@@ -2,6 +2,7 @@ import { anchoredVwapDef } from './anchoredVwap'
 import { bollingerDef } from './bollinger'
 import { emaDef } from './ema'
 import { macdDef } from './macd'
+import { marketStructureDef } from './marketStructure'
 import { rsiDef } from './rsi'
 import { smaDef } from './sma'
 import { stochDef } from './stochastic'
@@ -18,6 +19,7 @@ export const INDICATORS: readonly IndicatorDef[] = [
   vwapDef,
   anchoredVwapDef,
   volumeProfileDef,
+  marketStructureDef,
   volumeMaDef,
   rsiDef,
   macdDef,

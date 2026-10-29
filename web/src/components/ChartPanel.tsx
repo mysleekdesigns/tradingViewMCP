@@ -3,6 +3,7 @@ import type { BacktestChartData, FocusPlan } from '../chart/backtestOverlay'
 import { Chart, type ChartApi } from '../chart/Chart'
 import { CHART_MAX_BARS } from '../chart/conflation'
 import { regimeSourceBars } from '../chart/regimeRibbon'
+import { structureClosedThrough } from '../chart/structureBars'
 import type { CrosshairSync } from '../chart/crosshairSync'
 import type { ChartContextMenuRequest, DrawingStyle, ToolMode } from '../chart/drawings/types'
 import type { ChartAppearance } from '../chart/theme'
@@ -243,6 +244,9 @@ export const ChartPanel = memo(function ChartPanel({
   // What the chart plots: the replay's bars, else the live bars without the no-trade ones.
   const plotted = candlesOverride ?? (load.kind === 'ready' ? load.bars : NO_BARS)
   const hasBars = load.kind === 'ready' && plotted.length > 0
+  // Market structure uses only bars whose final values are confirmed (live: the controller's
+  // closedThrough; replay: the cursor bar, never past it).
+  const closedThrough = structureClosedThrough(live, candlesOverride)
 
   // Labels for every loaded closed bar, no-trade bars included (the lab feature's rows): in
   // replay the bars up to the cursor, live all but the forming last one. The chart draws them
@@ -339,6 +343,7 @@ export const ChartPanel = memo(function ChartPanel({
             derivatives={derivativesEnabled && derivativesOff === null ? derivatives.overlay : null}
             onTimeClick={timeClick}
             replayActive={replaying}
+            closedThrough={closedThrough}
           />
         )}
         {load.kind === 'ready' && plotted.length === 0 && (

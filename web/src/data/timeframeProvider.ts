@@ -32,10 +32,14 @@ export interface CandleSource {
     endTime?: number,
     opts?: { signal?: AbortSignal },
   ): Promise<Candle[]>
+  /**
+   * Same contract as MarketDataProvider.subscribeCandles, `provisional` included: a closed
+   * bar sent with it will be sent closed once more (without it) and is not final until then.
+   */
   subscribeCandles(
     symbol: string,
     tf: Timeframe,
-    onCandle: (c: Candle, closed: boolean) => void,
+    onCandle: (c: Candle, closed: boolean, provisional?: boolean) => void,
     opts?: CandleSubscribeOptions,
   ): () => void
 }
@@ -62,7 +66,7 @@ export interface SecondsSource {
   subscribeCandles(
     symbol: string,
     interval: '1s',
-    onCandle: (c: Candle, closed: boolean) => void,
+    onCandle: (c: Candle, closed: boolean, provisional?: boolean) => void,
     opts?: SubscribeOptions,
   ): () => void
 }
@@ -113,7 +117,7 @@ interface BaseFeed {
   ): Promise<Candle[]>
   subscribe(
     symbol: string,
-    onCandle: (c: Candle, closed: boolean) => void,
+    onCandle: (c: Candle, closed: boolean, provisional?: boolean) => void,
     opts: SubscribeOptions,
   ): () => void
 }
@@ -145,10 +149,16 @@ function unsupported(tf: Timeframe): MarketDataError {
  * subscribeCandles: subscribes to the base stream and emits the aggregated forming bucket on
  * each base update. A bucket the stream did not see from its first base bar (the one forming
  * at subscribe time or after a reconnect) is first seeded over REST; until the seed lands
- * nothing is emitted for it. `closed: true` is emitted at most once per bucket, and only for
- * a bucket built from all its base bars: when its last base bar closes, or, failing that, when
- * the first base bar of a later bucket arrives (after re-seeding the bucket over REST if the
- * stream dropped during it). Status reports pass through unchanged.
+ * nothing is emitted for it. `closed: true` is emitted only for a bucket built from all its
+ * base bars: when its last base bar closes, or, failing that, when the first base bar of a
+ * later bucket arrives (after re-seeding the bucket over REST if the stream dropped during
+ * it). A base tick more than one base bar after the newest one seen (bars skipped without a
+ * reported drop) is handled like a drop: open buckets are re-seeded before they close. A
+ * bucket that closes while one of its base bars is a provisional close (`provisional`, see
+ * MarketDataProvider.subscribeCandles) is emitted closed and provisional, again only if its
+ * values change, and closed without the flag once the base source settles that bar; a
+ * bucket is emitted closed without the flag at most once. Status reports pass through
+ * unchanged.
  *
  * Seed retries are bounded in rate. A failed seed of a forming bucket is retried after
  * SEED_RETRY_DELAYS_MS (SEED_MAX_ATTEMPTS requests), then every seedSlowRetryMs(tf) for as
@@ -331,6 +341,8 @@ function holdSeconds(err: unknown): number {
 interface BaseBar {
   candle: Candle
   closed: boolean
+  /** Closed, but the base source will send it closed once more (it may still change). */
+  provisional: boolean
 }
 
 interface BucketState {
@@ -346,15 +358,31 @@ interface BucketState {
   attempts: number
   /** A later bucket has started: this one is final. */
   superseded: boolean
-  /** `closed: true` was emitted; nothing more is emitted for this bucket. */
+  /** `closed: true` was emitted without the provisional flag; nothing more is emitted. */
   done: boolean
+  /**
+   * The bucket was last emitted closed and provisional, with these values (a provisional base
+   * bar is not settled yet). It is emitted again only when its values or flag change.
+   */
+  provisionalSent: Candle | null
+}
+
+function sameCandle(a: Candle, b: Candle): boolean {
+  return (
+    a.time === b.time &&
+    a.open === b.open &&
+    a.high === b.high &&
+    a.low === b.low &&
+    a.close === b.close &&
+    a.volume === b.volume
+  )
 }
 
 function subscribeAggregated(
   feed: BaseFeed,
   symbol: string,
   tf: Timeframe,
-  onCandle: (c: Candle, closed: boolean) => void,
+  onCandle: (c: Candle, closed: boolean, provisional?: boolean) => void,
   opts: CandleSubscribeOptions | undefined,
   gate: RequestGate,
 ): () => void {
@@ -366,11 +394,15 @@ function subscribeAggregated(
   let current: number | null = null
   /** False until the first tick after subscribe or after a drop. */
   let synced = false
+  /** Open time of the newest base bar seen (null before the first). */
+  let lastBase: number | null = null
   let disposed = false
 
-  const deliver = (c: Candle, closed: boolean): void => {
+  const deliver = (c: Candle, closed: boolean, provisional: boolean): void => {
     try {
-      onCandle(c, closed)
+      // The flag is only passed when set, so a consumer that ignores it sees (c, closed).
+      if (provisional) onCandle(c, closed, true)
+      else onCandle(c, closed)
     } catch (err) {
       console.error('subscribeCandles: onCandle threw', err)
     }
@@ -390,8 +422,15 @@ function subscribeAggregated(
     )
     if (candle === null) return
     const closed = st.superseded || lastBarClosed(st)
-    if (closed) st.done = true
-    deliver(candle, closed)
+    // Closed on a base bar that is not settled yet: closed and provisional, and not done
+    // until the base source's settling send arrives (then once more, unflagged).
+    let provisional = false
+    if (closed) for (const b of st.bars.values()) if (b.provisional) provisional = true
+    if (provisional) {
+      if (st.provisionalSent !== null && sameCandle(st.provisionalSent, candle)) return
+      st.provisionalSent = candle
+    } else if (closed) st.done = true
+    deliver(candle, closed, provisional)
   }
 
   const clearRetry = (st: BucketState): void => {
@@ -453,8 +492,9 @@ function subscribeAggregated(
         for (const r of rows) {
           if (r.time < st.start || r.time > end) continue
           // A closed live bar is final; otherwise REST is at least as authoritative.
+          // A provisional close is left for the base source's settling send.
           if (st.bars.get(r.time)?.closed === true) continue
-          st.bars.set(r.time, { candle: r, closed: r.time < newestRest })
+          st.bars.set(r.time, { candle: r, closed: r.time < newestRest, provisional: false })
         }
         st.complete = true
         emit(st)
@@ -496,8 +536,31 @@ function subscribeAggregated(
     prune()
   }
 
-  const onBase = (c: Candle, closed: boolean): void => {
+  /**
+   * A base tick skipped base bars (a silent reconnect that keeps the status 'live', or a base
+   * interval with no update): the open buckets may miss them, as after a drop. None is closed
+   * from what was seen, and a bucket entered mid-way is not complete: they are seeded over
+   * REST first (an ended one whose seed fails goes to onRepair). Unlike a drop, the attempt
+   * budget is kept; only a seed sent before the skip is re-sent (it may lack the skipped bars),
+   * and it does not count as an attempt.
+   */
+  const onSkip = (): void => {
+    synced = false
+    for (const st of buckets.values()) {
+      if (st.done) continue
+      st.complete = false
+      if (st.seeding !== null) {
+        st.seeding.abort()
+        st.seeding = null
+        st.attempts -= 1
+      }
+    }
+  }
+
+  const onBase = (c: Candle, closed: boolean, provisional = false): void => {
     if (disposed) return
+    if (synced && lastBase !== null && c.time > lastBase + feed.seconds) onSkip()
+    if (lastBase === null || c.time > lastBase) lastBase = c.time
     const start = bucketStart(c.time, tf)
     let st = buckets.get(start)
     if (st === undefined) {
@@ -513,11 +576,12 @@ function subscribeAggregated(
         attempts: 0,
         superseded: false,
         done: false,
+        provisionalSent: null,
       }
       buckets.set(start, st)
     }
     if (st.done) return
-    st.bars.set(c.time, { candle: c, closed })
+    st.bars.set(c.time, { candle: c, closed, provisional: closed && provisional })
     if (!synced) {
       synced = true
       // Base updates are cumulative, so a bucket entered at its first base bar is complete;

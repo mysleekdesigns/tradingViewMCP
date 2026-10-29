@@ -44,7 +44,7 @@ interface Call {
 
 interface Sub {
   interval: string
-  onCandle: (c: Candle, closed: boolean) => void
+  onCandle: (c: Candle, closed: boolean, provisional?: boolean) => void
   onStatus?: (s: ConnectionStatus) => void
   unsubscribed: boolean
 }
@@ -72,7 +72,7 @@ class FakeBase implements MarketDataProvider {
   subscribeCandles(
     _symbol: string,
     interval: Interval,
-    onCandle: (c: Candle, closed: boolean) => void,
+    onCandle: (c: Candle, closed: boolean, provisional?: boolean) => void,
     opts?: SubscribeOptions,
   ): () => void {
     const sub: Sub = { interval, onCandle, onStatus: opts?.onStatus, unsubscribed: false }
@@ -371,9 +371,11 @@ describe('createTimeframeProvider: subscribeCandles', () => {
 
   it('closes a bucket when a later bucket starts if its last bar never closed', () => {
     tick(bar(B, 10))
+    tick(bar(B + M, 10.5))
     tick(bar(B + 2 * M, 11))
     tick(bar(B + 3 * M, 12))
     expect(emitted.map(([c, closed]) => [c.time, closed])).toEqual([
+      [B, false],
       [B, false],
       [B, false],
       [B, true],
@@ -689,6 +691,7 @@ describe('createTimeframeProvider: subscribeCandles', () => {
 
   it('no look-ahead: base bars after a closed bucket never re-emit or change it', () => {
     tick(bar(B, 10))
+    tick(bar(B + M, 10.5))
     tick(bar(B + 2 * M, 11), true)
     const closedB = emitted.find(([c, closed]) => c.time === B && closed)![0]
     for (let k = 3; k < 9; k++) tick(bar(B + k * M, 1_000 * k, 99), k % 3 === 2)
@@ -924,5 +927,146 @@ describe('createTimeframeProvider: shared rate-limit gate', () => {
     const held = (await rejection(p.getCandles('BTCUSDT', '1h', 500))) as MarketDataError
     expect(held.kind).toBe('rate-limited')
     expect(base.calls).toHaveLength(2)
+  })
+})
+
+/**
+ * 3m over 1m, where the base stream skips base bars without reporting a drop (Binance's
+ * idle-stale reconnect keeps 'live'), and where the base source sends provisional closes
+ * (Coinbase's pending second read-back).
+ */
+describe('createTimeframeProvider: skipped base bars and provisional base closes', () => {
+  let base: FakeBase
+  /** [candle, closed, provisional flag as passed] per emission. */
+  let emitted: [Candle, boolean, boolean | undefined][]
+  let repairs: number[]
+  let seeds: { call: Call; resolve: (c: Candle[]) => void; reject: (e: unknown) => void }[]
+  let unsubscribe: () => void
+
+  const tick = (c: Candle, closed = false) => base.subs[0].onCandle(c, closed)
+  const provisionalClose = (c: Candle) => base.subs[0].onCandle(c, true, true)
+  const closesOf = (time: number) => emitted.filter(([c, closed]) => c.time === time && closed)
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    base = new FakeBase()
+    seeds = []
+    base.handler = (call) =>
+      new Promise((resolve, reject) => {
+        seeds.push({ call, resolve, reject })
+        call.signal?.addEventListener('abort', () =>
+          reject(new MarketDataError('aborted', 'cancelled')),
+        )
+      })
+    emitted = []
+    repairs = []
+    unsubscribe = createTimeframeProvider(base).subscribeCandles(
+      'BTCUSDT',
+      '3m',
+      (c, closed, provisional) => emitted.push([c, closed, provisional]),
+      { onRepair: (t) => repairs.push(t) },
+    )
+  })
+
+  afterEach(() => {
+    unsubscribe()
+    vi.useRealTimers()
+  })
+
+  // P5: B and B+1m seen from the bucket's start, B+2m (high 150) and B+3m missed, then B+4m.
+  const seenThenSkipped = () => {
+    tick(bar(B, 100), true)
+    tick(bar(B + M, 101), true) // bar(): high = close + 1, so B's live high is 102
+    tick(bar(B + 4 * M, 120))
+  }
+
+  it('P5: a skip never closes a bucket from the bars seen; it is seeded first', async () => {
+    seenThenSkipped()
+    // Before the fix B was emitted closed at once with high 102 (B+2m missing).
+    expect(closesOf(B)).toEqual([])
+    // B+3m was entered at B+4m: not complete, not emitted until seeded.
+    expect(emitted.some(([c]) => c.time === B + 3 * M)).toBe(false)
+    expect(seeds.map((x) => x.call.endTime).sort()).toEqual([B + 3 * M - 1, B + 6 * M - 1])
+    const seedB = seeds.find((x) => x.call.endTime === B + 3 * M - 1)!
+    seedB.resolve([bar(B, 100), bar(B + M, 101), bar(B + 2 * M, 149)])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(closesOf(B).map(([c]) => c.high)).toEqual([150])
+    expect(repairs).toEqual([])
+  })
+
+  it('P5: a failed seed of the skipped bucket goes to onRepair and is never closed', async () => {
+    seenThenSkipped()
+    const seedB = seeds.find((x) => x.call.endTime === B + 3 * M - 1)!
+    seedB.reject(new MarketDataError('network', 'down'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(repairs).toEqual([B])
+    expect(closesOf(B)).toEqual([])
+  })
+
+  it('a skip re-sends a seed that was in flight (it may lack the skipped bars), not counted', async () => {
+    tick(bar(B + M, 10)) // entered mid-way: seed
+    expect(seeds).toHaveLength(1)
+    tick(bar(B + 4 * M, 30)) // skips B+2m and B+3m
+    expect(seeds[0].call.signal?.aborted).toBe(true)
+    // B (now ended) gets a fresh request instead of going to repair; B+3m is seeded too.
+    const forB = seeds.filter((x) => x.call.endTime === B + 3 * M - 1)
+    expect(forB).toHaveLength(2)
+    expect(repairs).toEqual([])
+    forB[1].resolve([bar(B, 5), bar(B + M, 10), bar(B + 2 * M, 12)])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(closesOf(B).map(([c]) => c.close)).toEqual([12])
+  })
+
+  it('consecutive base bars are not a skip: no seed, the bucket closes on its last bar', () => {
+    tick(bar(B, 100), true)
+    tick(bar(B + M, 101), true)
+    tick(bar(B + 2 * M, 102), true)
+    expect(seeds).toHaveLength(0)
+    expect(closesOf(B)).toHaveLength(1)
+  })
+
+  it('a bucket closing on a provisional last base bar is closed+provisional until it settles', () => {
+    tick(bar(B, 100), true)
+    tick(bar(B + M, 101), true)
+    provisionalClose(bar(B + 2 * M, 102))
+    expect(closesOf(B).map(([c, , p]) => [c.close, p])).toEqual([[102, true]])
+    // The next bucket opens (B superseded): same values, nothing re-sent for B.
+    tick(bar(B + 3 * M, 110))
+    tick(bar(B + 3 * M, 111))
+    expect(closesOf(B)).toHaveLength(1)
+    // The settling send (corrected) closes B once more, without the flag.
+    tick(bar(B + 2 * M, 99), true)
+    expect(closesOf(B).map(([c, , p]) => [c.close, c.low, p])).toEqual([
+      [102, 99, true],
+      [99, 98, undefined],
+    ])
+    // Settled: later sends for B are ignored.
+    tick(bar(B + 2 * M, 50), true)
+    expect(closesOf(B)).toHaveLength(2)
+    expect(emitted.every(([, closed, p]) => closed || p === undefined)).toBe(true)
+  })
+
+  it('a bucket superseded while an earlier base bar is provisional waits for that bar', () => {
+    tick(bar(B, 100), true)
+    provisionalClose(bar(B + M, 101))
+    tick(bar(B + 2 * M, 102)) // never closed
+    tick(bar(B + 3 * M, 110)) // supersedes B
+    expect(closesOf(B).map(([c, , p]) => [c.close, p])).toEqual([[102, true]])
+    tick(bar(B + M, 103), true) // settles B+1m: high 104
+    expect(closesOf(B).map(([c, , p]) => [c.high, p])).toEqual([
+      [103, true],
+      [104, undefined],
+    ])
+  })
+
+  it('a settled base bar that leaves the bucket unchanged still sends the unflagged close', () => {
+    tick(bar(B, 100), true)
+    tick(bar(B + M, 101), true)
+    provisionalClose(bar(B + 2 * M, 102))
+    tick(bar(B + 2 * M, 102), true)
+    expect(closesOf(B).map(([c, , p]) => [c.close, p])).toEqual([
+      [102, true],
+      [102, undefined],
+    ])
   })
 })

@@ -2,7 +2,17 @@ import type { Candle } from '../types'
 
 /** Every indicator the registry knows. */
 export type IndicatorId =
-  'sma' | 'ema' | 'bb' | 'vwap' | 'avwap' | 'vprofile' | 'volma' | 'rsi' | 'macd' | 'stoch'
+  | 'sma'
+  | 'ema'
+  | 'bb'
+  | 'vwap'
+  | 'avwap'
+  | 'vprofile'
+  | 'mstructure'
+  | 'volma'
+  | 'rsi'
+  | 'macd'
+  | 'stoch'
 
 /**
  * Where an indicator draws:
@@ -29,9 +39,10 @@ export interface InputDef {
   integer: boolean
   /**
    * 'time': a bar open time in UNIX seconds, edited as a UTC date and time; 0 means "not set".
+   * 'toggle': an on/off switch stored as 1 / 0 (integer, min 0, max 1), edited as a checkbox.
    * Omitted = 'number'.
    */
-  kind?: 'number' | 'time'
+  kind?: 'number' | 'time' | 'toggle'
 }
 
 export interface LineDef {
@@ -89,6 +100,73 @@ export interface IndicatorDef {
    * not set or holds no volume.
    */
   profile?(candles: readonly Candle[], inputs: IndicatorInputs): VolumeProfile | null
+  /**
+   * Event indicators (market structure): swings, BOS/ChoCh events and flip zones, drawn by
+   * markers and a primitive instead of per-bar lines (`lines` is empty, the stepper returns {}).
+   * `closed` holds closed bars only (never the forming bar), ascending. Everything dated at bar t
+   * uses only bars <= t.
+   */
+  structure?(closed: readonly Candle[], inputs: IndicatorInputs): MarketStructure
+}
+
+/** Trend state from closes through confirmed swings; 'none' until the first break. */
+export type StructureState = 'none' | 'up' | 'down'
+
+/** A confirmed fractal pivot. Known only from `confirmTime` (pivot bar + `right` bars). */
+export interface SwingPoint {
+  kind: 'high' | 'low'
+  /** Open time (UNIX s) of the pivot bar. */
+  pivotTime: number
+  /** Open time of the bar whose close confirms it (`right` bars after the pivot). */
+  confirmTime: number
+  /** The pivot bar's high (kind 'high') or low (kind 'low'). */
+  price: number
+  /** Open time of the bar whose close broke it, or null while unbroken. */
+  brokenTime: number | null
+}
+
+/** A close through the last confirmed swing. */
+export interface StructureEvent {
+  /** 'bos' continues the structure (or starts it from 'none'); 'choch' flips it. */
+  kind: 'bos' | 'choch'
+  /** 'up' = close above a swing high, 'down' = close below a swing low. */
+  direction: 'up' | 'down'
+  /** Open time of the breaking bar (the bar whose close went through `level`). */
+  time: number
+  /** The broken swing's price. */
+  level: number
+  /** Pivot time of the broken swing. */
+  swingPivotTime: number
+}
+
+/** A broken swing turned into a zone: broken high -> support, broken low -> resistance. */
+export interface FlipZone {
+  side: 'support' | 'resistance'
+  /** Band edges: the pivot bar's wick extreme and its body edge on that side. top >= bottom. */
+  top: number
+  bottom: number
+  /** Pivot time of the swing the zone comes from. */
+  pivotTime: number
+  /** Open time of the breaking bar (the zone exists from its close). */
+  createdTime: number
+  /** Open time of the first later bar that traded into the zone, or null. */
+  retestTime: number | null
+  /** Open time of the bar that ended the zone, or null while active. */
+  endTime: number | null
+  /** 'invalidated': a close through the far side; 'dropped': pushed out by `maxZones`. */
+  endReason: 'invalidated' | 'dropped' | null
+}
+
+/** Market structure over a run of closed bars. Arrays are ascending by their main time. */
+export interface MarketStructure {
+  /** By confirmTime. */
+  swings: SwingPoint[]
+  /** By time. */
+  events: StructureEvent[]
+  /** By createdTime. */
+  zones: FlipZone[]
+  /** Structure after the last processed bar. */
+  state: StructureState
 }
 
 /** One price bucket of a volume profile; `low` inclusive, `high` exclusive (the top row inclusive). */

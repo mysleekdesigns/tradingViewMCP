@@ -199,6 +199,8 @@ export function indicatorTitle(
 ): string {
   const parts = [def.shortName]
   for (const input of def.inputs) {
+    // On/off toggles (market structure "Show" parts) are not part of the title.
+    if (input.kind === 'toggle') continue
     const v = config.inputs[input.key] ?? input.default
     if (input.kind === 'time') {
       if (Number.isFinite(v) && v > 0) parts.push(formatTimeInput(v))
@@ -209,6 +211,13 @@ export function indicatorTitle(
   if (def.source !== null) parts.push(config.source)
   return parts.join(' ')
 }
+
+/**
+ * Legend tooltip for event indicators (market structure): a drawing aid, not a signal, and never
+ * back-dated (a swing or event shows only once the bar that confirms it has closed).
+ */
+export const MARKET_STRUCTURE_HINT =
+  'Visual only, no edge claim. Swings and events appear only after the bar that confirms them closes'
 
 export const ANCHOR_NOT_SET_NOTE = 'Set the anchor in Settings'
 export const ANCHOR_NOT_LOADED_NOTE =
@@ -290,7 +299,7 @@ export interface IndicatorLegendRow {
   values: IndicatorLegendValue[]
   /** Why the indicator draws nothing (anchor not set / not loaded); shown inside the row. */
   note?: string
-  /** Tooltip for the row (range indicators: the hindsight caveat). */
+  /** Tooltip for the row (range indicators: the hindsight caveat; market structure: visual only). */
   hint?: string
 }
 
@@ -330,6 +339,7 @@ export function buildLegendRow(
   const note = anchorNote(def, config, firstTime)
   if (note !== undefined) row.note = note
   if (def.profile !== undefined) row.hint = VOLUME_PROFILE_HINDSIGHT
+  else if (def.structure !== undefined) row.hint = MARKET_STRUCTURE_HINT
   return row
 }
 

@@ -10,6 +10,7 @@ const IDS = [
   'vwap',
   'avwap',
   'vprofile',
+  'mstructure',
   'volma',
   'rsi',
   'macd',
@@ -51,6 +52,7 @@ describe('indicator registry', () => {
       vwap: 'overlay',
       avwap: 'overlay',
       vprofile: 'overlay',
+      mstructure: 'overlay',
       volma: 'volume',
       rsi: 'pane',
       macd: 'pane',
@@ -82,9 +84,9 @@ describe('indicator registry', () => {
     }
   })
 
-  it('range indicators have no lines; every other indicator has at least one', () => {
+  it('range and event indicators have no lines; every other indicator has at least one', () => {
     for (const def of INDICATORS) {
-      if (def.profile) expect(def.lines).toEqual([])
+      if (def.profile || def.structure) expect(def.lines).toEqual([])
       else expect(def.lines.length).toBeGreaterThan(0)
     }
   })
@@ -126,6 +128,36 @@ describe('indicator registry', () => {
       expect(p.rows.length).toBe(inputs.rows)
       for (const v of [p.poc, p.vah, p.val, p.totalVolume]) expect(Number.isFinite(v)).toBe(true)
       expect(p.totalVolume).toBeGreaterThan(0)
+    }
+  })
+
+  it('registers market structure as an event indicator with no per-bar lines', () => {
+    const def = getIndicatorDef('mstructure')
+    expect(def).toBeDefined()
+    if (def === undefined) return
+    expect(def.name).toBe('Market Structure')
+    expect(def.shortName).toBe('MS')
+    expect(def.placement).toBe('overlay')
+    expect(def.lines).toEqual([])
+    expect(def.profile).toBeUndefined()
+    expect(typeof def.structure).toBe('function')
+    expect(INDICATORS.filter((d) => d.structure).map((d) => d.id)).toEqual(['mstructure'])
+    const r = def.structure?.(candles(200), defaultInputs(def))
+    expect(r).toBeDefined()
+    expect(r?.swings.length).toBeGreaterThan(0)
+    for (const s of r?.swings ?? []) expect(Number.isFinite(s.price)).toBe(true)
+  })
+
+  it('toggle inputs are 0 / 1 integers', () => {
+    for (const def of INDICATORS) {
+      for (const input of def.inputs) {
+        if (input.kind !== 'toggle') continue
+        expect(input.min).toBe(0)
+        expect(input.max).toBe(1)
+        expect(input.step).toBe(1)
+        expect(input.integer).toBe(true)
+        expect([0, 1]).toContain(input.default)
+      }
     }
   })
 })

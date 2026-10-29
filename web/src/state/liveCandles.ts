@@ -43,6 +43,28 @@ export interface LiveCandlesSnapshot {
   historyExhausted: boolean
   /** An older page failed recently; loadOlder is a no-op until the short cooldown ends. */
   olderCooldown: boolean
+  /**
+   * Open time of the latest bar of `load.candles` (raw bars) such that it and every bar
+   * before it has FINAL values, or null (not ready, no bars, or the first bar is not final).
+   * A bar is final when its values on screen came from a closed (x: true) tick, from a REST
+   * row that was not the newest row of its response, from an older-history page, or from the
+   * newest REST row of a response when the bar was already final before it landed. It is not
+   * final while its values came from a still-forming tick (x: false) or from the newest REST
+   * row (possibly still forming): the forming bar, and a partial bar left behind by a socket
+   * drop until a gap fill brings its final values. Contiguous: it never passes a bar that is
+   * not final, so a later closed tick cannot move it past a partial bar. A closed tick the
+   * provider marks provisional (Coinbase: a corrected closed bar may follow) is not final
+   * until the provider re-sends the bar closed without that mark. Hole cap: after a socket
+   * drop that needs a gap fill (bars may be missing after the last bar on screen), a tick that
+   * opens a bar more than one interval after the last bar on screen (bars skipped with no drop
+   * reported), or a repair request (an ended bar was never delivered), it stays at or before the last bar before
+   * the possible hole until a REST result requested after the drop lands; ticks for later
+   * bars never move it across the hole. A failed refresh leaves it (and the cap) where it is;
+   * while it is stuck behind a partial bar or a cap, each new bar that opens triggers at most
+   * one recovery gap fill (at most one per bar interval, see `RECOVERY_MIN_SPACING_MS`).
+   * Usually the bar before the forming one.
+   */
+  closedThrough: number | null
 }
 
 export interface LiveCandlesOptions {
@@ -77,6 +99,7 @@ export const initialSnapshot: LiveCandlesSnapshot = {
   loadingOlder: false,
   historyExhausted: false,
   olderCooldown: false,
+  closedThrough: null,
 }
 
 /** User-facing title and message for a failed REST load. */
@@ -157,6 +180,56 @@ function overlapsStart(existing: readonly Candle[], start: number): boolean {
   return existing.some((c) => c.time === start)
 }
 
+/** True when ascending `candles` has a bar opening at `time` (binary search). */
+function hasTime(candles: readonly Candle[], time: number): boolean {
+  const i = lowerBoundTime(candles, time)
+  return i < candles.length && candles[i].time === time
+}
+
+/** First index of ascending `candles` whose time is >= `time` (`candles.length` if none). */
+function lowerBoundTime(candles: readonly Candle[], time: number): number {
+  let lo = 0
+  let hi = candles.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (candles[mid].time < time) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+/** First index of ascending `candles` whose time is > `time` (`candles.length` if none). */
+function upperBoundTime(candles: readonly Candle[], time: number): number {
+  let lo = 0
+  let hi = candles.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (candles[mid].time <= time) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+/**
+ * `closedThrough` for ascending raw `candles` when the bars opening at `unconfirmed` times
+ * (and only those) are not final: the bar before the earliest of them, the last bar when there
+ * are none, null when the first bar is not final or there are no bars. With a hole cap
+ * (`cap`, see `LiveCandlesSnapshot.closedThrough`) it is never later than the last bar at or
+ * before `cap`.
+ */
+export function closedThroughOf(
+  candles: readonly Candle[],
+  unconfirmed: ReadonlySet<number>,
+  cap: number | null = null,
+): number | null {
+  if (candles.length === 0) return null
+  let min = Number.POSITIVE_INFINITY
+  for (const t of unconfirmed) if (t < min) min = t
+  let end = min === Number.POSITIVE_INFINITY ? candles.length : lowerBoundTime(candles, min)
+  if (cap !== null) end = Math.min(end, upperBoundTime(candles, cap))
+  return end === 0 ? null : candles[end - 1].time
+}
+
 /** True when `rawCount` loaded bars reach `maxBars` (never when there is no limit). */
 export function atHistoryLimit(rawCount: number, maxBars: number | undefined): boolean {
   return maxBars !== undefined && rawCount >= maxBars
@@ -193,6 +266,20 @@ type FetchReason = 'initial' | 'reload' | 'gap-fill'
  */
 export const GAP_FILL_RETRY_DELAYS_MS: readonly number[] = [2_000, 4_000, 8_000]
 
+/**
+ * Shortest wall-clock spacing (ms) between two automatic recovery gap fills (see
+ * `LiveCandlesController.maybeRecover`); the bar interval when that is longer.
+ */
+export const RECOVERY_MIN_SPACING_MS = 30_000
+
+/**
+ * Clock-skew allowance (ms) when deciding whether a request in flight was sent after bars a
+ * tick skipped (see `LiveCandlesController.capSkippedBars`): it must have been sent at least
+ * this long after the new bar opened by the local clock, which with the interval itself
+ * leaves `interval + margin` of skew before the last skipped bar could be outside its window.
+ */
+export const SKIP_CLOCK_MARGIN_MS = 2_000
+
 /** Largest page the exchange returns per klines request. */
 export const MAX_PAGE = 1000
 
@@ -210,15 +297,25 @@ export class LiveCandlesController {
   private stopped = false
   private unsubscribe: (() => void) | null = null
   /** In-flight REST request; a newer request aborts and replaces it. */
-  private inflight: { controller: AbortController; token: number; reason: FetchReason } | null =
-    null
+  private inflight: {
+    controller: AbortController
+    token: number
+    reason: FetchReason
+    /** Wall-clock time (ms, `now()`) the request was sent. */
+    startedAt: number
+  } | null = null
   private nextToken = 0
   /**
    * Live ticks received while a REST request is in flight (or before the first success),
    * keyed by bar time so only the newest tick per bar is kept. Re-applied on top of the
    * REST result, so an older REST row never overwrites a newer tick.
    */
-  private pending = new Map<number, Candle>()
+  private pending = new Map<number, { candle: Candle; closed: boolean; provisional: boolean }>()
+  /**
+   * Times of the bars on screen whose values are not final (see `closedThrough`): the
+   * newest REST row and bars last set by an x: false tick. Usually just the forming bar.
+   */
+  private unconfirmed = new Set<number>()
   /** The socket dropped since the last 'live'; the next 'live' triggers a gap fill. */
   private dropped = false
   private retryTimer: ReturnType<typeof setTimeout> | null = null
@@ -251,6 +348,16 @@ export class LiveCandlesController {
    * seen for it. REST rows are authoritative, so a REST apply resets this to null.
    */
   private liveBar: { time: number; closed: boolean } | null = null
+  /**
+   * Hole cap: `closedThrough` is never later than the last bar at or before this time. Set
+   * when bars may be missing after it (a drop that needs a gap fill, a repair request);
+   * cleared by a successful REST result with a token above `holeCapToken`.
+   */
+  private holeCap: number | null = null
+  /** `nextToken` when the cap was last set: only a request started after that clears it. */
+  private holeCapToken = 0
+  /** Wall-clock time (ms) of the last automatic recovery gap fill. */
+  private lastRecoveryAt: number | null = null
 
   constructor(opts: LiveCandlesOptions, listener: LiveCandlesListener) {
     this.opts = opts
@@ -272,10 +379,10 @@ export class LiveCandlesController {
       this.unsubscribe = provider.subscribeCandles(
         symbol,
         interval,
-        (c, closed) => this.onCandle(c, closed),
+        (c, closed, provisional?: boolean) => this.onCandle(c, closed, provisional === true),
         {
           onStatus: (status) => this.onStatus(status),
-          onRepair: () => this.onRepair(),
+          onRepair: (time) => this.onRepair(time),
         },
       )
     } catch {
@@ -416,6 +523,8 @@ export class LiveCandlesController {
     this.resetOlderCooldown()
     this.pendingGapFill = false
     this.pending.clear()
+    this.unconfirmed.clear()
+    this.holeCap = null
   }
 
   private resetOlderCooldown(): void {
@@ -453,21 +562,64 @@ export class LiveCandlesController {
   }
 
   private update(patch: Partial<LiveCandlesSnapshot>): void {
-    this.emit({ ...this.snapshot, ...patch })
+    const next = { ...this.snapshot, ...patch }
+    next.closedThrough = this.closedThroughFor(next.load)
+    this.emit(next)
   }
 
-  private onCandle(c: Candle, closed = false): void {
+  private closedThroughFor(load: LoadState): number | null {
+    return load.kind === 'ready'
+      ? closedThroughOf(load.candles, this.unconfirmed, this.holeCap)
+      : null
+  }
+
+  /**
+   * Bars after `cap` may be missing: hold `closedThrough` at or before it until a REST result
+   * requested from now on lands (the lowest active cap wins).
+   */
+  private setHoleCap(cap: number): void {
+    if (this.holeCap === null || cap < this.holeCap) this.holeCap = cap
+    this.holeCapToken = this.nextToken
+  }
+
+  /**
+   * Record what tick `time` (already applied to `candles`) says about that bar: a closed tick
+   * makes it final unless the provider marked it provisional; a forming or provisional one
+   * makes it not final (only if the bar is on screen: a tick older than everything loaded is
+   * dropped).
+   */
+  private noteTick(
+    candles: readonly Candle[],
+    time: number,
+    closed: boolean,
+    provisional: boolean,
+  ): void {
+    if (closed && !provisional) this.unconfirmed.delete(time)
+    else if (hasTime(candles, time)) this.unconfirmed.add(time)
+  }
+
+  private onCandle(c: Candle, closed = false, provisional = false): void {
     if (this.stopped) return
     this.lastTickAt = this.now()
     const { load } = this.snapshot
     if (load.kind !== 'ready') {
-      this.pending.set(c.time, c)
+      this.pending.set(c.time, { candle: c, closed, provisional })
       return
     }
+    // Cap before any request this tick starts, so that request counts as starting after it.
+    const skipped = this.capSkippedBars(load.candles, c)
+    // A provisional close is still a close: the provider settles the bar itself.
     this.trackRollover(load.candles, c, closed)
-    if (this.inflight !== null) this.pending.set(c.time, c)
+    if (skipped) this.fillSkippedBars()
+    this.maybeRecover(load.candles, c)
+    if (this.inflight !== null) this.pending.set(c.time, { candle: c, closed, provisional })
     const candles = applyLiveCandle(load.candles, c)
-    if (candles === load.candles) return
+    this.noteTick(candles, c.time, closed, provisional)
+    if (candles === load.candles) {
+      // Same values, but a closed tick can still make the bar final.
+      if (this.closedThroughFor(load) !== this.snapshot.closedThrough) this.update({})
+      return
+    }
     this.update({ load: this.ready(candles), lastUpdate: this.now() })
   }
 
@@ -483,18 +635,28 @@ export class LiveCandlesController {
     if (load.kind === 'ready') {
       if (this.noBarMissed(load.candles)) return
 
+      // Bars after the last one on screen may be missing until a gap fill lands.
+      const n = load.candles.length
+      this.setHoleCap(n > 0 ? load.candles[n - 1].time : Number.NEGATIVE_INFINITY)
       this.gapFillRetries = 0
       this.requestGapFill()
+      if (this.closedThroughFor(load) !== this.snapshot.closedThrough) this.update({})
     } else if (load.kind === 'error' && !this.snapshot.retryBlocked) this.fetch('reload')
   }
 
   /**
    * The source will never deliver an ended bar in full (an aggregated timeframe gave up
    * seeding it), so repair it over REST. Before the first load the in-flight load covers it.
-   * A request already in flight is not aborted: one gap fill is queued behind it.
+   * A request already in flight is not aborted: one gap fill is queued behind it. Until a
+   * request started after this one lands, `closedThrough` stays before bar `time` (it may be
+   * missing on screen, so later bars must not be joined across it).
    */
-  private onRepair(): void {
-    if (this.stopped || this.snapshot.load.kind !== 'ready') return
+  private onRepair(time: number): void {
+    if (this.stopped) return
+    const { load } = this.snapshot
+    if (load.kind !== 'ready') return
+    this.setHoleCap(time - 1)
+    if (this.closedThroughFor(load) !== this.snapshot.closedThrough) this.update({})
     if (this.inflight !== null) {
       this.repairPending = true
       return
@@ -525,6 +687,91 @@ export class LiveCandlesController {
   }
 
   /**
+   * A tick opened a bar more than one interval after the last bar on screen: whole bars were
+   * missed with no drop reported (Binance's idle-stale reconnect keeps the status 'live'), or
+   * an interval had no kline. Cap `closedThrough` at the last bar on screen until a REST
+   * result requested from now on lands (it also settles an interval without trades: REST
+   * has its zero-volume row). Returns true when it set the cap.
+   */
+  private capSkippedBars(candles: readonly Candle[], c: Candle): boolean {
+    if (candles.length === 0) return false
+    const lastTime = candles[candles.length - 1].time
+    if (c.time <= lastTime + timeframeSeconds(this.opts.interval)) return false
+    const inf = this.inflight
+    if (
+      inf !== null &&
+      inf.token > this.holeCapToken &&
+      inf.startedAt >= c.time * 1000 + SKIP_CLOCK_MARGIN_MS
+    ) {
+      // The request in flight was sent after every skipped bar opened (the last one opened at
+      // or before c.time - interval), so its window holds them: as ended rows, or as its
+      // newest row, which stays not final. It lifts the cap; nothing more is needed.
+      if (this.holeCap === null || lastTime < this.holeCap) this.holeCap = lastTime
+      return false
+    }
+    this.setHoleCap(lastTime)
+    return true
+  }
+
+  /**
+   * One gap fill for the bars `capSkippedBars` found missing, without automatic retries (a
+   * failure leaves the cap; `maybeRecover` tries again on a later bar). A request in flight
+   * started before the cap: one gap fill is queued behind it. Nothing new when a request
+   * started after the cap already runs this tick or a retry is due (either covers the cap),
+   * and during a Retry-After block it waits for the block to end. Automatic fills are at
+   * least RECOVERY_MIN_SPACING_MS apart; a skip inside that wait is left to `maybeRecover`.
+   */
+  private fillSkippedBars(): void {
+    if (this.inflight !== null) {
+      if (this.inflight.token <= this.holeCapToken) this.repairPending = true
+      return
+    }
+    if (this.gapRetryTimer !== null || this.pendingGapFill) return
+    const nowMs = this.now()
+    if (this.lastRecoveryAt !== null && nowMs - this.lastRecoveryAt < RECOVERY_MIN_SPACING_MS)
+      return
+    this.lastRecoveryAt = nowMs
+    this.gapFillRetries = GAP_FILL_RETRY_DELAYS_MS.length
+    if (this.snapshot.retryBlocked) {
+      this.pendingGapFill = true
+      return
+    }
+    this.fetch('gap-fill', true)
+  }
+
+  /**
+   * Automatic recovery: a tick opened a new bar while `closedThrough` is stuck behind a bar
+   * that is not final and is older than the previous last bar (a failed or missed repair,
+   * e.g. after the gap-fill retries gave up, or a missed x:true right after a REST apply), or
+   * behind an active hole cap, and no request is in flight, scheduled, queued or blocked by
+   * Retry-After. Runs one gap fill without automatic retries (the next bar tries again), at
+   * most once per bar interval and RECOVERY_MIN_SPACING_MS of wall-clock time.
+   */
+  private maybeRecover(candles: readonly Candle[], c: Candle): void {
+    if (candles.length === 0) return
+    const lastTime = candles[candles.length - 1].time
+    if (c.time <= lastTime) return
+    if (
+      this.inflight !== null ||
+      this.gapRetryTimer !== null ||
+      this.pendingGapFill ||
+      this.repairPending ||
+      this.snapshot.retryBlocked
+    )
+      return
+    let stuck = this.holeCap !== null
+    if (!stuck) for (const t of this.unconfirmed) if (t < lastTime) stuck = true
+    if (!stuck) return
+    const nowMs = this.now()
+    const spacing = Math.max(timeframeSeconds(this.opts.interval) * 1000, RECOVERY_MIN_SPACING_MS)
+    if (this.lastRecoveryAt !== null && nowMs - this.lastRecoveryAt < spacing) return
+    this.lastRecoveryAt = nowMs
+    // Retries already used up: a failure waits for the next bar instead of backing off.
+    this.gapFillRetries = GAP_FILL_RETRY_DELAYS_MS.length
+    this.fetch('gap-fill', true)
+  }
+
+  /**
    * True when no bar can have been missed during the drop: the last tick was under one
    * interval ago and the bar open now is still the last candle on screen. The next tick
    * carries that bar's cumulative OHLCV, so no REST gap fill is needed.
@@ -551,7 +798,7 @@ export class LiveCandlesController {
     if (reason === 'reload') this.resetOlderCooldown()
     const controller = new AbortController()
     const token = ++this.nextToken
-    this.inflight = { controller, token, reason }
+    this.inflight = { controller, token, reason, startedAt: this.now() }
 
     const ready = this.snapshot.load.kind === 'ready'
     if (ready)
@@ -585,6 +832,20 @@ export class LiveCandlesController {
     this.inflight = null
     this.gapFillRetries = 0
     const { load } = this.snapshot
+    const before = load.kind === 'ready' ? load.candles : []
+    // A bar final on screen stays final when it is the newest row. Either its close was
+    // confirmed before the request was sent (so the row is final too), or its x:true tick
+    // arrived during the request: that tick is in `pending` and is re-applied on top of the
+    // row below, so the final values win either way.
+    let newest = Number.NEGATIVE_INFINITY
+    for (const c of fresh) if (c.time > newest) newest = c.time
+    const newestWasFinal =
+      newest !== Number.NEGATIVE_INFINITY &&
+      hasTime(before, newest) &&
+      !this.unconfirmed.has(newest)
+    // A non-empty window requested after the hole cap was set reaches from before the hole
+    // (or replaces the window) to now: the hole is filled.
+    const capCovered = token > this.holeCapToken && fresh.length > 0
     let candles: readonly Candle[]
     let replaced: boolean
     if (load.kind !== 'ready') {
@@ -594,8 +855,13 @@ export class LiveCandlesController {
       // If the fresh window starts after the older candles on screen without sharing a bar
       // with them, bars may be missing in between (live ticks during the outage only add
       // the newest bars). A clean recent window beats a silent hole: replace, don't merge.
+      // With an active hole cap a window starting after the cap leaves the hole unfilled:
+      // replace as well.
       const disjoint =
-        fresh.length > 0 && load.candles.length > 0 && !overlapsStart(load.candles, fresh[0].time)
+        fresh.length > 0 &&
+        load.candles.length > 0 &&
+        (!overlapsStart(load.candles, fresh[0].time) ||
+          (capCovered && this.holeCap !== null && fresh[0].time > this.holeCap))
       candles = disjoint
         ? fresh
         : keepUnchangedIdentity(load.candles, mergeCandles(load.candles, fresh))
@@ -607,10 +873,19 @@ export class LiveCandlesController {
       this.cancelOlder()
       this.resetOlderCooldown()
     }
+    // Every REST row but the newest is a bar that has ended: final. The newest may be forming.
+    for (const c of fresh) if (c.time !== newest) this.unconfirmed.delete(c.time)
+    if (newest !== Number.NEGATIVE_INFINITY && !newestWasFinal) this.unconfirmed.add(newest)
     // Ticks that arrived during the request are newer than (or as new as) its rows.
-    const ticks = [...this.pending.values()].sort((a, b) => a.time - b.time)
+    const ticks = [...this.pending.values()].sort((a, b) => a.candle.time - b.candle.time)
     this.pending.clear()
-    for (const c of ticks) candles = applyLiveCandle(candles, c)
+    for (const { candle, closed, provisional } of ticks) {
+      candles = applyLiveCandle(candles, candle)
+      this.noteTick(candles, candle.time, closed, provisional)
+    }
+    if (capCovered) this.holeCap = null
+    // A replaced window dropped bars: forget them.
+    for (const t of this.unconfirmed) if (!hasTime(candles, t)) this.unconfirmed.delete(t)
     this.liveBar = null
     this.update({
       load: this.ready(candles),
@@ -631,6 +906,11 @@ export class LiveCandlesController {
     if (!this.isCurrent(token) || this.inflight === null) return
     const { reason } = this.inflight
     this.inflight = null
+    // A queued repair only waits for this request. From here the gap-fill retry below covers
+    // it, or, once retries are used up, the hole cap it set makes `maybeRecover` repair it on
+    // a later bar. Never left set without a request in flight, where it would block recovery.
+    const repairQueued = this.repairPending
+    this.repairPending = false
     const blockFor = retryAfterSeconds(err)
     this.refreshErrorFromOlder = false
     const error = describeError(err, this.opts.symbol, this.opts.source)
@@ -648,17 +928,14 @@ export class LiveCandlesController {
       })
     }
     if (blockFor > 0) this.startRetryBlock(blockFor)
-    if (load.kind !== 'ready') {
-      this.repairPending = false
-      return
-    }
+    if (load.kind !== 'ready') return
     if (reason === 'gap-fill') this.scheduleGapRetry(blockFor > 0)
-    else if (this.repairPending) {
+    else if (repairQueued) {
       // A failed reload: the queued repair runs as a gap-fill retry (backoff, Retry-After).
       this.gapFillRetries = 0
       this.scheduleGapRetry(blockFor > 0)
     }
-    // A failed gap fill's own retry covers a queued repair (fetch() clears it).
+    // A failed gap fill's own retry (when one is left) covers a queued repair.
   }
 
   /**

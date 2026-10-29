@@ -24,16 +24,23 @@ export interface MarketDataProvider {
     opts?: { signal?: AbortSignal },
   ): Promise<Candle[]>
   /**
-   * Live candle updates; `closed` is true once the bar is final. The provider
+   * Live candle updates; `closed` is true once the bar has ended. The provider
    * reconnects by itself (with backoff) and reports state through
    * `opts.onStatus`; after a 'live' that follows 'reconnecting'/'offline' the
    * caller should re-fetch recent candles via `getCandles` to fill the gap.
    * Returns an unsubscribe function that tears everything down (idempotent).
+   *
+   * `provisional` (optional, only ever passed as `true`, only with `closed`): the
+   * provider will send this bar closed once more, possibly with corrected values
+   * (Coinbase's second REST read-back), so its values are not final yet. That later
+   * send carries no flag and settles the bar. Providers whose closes are final
+   * (Binance, the server) never pass it; consumers that only need "the bar ended"
+   * can ignore it and treat a repeated closed bar as a replacement.
    */
   subscribeCandles(
     symbol: string,
     interval: Interval,
-    onCandle: (c: Candle, closed: boolean) => void,
+    onCandle: (c: Candle, closed: boolean, provisional?: boolean) => void,
     opts?: SubscribeOptions,
   ): () => void
   /**

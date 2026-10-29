@@ -20,6 +20,7 @@ import {
   indicatorPriceFormat,
   indicatorTitle,
   IndicatorSeriesManager,
+  MARKET_STRUCTURE_HINT,
   ownsPane,
   paneGuideValues,
   paneIndicatorUids,
@@ -878,5 +879,95 @@ describe('IndicatorSeriesManager with a lineless (range) indicator', () => {
     expect(manager.paneIndexOf('r')).toBe(1)
     expect(manager.paneIndexOf('p')).toBe(0)
     expect(paneIndicatorUids([fakeCfg, cfg('rsi', 'r')], defsWith(def))).toEqual(['r'])
+  })
+})
+
+/* ---------------------------------- event (structure) defs ---------------------------------- */
+
+describe('IndicatorSeriesManager with an event (market structure) indicator', () => {
+  const candles = makeCandles(80)
+  const toggle = (key: string, label: string) => ({
+    key,
+    label,
+    default: 1,
+    min: 0,
+    max: 1,
+    step: 1,
+    integer: true,
+    kind: 'toggle' as const,
+  })
+  // Like market structure: numeric inputs, then toggles; no lines, drawn by markers + a primitive.
+  function structureDef(placement: IndicatorDef['placement']): IndicatorDef {
+    return {
+      id: 'mstructure',
+      name: 'Fake Market Structure',
+      shortName: 'MS',
+      description: 'test event def',
+      placement,
+      inputs: [
+        { key: 'left', label: 'Left bars', default: 5, min: 1, max: 50, step: 1, integer: true },
+        { key: 'right', label: 'Right bars', default: 5, min: 1, max: 50, step: 1, integer: true },
+        toggle('showSwings', 'Swings'),
+        toggle('showBos', 'BOS'),
+      ],
+      source: null,
+      lines: [],
+      guides: [],
+      createStepper() {
+        const stepper = { next: () => ({}), clone: () => stepper }
+        return stepper
+      },
+      structure: () => ({ swings: [], events: [], zones: [], state: 'none' }),
+    }
+  }
+  const msCfg: IndicatorConfig = {
+    ...cfg('ema', 'm'),
+    type: 'mstructure',
+    inputs: { left: 5, right: 3, showSwings: 1, showBos: 0 },
+    colors: {},
+  }
+  function setupWith(extra: IndicatorDef, configs: IndicatorConfig[]) {
+    const chart = new FakeChart()
+    const manager = new IndicatorSeriesManager(new Map([...INDICATOR_BY_ID, [extra.id, extra]]))
+    manager.attach(chart as unknown as IChartApi)
+    manager.applyPlan(planSeriesSync(null, candles), candles)
+    manager.sync(configs, candles)
+    return { chart, manager }
+  }
+
+  it('the legend row carries the visual-only hint; other indicators do not', () => {
+    const row = buildLegendRow(structureDef('overlay'), msCfg, 0, {})
+    expect(row.hint).toBe(MARKET_STRUCTURE_HINT)
+    expect(row.values).toEqual([])
+    expect(row).not.toHaveProperty('note')
+    expect(MARKET_STRUCTURE_HINT).toMatch(/no edge claim/)
+    expect(buildLegendRow(def('ema'), cfg('ema', 'e'), 0, {})).not.toHaveProperty('hint')
+    expect(buildLegendRow(def('vprofile'), cfg('vprofile', 'v'), 0, {}).hint).toBe(
+      VOLUME_PROFILE_HINDSIGHT,
+    )
+  })
+
+  it('the title lists the numeric inputs but not the on/off toggles', () => {
+    expect(indicatorTitle(structureDef('overlay'), msCfg)).toBe('MS 5 3')
+  })
+
+  it('creates no series or pane, on sync, ticks, toggle edits and hide', () => {
+    const { chart, manager } = setupWith(structureDef('overlay'), [msCfg, cfg('rsi', 'r')])
+    expect(chart.all()).toHaveLength(1) // the RSI only
+    expect(chart.panesList).toHaveLength(2) // main + RSI
+    expect(manager.paneIndexOf('m')).toBe(0)
+    expect(manager.paneIndexOf('r')).toBe(1)
+    manager.sync([{ ...msCfg, inputs: { ...msCfg.inputs, showBos: 1 } }], candles)
+    manager.sync([{ ...msCfg, visible: false }], candles)
+    const ticked = [...candles.slice(0, -1), { ...candles[candles.length - 1], close: 1 }]
+    manager.applyPlan(planSeriesSync(candles, ticked), ticked)
+    expect(chart.all()).toHaveLength(0)
+    const rows = manager.legendRows(undefined)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ uid: 'm', pane: 0, values: [], hint: MARKET_STRUCTURE_HINT })
+  })
+
+  it('a pane-placed event def would not take a pane either', () => {
+    expect(ownsPane(structureDef('pane'))).toBe(false)
   })
 })

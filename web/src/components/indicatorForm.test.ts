@@ -7,9 +7,14 @@ import {
   draftErrors,
   draftFromConfig,
   formatTimeLabel,
+  hasStyleTab,
+  inputText,
+  isToggleOn,
   parseDraft,
   parseTimeInputText,
+  splitInputs,
   timeInputText,
+  toggleText,
 } from './indicatorForm'
 
 function def(id: IndicatorId): IndicatorDef {
@@ -308,5 +313,84 @@ describe('time inputs (UTC datetime-local)', () => {
     ).toMatchObject({ to: 'Must be after From' })
     // Indicators without a from/to pair get no cross-field check.
     expect(draftErrors({ ...range, inputs: [ANCHOR] }, draft(later, earlier))).toEqual({})
+  })
+})
+
+describe('toggle inputs (checkboxes stored as 1 / 0)', () => {
+  const toggle = (key: string, label: string, dflt: 0 | 1): InputDef => ({
+    key,
+    label,
+    default: dflt,
+    min: 0,
+    max: 1,
+    step: 1,
+    integer: true,
+    kind: 'toggle',
+  })
+  const SWINGS = toggle('showSwings', 'Swings', 1)
+  const ZONES = toggle('showZones', 'Flip zones', 0)
+  // Like market structure: numbers first, then toggles; no lines (drawn by a primitive).
+  const ms: IndicatorDef = {
+    id: 'mstructure',
+    name: 'Fake Structure',
+    shortName: 'MS',
+    description: 'test',
+    placement: 'overlay',
+    inputs: [SWINGS, LENGTH, ZONES],
+    source: null,
+    lines: [],
+    guides: [],
+    createStepper: () => EMPTY_STEPPER,
+    structure: () => ({ swings: [], events: [], zones: [], state: 'none' }),
+  }
+
+  it('checkInput accepts only the checkbox values "1" and "0"', () => {
+    expect(checkInput(SWINGS, '1')).toEqual({ ok: true, value: 1 })
+    expect(checkInput(SWINGS, '0')).toEqual({ ok: true, value: 0 })
+    for (const bad of ['', '2', '-1', '0.5', '1.0', 'true', 'on', 'x']) {
+      expect(checkInput(SWINGS, bad)).toEqual({ ok: false, error: 'Choose on or off' })
+    }
+  })
+
+  it('field text is "1" / "0"; a stray stored value shows the default', () => {
+    expect(toggleText(SWINGS, 1)).toBe('1')
+    expect(toggleText(SWINGS, 0)).toBe('0')
+    expect(toggleText(SWINGS, 0.5)).toBe('1')
+    expect(toggleText(ZONES, 7)).toBe('0')
+    expect(inputText(ZONES, 1)).toBe('1')
+    expect(isToggleOn('1')).toBe(true)
+    expect(isToggleOn('0')).toBe(false)
+    expect(isToggleOn(undefined)).toBe(false)
+  })
+
+  it('drafts hold "1" / "0" and parseDraft saves 1 / 0', () => {
+    const draft = draftFromConfig(ms, {
+      inputs: { showSwings: 0, period: 30, showZones: 1 },
+      source: 'close',
+      colors: {},
+    })
+    expect(draft.inputs).toEqual({ showSwings: '0', period: '30', showZones: '1' })
+    expect(defaultDraft(ms).inputs).toEqual({ showSwings: '1', period: '20', showZones: '0' })
+    expect(parseDraft(ms, draft)).toEqual({
+      ok: true,
+      value: { inputs: { showSwings: 0, period: 30, showZones: 1 }, source: 'close', colors: {} },
+    })
+    expect(draftErrors(ms, { ...draft, inputs: { ...draft.inputs, showZones: '2' } })).toEqual({
+      showZones: 'Choose on or off',
+    })
+  })
+
+  it('splitInputs puts value fields first and toggles after, each in definition order', () => {
+    const { fields, toggles } = splitInputs(ms)
+    expect(fields.map((i) => i.key)).toEqual(['period'])
+    expect(toggles.map((i) => i.key)).toEqual(['showSwings', 'showZones'])
+    expect(splitInputs(def('bb')).toggles).toEqual([])
+  })
+
+  it('defs without lines get no Style tab; defs with lines keep it', () => {
+    expect(hasStyleTab(ms)).toBe(false)
+    expect(hasStyleTab(def('vprofile'))).toBe(false)
+    expect(hasStyleTab(def('ema'))).toBe(true)
+    expect(hasStyleTab(def('macd'))).toBe(true)
   })
 })

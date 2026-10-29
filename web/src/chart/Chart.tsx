@@ -82,6 +82,8 @@ import { captureChart, composeScreenshot } from './screenshot'
 import { conflationOptions } from './conflation'
 import { resolveHover } from './hover'
 import { VolumeProfileLayer, volumeProfileColorsFor } from './volumeProfileLayer'
+import { MarketStructureLayer, marketStructureColorsFor } from './marketStructureLayer'
+import { SeriesMarkersMux } from './seriesMarkers'
 import {
   attachChartAccessibility,
   isAccessibilityOverlay,
@@ -299,6 +301,14 @@ interface ChartProps {
    * null/undefined removes both. Colours follow `appearance`.
    */
   derivatives?: DerivativesOverlay | null
+  /**
+   * Open time of the latest bar whose final values are confirmed, with every earlier bar final
+   * too (`structureClosedThrough`: the live controller's `closedThrough`, or the replay cursor
+   * bar). The market-structure overlay only uses plotted bars with time <= it, so the forming
+   * bar and a partial bar awaiting a gap fill never create, move or remove anything. Default
+   * null: no bar is known final, so no structure.
+   */
+  closedThrough?: number | null
 }
 
 const NO_INDICATORS: readonly IndicatorConfig[] = []
@@ -368,6 +378,7 @@ export function Chart({
   onTimeClick,
   replayActive = false,
   derivatives = null,
+  closedThrough = null,
 }: ChartProps) {
   // Callers may pass a fresh object per render; only the fields matter.
   const { theme, upColor, downColor, timezone } = appearance
@@ -421,9 +432,25 @@ export function Chart({
   const [drawingController] = useState(() => new DrawingController(coords))
   const [alertLinesManager] = useState(() => new AlertLinesManager(alertLineOptions))
   const drawingsPrimitiveRef = useRef<DrawingsPrimitive | null>(null)
+  /**
+   * One markers primitive per main series, shared by the backtest's trade markers and the
+   * market-structure markers (merged by time, never replacing each other).
+   */
+  const [markersMux] = useState(
+    () =>
+      new SeriesMarkersMux<MainSeries>(
+        (series, markers) => createSeriesMarkers(series, markers),
+        ['backtest', 'structure'],
+      ),
+  )
   /** Backtest trade markers + equity pane; re-attached to each new main series. */
   const [backtestOverlay] = useState(
-    () => new BacktestOverlay<MainSeries>((series) => createSeriesMarkers(series, [])),
+    () => new BacktestOverlay<MainSeries>(() => markersMux.channel('backtest')),
+  )
+  /** Market structure (swings, BOS / ChoCh, flip zones) from closed bars, on the main series. */
+  const [structureLayer] = useState(
+    () =>
+      new MarketStructureLayer(marketStructureColorsFor(palette), markersMux.channel('structure')),
   )
   /** Fixed-range volume profiles (range indicators), drawn on the main series. */
   const [profileLayer] = useState(() => new VolumeProfileLayer(volumeProfileColorsFor(palette)))
@@ -636,14 +663,23 @@ export function Chart({
     series.attachPrimitive(primitive)
     drawingsPrimitiveRef.current = primitive
     alertLinesManager.attach(series)
+    // The mux re-applies the structure markers it holds; the overlay re-sets its own channel.
+    markersMux.attach(series)
     backtestOverlay.attachSeries(series)
     profileLayer.attach(series)
+    structureLayer.attach(series)
     return () => {
       // On unmount the chart may already be removed (with all its series).
       const alive = chartRef.current === chart
       alertLinesManager.detach(alive)
+      // alive: the overlay clears its channel on the live series. Then the mux lets go of the
+      // series, and the backtest channel is emptied in either case (the overlay re-sets it on
+      // the next attachSeries; when the chart is gone it only dropped its handle).
       backtestOverlay.detachSeries(alive)
+      markersMux.detach(alive)
+      markersMux.clear('backtest')
       profileLayer.detach(alive)
+      structureLayer.detach(alive)
       if (alive) series.detachPrimitive(primitive)
       if (drawingsPrimitiveRef.current === primitive) drawingsPrimitiveRef.current = null
       coords.setSeries(null, series)
@@ -652,7 +688,16 @@ export function Chart({
       realLineRef.current = null
       haRef.current = null
     }
-  }, [chartType, coords, drawingController, alertLinesManager, backtestOverlay, profileLayer])
+  }, [
+    chartType,
+    coords,
+    drawingController,
+    alertLinesManager,
+    markersMux,
+    backtestOverlay,
+    profileLayer,
+    structureLayer,
+  ])
 
   // Faint "BTCUSDT, 1h" behind the candles, as on TradingView.
   useEffect(() => {
@@ -776,6 +821,15 @@ export function Chart({
     profileLayer.sync(indicators, appliedRef.current)
   }, [indicators, candles, profileLayer])
 
+  // Market structure follows the configs and the plotted (real, never Heikin-Ashi) bars. Only
+  // bars at or before `closedThrough` (final values confirmed) are pushed, so a tick on the
+  // forming bar pushes nothing and changes nothing; it costs one O(n) pointer scan per distinct
+  // previous bars array (the pushed prefix is checked by identity). Declared after the data
+  // effect (appliedRef current).
+  useEffect(() => {
+    structureLayer.sync(indicators, appliedRef.current, closedThrough)
+  }, [indicators, candles, closedThrough, structureLayer])
+
   // Theme / candle colours / time zone. Everything is recoloured in place (applyOptions, one
   // volume setData), so the chart, its series, drawings, indicators and the view all survive.
   // Runs after the creation and data effects, so on mount it only re-applies the same values.
@@ -798,6 +852,7 @@ export function Chart({
     derivativesPanes.setColors(derivativesColorsFor(palette))
     indicatorManager.setPalette(palette)
     profileLayer.setColors(volumeProfileColorsFor(palette))
+    structureLayer.setColors(marketStructureColorsFor(palette))
   }, [
     palette,
     theme,
@@ -807,6 +862,7 @@ export function Chart({
     indicatorManager,
     derivativesPanes,
     profileLayer,
+    structureLayer,
   ])
 
   // Latest header values for screenshots, read when the user exports (not per render).
