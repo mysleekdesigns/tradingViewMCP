@@ -79,7 +79,7 @@ import {
 } from './derivativesPanes'
 import { RegimeRibbon, regimeColorsFor } from './regimeRibbon'
 import { captureChart, composeScreenshot } from './screenshot'
-import { conflationOptions } from './conflation'
+import { clearCrosshairForSetData, conflationOptions } from './conflation'
 import { resolveHover } from './hover'
 import { VolumeProfileLayer, volumeProfileColorsFor } from './volumeProfileLayer'
 import { MarketStructureLayer, marketStructureColorsFor } from './marketStructureLayer'
@@ -773,6 +773,9 @@ export function Chart({
     pushingRef.current = candles
     try {
       if (plan.kind === 'set' || plan.kind === 'prepend') {
+        // Before any setData: with conflation on, a crosshair hit test between two series'
+        // setData calls crashes LWC 5.2.1 (see clearCrosshairForSetData).
+        clearCrosshairForSetData(chart)
         const timeScale = chart.timeScale()
         const range = plan.kind === 'prepend' ? timeScale.getVisibleLogicalRange() : null
         const { points, ha } = mainSeriesData(type, candles)
@@ -812,7 +815,9 @@ export function Chart({
     backtestOverlay.setBars(candles)
     // A follower cleared because it lacked the hovered bar gets no re-fire from LWC when the bar
     // arrives, so re-show the followed time here (a no-op unless this chart follows another).
-    if (plan.kind !== 'none') syncRefreshRef.current?.()
+    // Deferred past this commit's other effects (regime, derivatives setData): the crosshair
+    // must stay cleared through every setData while conflation is on (clearCrosshairForSetData).
+    if (plan.kind !== 'none') queueMicrotask(() => syncRefreshRef.current?.())
   }, [candles, indicatorManager, coords, backtestOverlay])
 
   // Volume profiles follow the configs and the plotted bars (recomputed only when the bars in a

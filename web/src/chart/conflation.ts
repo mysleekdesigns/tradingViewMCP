@@ -124,3 +124,26 @@ export function sameConflation(a: ConflationOptions, b: ConflationOptions): bool
     a.minBarSpacing === b.minBarSpacing
   )
 }
+
+/** The parts of the chart `clearCrosshairForSetData` uses (an `IChartApi` satisfies it). */
+export interface CrosshairClearTarget {
+  options(): { timeScale: { enableConflation?: boolean } }
+  clearCrosshairPosition(): void
+}
+
+/**
+ * Call before a batch of setData calls that may add bars before the existing ones (older history
+ * prepended, a replaced window). Works around an LWC 5.2.1 crash: with conflation on, a setData
+ * that shifts existing indexes re-indexes every series' rows in place and updates the time scale
+ * (which re-runs the crosshair hit test) before the series' conflated rows are rebuilt. In that
+ * window a histogram (volume, MACD) looks stale conflated indexes up in its own data, which
+ * throws "Value is null" and stops the chart from drawing. This happens inside each such setData,
+ * whatever the order, so the crosshair must stay cleared for the whole batch. Clearing it skips
+ * the hit test; the next frame draws after the batch, and the next mouse move brings the
+ * crosshair back. Returns true when it cleared (conflation on).
+ */
+export function clearCrosshairForSetData(chart: CrosshairClearTarget): boolean {
+  if (chart.options().timeScale.enableConflation !== true) return false
+  chart.clearCrosshairPosition()
+  return true
+}

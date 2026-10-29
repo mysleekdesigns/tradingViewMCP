@@ -8,6 +8,7 @@ import {
   DEFAULT_MIN_BAR_SPACING,
   FIT_WIDTH_PX,
   MIN_BAR_SPACING_FLOOR,
+  clearCrosshairForSetData,
   conflationChartOptions,
   conflationMinBarSpacing,
   conflationOptions,
@@ -155,5 +156,34 @@ describe('sameConflation', () => {
     expect(sameConflation(a, { ...a, precomputeConflationOnInit: false })).toBe(false)
     expect(sameConflation(a, { ...a, precomputeConflationPriority: 'user-visible' })).toBe(false)
     expect(sameConflation(a, { ...a, minBarSpacing: 0.5 })).toBe(false)
+  })
+})
+
+describe('clearCrosshairForSetData', () => {
+  function fakeChart(enableConflation: boolean | undefined) {
+    let clears = 0
+    return {
+      chart: {
+        options: () => ({ timeScale: { enableConflation } }),
+        clearCrosshairPosition: () => {
+          clears += 1
+        },
+      },
+      clears: () => clears,
+    }
+  }
+
+  it('clears the crosshair when conflation is on', () => {
+    const f = fakeChart(true)
+    expect(clearCrosshairForSetData(f.chart)).toBe(true)
+    expect(f.clears()).toBe(1)
+  })
+
+  it('leaves the crosshair alone when conflation is off', () => {
+    for (const on of [false, undefined]) {
+      const f = fakeChart(on)
+      expect(clearCrosshairForSetData(f.chart)).toBe(false)
+      expect(f.clears()).toBe(0)
+    }
   })
 })
