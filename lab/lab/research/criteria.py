@@ -1260,18 +1260,27 @@ def _sweep_for_cpcv(
     return m, None
 
 
-def _startup_trial_ids(ledger: Ledger, m: SweepMatrix) -> tuple[frozenset[int] | None, str]:
+_NO_NUMBER = object()  # sentinel: a row written before the trial number was recorded
+
+
+def _startup_trial_ids(ledger: Ledger, m: SweepMatrix) -> tuple[frozenset[int], set[str]] | str:
     """Ledger ids of ``m``'s studies' trials that TPE drew at random: Optuna trial number below
-    ``TPE_SAMPLER_SETTINGS["n_startup_trials"]`` within each study. ``params_json["_study"]``
-    names the study and its ``n_trials`` but not the trial number, so a trial's number is its
-    position among the study's ledger rows on the sweep window (ok AND error rows: the lab
-    records exactly one row per trial, in trial order, ``study.optimize`` running
-    sequentially), restarting every ``n_trials`` rows (a repeated sweep reuses the study name).
-    Returns ``(ids, "")`` or ``(None, reason)`` when the numbers cannot be identified."""
-    from lab.search.optuna_search import STUDY_KEY, TPE_SAMPLER_SETTINGS  # lazy: imports optuna
+    ``TPE_SAMPLER_SETTINGS["n_startup_trials"]`` within each study. A study whose rows all
+    carry ``params_json["_study"]["trial"]`` (the recorded ``trial.number``) is read directly.
+    A study whose rows carry none (written before the number was recorded) falls back to
+    position: its rows on the sweep window (ok AND error: the lab records exactly one row per
+    trial, in trial order, ``study.optimize`` running sequentially), restarting every
+    ``n_trials`` rows (a repeated sweep reuses the study name). A study mixing both is refused.
+    Returns ``(ids, methods)`` (``methods``: which of ``"recorded"`` / ``"ledger order"``
+    numbered the studies), or the reason the numbers cannot be identified."""
+    from lab.search.optuna_search import (  # lazy: imports optuna
+        STUDY_KEY,
+        TPE_SAMPLER_SETTINGS,
+        TRIAL_NUMBER_KEY,
+    )
 
     n_startup = int(TPE_SAMPLER_SETTINGS["n_startup_trials"])
-    rows: dict[str, list[tuple[int, Any]]] = {}
+    rows: dict[str, list[tuple[int, Any, Any]]] = {}
     for rec in ledger.list(
         run_id=m.run_id, limit=ledger.count(m.run_id), exclude_window_kinds=("holdout",)
     ):
@@ -1285,16 +1294,36 @@ def _startup_trial_ids(ledger: Ledger, m: SweepMatrix) -> tuple[frozenset[int] |
             continue
         meta = params.get(STUDY_KEY) if isinstance(params, dict) else None
         if isinstance(meta, dict) and meta.get("study") in m.studies:
-            rows.setdefault(str(meta["study"]), []).append((rec.id, meta.get("n_trials")))
+            rows.setdefault(str(meta["study"]), []).append(
+                (rec.id, meta.get("n_trials"), meta.get(TRIAL_NUMBER_KEY, _NO_NUMBER))
+            )
     ids: set[int] = set()
+    methods: set[str] = set()
     for name in sorted(m.studies):
         study_rows = sorted(rows.get(name, []))
         if not study_rows:
-            return None, f"study {name} has no Optuna ledger rows on the sweep window"
+            return f"study {name} has no Optuna ledger rows on the sweep window"
+        recorded = [num for _, _, num in study_rows if num is not _NO_NUMBER]
+        if recorded:
+            if len(recorded) != len(study_rows):
+                return (
+                    f"study {name} mixes ledger rows with and without a recorded Optuna trial "
+                    "number, so the random start-up trials cannot be identified"
+                )
+            for trial_id, _, num in study_rows:
+                if isinstance(num, bool) or not isinstance(num, int) or num < 0:
+                    return (
+                        f"study {name} has a ledger row whose recorded Optuna trial number is "
+                        f"not a non-negative integer ({num!r})"
+                    )
+                if num < n_startup:
+                    ids.add(trial_id)
+            methods.add("recorded")
+            continue
         number = 0
-        for trial_id, n_trials in study_rows:
+        for trial_id, n_trials, _ in study_rows:
             if isinstance(n_trials, bool) or not isinstance(n_trials, int) or n_trials < 1:
-                return None, (
+                return (
                     f"study {name}'s ledger rows carry no _study.n_trials, so Optuna trial "
                     "numbers (and the random start-up trials) cannot be identified"
                 )
@@ -1302,12 +1331,13 @@ def _startup_trial_ids(ledger: Ledger, m: SweepMatrix) -> tuple[frozenset[int] |
                 ids.add(trial_id)
             number = (number + 1) % n_trials
         if number != 0:
-            return None, (
+            return (
                 f"study {name} has {len(study_rows)} ledger rows on the sweep window, not whole "
                 "repeats of its n_trials (an interrupted or overlapping sweep), so Optuna trial "
                 "numbers cannot be identified"
             )
-    return frozenset(ids), ""
+        methods.add("ledger order")
+    return frozenset(ids), methods
 
 
 def _cpcv_result(matrix: np.ndarray, interval: str, source: str, basis: str) -> dict[str, Any]:
@@ -1355,25 +1385,51 @@ def _cpcv_blocks(
         f"{CPCV_UPPER_BOUND_BASIS} (TPE proposed them from objective values over the whole "
         "design window, so the out-of-sample paths are not out of the search's sample)",
     )
-    ids, why = _startup_trial_ids(ledger, m)
-    if ids is None:
-        return full, {"missing": why}
-    cols = [j for j, trial_id in enumerate(m.ids) if trial_id in ids]
+    found = _startup_trial_ids(ledger, m)
+    if isinstance(found, str):
+        return full, {"missing": found}
+    ids, methods = found
+    # A rerun of a seeded study redraws the same start-up configurations: identical return
+    # columns are one configuration, so CPCV-startup counts (and compares) each once.
+    seen: set[bytes] = set()
+    cols: list[int] = []
+    n_dupes = 0
+    for j, trial_id in enumerate(m.ids):
+        if trial_id not in ids:
+            continue
+        key = np.ascontiguousarray(m.matrix[:, j]).tobytes()
+        if key in seen:
+            n_dupes += 1
+            continue
+        seen.add(key)
+        cols.append(j)
     from lab.search.optuna_search import TPE_SAMPLER_SETTINGS  # lazy: imports optuna
 
     n_startup = int(TPE_SAMPLER_SETTINGS["n_startup_trials"])
+    dupes = (
+        f" ({n_dupes} more with returns identical to one of these, e.g. a rerun's redraw, "
+        "counted once)"
+        if n_dupes
+        else ""
+    )
     if len(cols) < 2:
         return full, {
-            "missing": f"{len(cols)} usable random start-up trial(s) (Optuna trial number < "
-            f"n_startup_trials = {n_startup}) in the sweep matrix; CPCV needs at least 2"
+            "missing": f"{len(cols)} usable random start-up trial(s) with distinct returns "
+            f"(Optuna trial number < n_startup_trials = {n_startup}){dupes} in the sweep "
+            "matrix; CPCV needs at least 2"
         }
+    numbered = {
+        "recorded": "by the recorded Optuna trial number",
+        "ledger order": "by ledger order (rows from before the trial number was recorded: one "
+        "row per trial, ok and error, sequential)",
+    }
+    how = " / ".join(numbered[k] for k in sorted(methods))
     startup = _cpcv_result(
         m.matrix[:, cols],
         interval,
-        f"{len(cols)} of the {len(m.ids)} design-window Optuna trials above ({interval}, "
-        f"{span}, study(ies) {studies}, run {m.run_id}): those with Optuna trial number < "
-        f"n_startup_trials = {n_startup} within their study, numbered by ledger order (one row "
-        f"per trial, ok and error, sequential). {tail}",
+        f"{len(cols)} of the {len(m.ids)} design-window Optuna trials above{dupes} "
+        f"({interval}, {span}, study(ies) {studies}, run {m.run_id}): those with Optuna trial "
+        f"number < n_startup_trials = {n_startup} within their study, numbered {how}. {tail}",
         "random start-up trials only: TPE drew them from the search space before using any "
         "objective value, so no test bar shaped which configurations are compared",
     )

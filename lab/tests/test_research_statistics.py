@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +80,9 @@ def _plans(
     return base, rets
 
 
+_OMIT = object()  # a ``numbers`` element: this row records no trial number
+
+
 def _sweep_trials(
     ledger: Ledger,
     run_id: str,
@@ -89,10 +93,13 @@ def _sweep_trials(
     *,
     n_trials: int | None = None,
     errors: frozenset[int] = frozenset(),
+    numbers: Sequence[object] | None = None,
 ) -> np.ndarray:
     """``n`` Optuna rows of ``study`` in trial order; ``n_trials`` goes into the ``_study``
     design (None: omitted, as hand-written rows without it); trial numbers in ``errors`` are
-    error rows (they use a number but are not matrix columns). Returns the ok columns."""
+    error rows (they use a number but are not matrix columns); ``numbers[k]`` is row k's
+    recorded ``_study.trial`` (None: no ``numbers``, as rows written before it was recorded;
+    an element ``_OMIT``: that row alone has none). Returns the ok columns."""
     rng = np.random.default_rng(seed)
     cols = []
     for k in range(n):
@@ -101,6 +108,8 @@ def _sweep_trials(
         meta: dict[str, Any] = {"study": study}
         if n_trials is not None:
             meta["n_trials"] = n_trials
+        if numbers is not None and numbers[k] is not _OMIT:
+            meta["trial"] = numbers[k]
         params = json.dumps({"ema_fast.period": 11 + k, "_study": meta})
         status = "error" if k in errors else "ok"
         record_trial(
@@ -290,6 +299,88 @@ def test_cpcv_startup_is_missing_with_fewer_than_two_startup_columns(
     st = evaluate_plan(ledger, run_id, H, cfg)["statistics"]
     assert st["cpcv"]["n_configs"] == 3
     assert "1 usable random start-up trial(s)" in st["cpcv_startup"]["missing"]
+
+
+def test_cpcv_startup_reads_recorded_trial_numbers_across_interrupted_reruns(
+    ledger: Ledger, tmp_path: Path, cfg: LabConfig
+) -> None:
+    """Two interrupted runs of one 12-trial study (7 rows, then 5) sum to one whole repeat,
+    so numbering by row order would call the second run's trials 0-4 numbers 7-11 and drop
+    two of its start-up draws. The recorded numbers (0-6, then 0-4) are all below 10."""
+    run_id = start(ledger, tmp_path)
+    first = _sweep_trials(
+        ledger, run_id, cfg, "S1", 7, seed=31, n_trials=12, numbers=list(range(7))
+    )
+    second = _sweep_trials(
+        ledger, run_id, cfg, "S1", 5, seed=32, n_trials=12, numbers=list(range(5))
+    )
+    record_report(ledger, run_id, H, "sweep", _sweep("S1"))
+    st = evaluate_plan(ledger, run_id, H, cfg)["statistics"]
+    want = cpcv_paths(np.column_stack([first, second]), bars_per_year=BPY)
+    cs = st["cpcv_startup"]
+    assert cs["n_configs"] == 12
+    assert cs["path_sharpes"] == pytest.approx(list(want.path_sharpes))
+    assert "the recorded Optuna trial number" in cs["configs_source"]
+
+
+def test_cpcv_startup_counts_a_reruns_identical_redraws_once(
+    ledger: Ledger, tmp_path: Path, cfg: LabConfig
+) -> None:
+    """A seeded rerun redraws the same start-up configurations (here: identical return
+    columns), so CPCV-startup compares each configuration once; ``cpcv`` keeps every row."""
+    run_id = start(ledger, tmp_path)
+    first = _sweep_trials(
+        ledger, run_id, cfg, "S1", 12, seed=36, n_trials=12, numbers=list(range(12))
+    )
+    _sweep_trials(ledger, run_id, cfg, "S1", 12, seed=36, n_trials=12, numbers=list(range(12)))
+    record_report(ledger, run_id, H, "sweep", _sweep("S1"))
+    st = evaluate_plan(ledger, run_id, H, cfg)["statistics"]
+    want = cpcv_paths(first[:, :10], bars_per_year=BPY)
+    cs = st["cpcv_startup"]
+    assert st["cpcv"]["n_configs"] == 24
+    assert cs["n_configs"] == 10
+    assert cs["path_sharpes"] == pytest.approx(list(want.path_sharpes))
+    assert "10 more with returns identical to one of these" in cs["configs_source"]
+
+
+def test_cpcv_startup_reads_recorded_numbers_beyond_the_startup_draws(
+    ledger: Ledger, tmp_path: Path, cfg: LabConfig
+) -> None:
+    """Recorded numbers decide, not position: one interrupted run (rows numbered 4-13 of a
+    14-trial study, as if 0-3 were never written) has start-up draws 4-9 only."""
+    run_id = start(ledger, tmp_path)
+    matrix = _sweep_trials(
+        ledger, run_id, cfg, "S1", 10, seed=33, n_trials=14, numbers=list(range(4, 14))
+    )
+    record_report(ledger, run_id, H, "sweep", _sweep("S1"))
+    st = evaluate_plan(ledger, run_id, H, cfg)["statistics"]
+    want = cpcv_paths(matrix[:, :6], bars_per_year=BPY)
+    assert st["cpcv_startup"]["n_configs"] == 6
+    assert st["cpcv_startup"]["path_sharpes"] == pytest.approx(list(want.path_sharpes))
+
+
+def test_cpcv_startup_is_missing_when_a_study_mixes_numbered_and_unnumbered_rows(
+    ledger: Ledger, tmp_path: Path, cfg: LabConfig
+) -> None:
+    run_id = start(ledger, tmp_path)
+    numbers: list[object] = [*range(11), _OMIT]
+    _sweep_trials(ledger, run_id, cfg, "S1", 12, seed=34, n_trials=12, numbers=numbers)
+    record_report(ledger, run_id, H, "sweep", _sweep("S1"))
+    st = evaluate_plan(ledger, run_id, H, cfg)["statistics"]
+    assert "missing" not in st["cpcv"]
+    assert "mixes ledger rows with and without" in st["cpcv_startup"]["missing"]
+
+
+@pytest.mark.parametrize("bad", [-1, True, 2.0, "3"])
+def test_cpcv_startup_is_missing_for_a_malformed_recorded_number(
+    ledger: Ledger, tmp_path: Path, cfg: LabConfig, bad: object
+) -> None:
+    run_id = start(ledger, tmp_path)
+    numbers: list[object] = [*range(11), bad]
+    _sweep_trials(ledger, run_id, cfg, "S1", 12, seed=35, n_trials=12, numbers=numbers)
+    record_report(ledger, run_id, H, "sweep", _sweep("S1"))
+    st = evaluate_plan(ledger, run_id, H, cfg)["statistics"]
+    assert "not a non-negative integer" in st["cpcv_startup"]["missing"]
 
 
 def test_minbtl_is_unbounded_for_a_non_positive_sharpe(

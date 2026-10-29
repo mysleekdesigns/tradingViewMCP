@@ -546,10 +546,12 @@ def test_get_report_statistics_block_has_every_part_and_records_nothing(tmp_path
     assert "Optuna trials (4h, 2018-07-01 to 2019-10-01)" in cp["configs_source"]
     assert run_id in cp["configs_source"] and "No new backtests" in cp["configs_source"]
     assert cp["basis"].startswith("upper bound: candidates were chosen by a search")
-    # 8 trials < n_startup_trials = 10: every trial of this sweep was a random start-up draw
+    # 8 trials < n_startup_trials = 10: every trial of this sweep was a random start-up draw;
+    # seed 7 draws ema_fast.period 11 at trials 0 and 7, one configuration counted once
     cs = st["cpcv_startup"]
-    assert "missing" not in cs and cs["n_configs"] == 8
-    assert cs["path_sharpes"] == cp["path_sharpes"]
+    assert "missing" not in cs and cs["n_configs"] == 7
+    assert "1 more with returns identical to one of these" in cs["configs_source"]
+    assert cs["path_sharpes"] == cp["path_sharpes"]  # a tied duplicate never changes the pick
     assert len(rep["rows"]) == 14  # statistics never adds a criterion row
 
 

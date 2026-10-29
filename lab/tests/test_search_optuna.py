@@ -30,6 +30,7 @@ from lab.search import (
     FAILED_OBJECTIVE,
     MIN_TRADES,
     STUDY_KEY,
+    TRIAL_NUMBER_KEY,
     evaluate_on_window,
     optuna_search,
     resolve_space,
@@ -298,6 +299,8 @@ def test_walk_forward_records_train_and_test_trials(tmp_path: Path, candles: pd.
         assert row.window_start == f.test.start and row.window_end == f.test.end
         assert tuned_params(row.params_json) == f.best_params
         assert json.loads(row.params_json)[STUDY_KEY]["study"] == f.search.study_name
+        # a test row is the selected configuration, not a trial of the study: no trial number
+        assert TRIAL_NUMBER_KEY not in json.loads(row.params_json)[STUDY_KEY]
         # train trials were recorded on the TRAIN window only
         for tid in f.search.trial_ids:
             train_row = next(r for r in rows if r.id == tid)
@@ -471,7 +474,7 @@ def test_every_row_records_the_study_design(tmp_path: Path, candles: pd.DataFram
         res = run_search(ema_plan(), candles, cfg, ledger, n=5, seed=9, min_trades=7)
         rows = [ledger.get(i) for i in res.trial_ids]
         n_plans = ledger.count_distinct_plans("r1")
-    for row in rows:
+    for number, row in enumerate(rows):
         meta = json.loads(row.params_json)[STUDY_KEY]
         assert meta == {
             "study": res.study_name,
@@ -480,6 +483,7 @@ def test_every_row_records_the_study_design(tmp_path: Path, candles: pd.DataFram
             "seed": 9,
             "n_trials": 5,
             "min_trades": 7,
+            TRIAL_NUMBER_KEY: number,  # the row's Optuna trial.number, in trial order
         }
     # The metadata lives in params_json, so it adds no pseudo-plan to the DSR's N.
     assert n_plans == len({r.plan_hash for r in rows})

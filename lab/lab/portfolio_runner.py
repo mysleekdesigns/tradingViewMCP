@@ -1751,6 +1751,7 @@ def portfolio_sweep(
                     cj,
                     window_kind,
                     f"infeasible: {exc}",
+                    trial=trial.number,
                 )
             )
             sharpes.append(math.nan)
@@ -1773,6 +1774,7 @@ def portfolio_sweep(
                     cj,
                     window_kind,
                     f"{type(exc).__name__}: {exc}",
+                    trial=trial.number,
                 )
             )
             sharpes.append(math.nan)
@@ -1787,7 +1789,7 @@ def portfolio_sweep(
                     status="ok",
                     plan_hash=pf.portfolio_plan_hash(concrete),
                     plan_json=_plan_json(concrete),
-                    params_json=params_json(params, meta),
+                    params_json=params_json(params, meta, trial=trial.number),
                     symbol=universe_symbol(cfg),
                     interval=interval,
                     window_kind=window_kind,
@@ -1848,6 +1850,7 @@ def _record_optuna_error(
     costs_json: str,
     window_kind: WindowKind,
     message: str,
+    trial: int | None = None,
 ) -> int:
     return ledger.record(
         TrialRecord(
@@ -1856,7 +1859,7 @@ def _record_optuna_error(
             status="error",
             plan_hash=pf.portfolio_plan_hash(plan),
             plan_json=_plan_json(plan),
-            params_json=params_json(params, meta),
+            params_json=params_json(params, meta, trial=trial),
             symbol=universe_symbol(cfg),
             interval=cfg.universe.interval,
             window_kind=window_kind,

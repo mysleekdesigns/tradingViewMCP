@@ -397,6 +397,9 @@ def test_run_sweep_ledgers_every_trial_and_prunes_infeasible_banding(lab: PLab) 
         assert len(errors) == out["n_pruned_infeasible"]
         assert all("infeasible" in (r.error or "") for r in errors)
         assert all(json.loads(r.params_json)["_study"]["study"] == out["study"] for r in recs)
+        # every row, the pruned infeasible ones too, records its own Optuna trial number
+        numbers = sorted(json.loads(r.params_json)["_study"]["trial"] for r in recs)
+        assert numbers == list(range(12))
         (ev,) = led.evidence(run_id, kind="sweep")
         assert ev["payload"]["study"] == out["study"]
     assert out["budget"]["used"]["backtests"] == 12

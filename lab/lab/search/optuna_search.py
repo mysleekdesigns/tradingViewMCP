@@ -16,10 +16,14 @@ PBO return matrix see everything that was tried:
   ``error`` row with the suggested params, then reported to Optuna as the failure sentinel.
 * Every row's ``params_json`` carries the study's design under the reserved key ``"_study"``:
   ``{"study", "space" ({key: [low, high]}), "space_explicit", "seed", "n_trials",
-  "min_trades"}``, so the ledger alone shows what was searched and how hard. It lives in
-  ``params_json`` rather than in a summary row because a summary row with a pseudo-plan would
-  add a distinct ``plan_hash`` and inflate the DSR's N. Phase 8 passes ``require_space=True``
-  so the search space is always stated explicitly, never the full validation bounds by default.
+  "min_trades"}``, so the ledger alone shows what was searched and how hard. A row written by
+  a study's own trial also carries ``"trial"``, its Optuna ``trial.number`` (0-based, per
+  study), so which trials were TPE's random start-up draws is read, not inferred from row
+  order; walk-forward test rows (a selected configuration, not a trial) and older rows have
+  none. The design lives in ``params_json`` rather than in a summary row because a summary
+  row with a pseudo-plan would add a distinct ``plan_hash`` and inflate the DSR's N. Phase 8
+  passes ``require_space=True`` so the search space is always stated explicitly, never the
+  full validation bounds by default.
 
 Holdout guard: both entry points call :func:`lab.engine.splits.assert_no_holdout` on the
 candles they receive and refuse windows that reach ``holdout_start``. Signals for a window are
@@ -97,6 +101,7 @@ def make_tpe_sampler(seed: int | None) -> optuna.samplers.TPESampler:
 
 
 STUDY_KEY = "_study"  # reserved params_json key holding the study's design (never a param)
+TRIAL_NUMBER_KEY = "trial"  # key inside STUDY_KEY: the row's Optuna trial.number, when it has one
 
 SearchSpace = Mapping[str, tuple[float, float]]
 
@@ -307,11 +312,13 @@ def _plan_json(plan: Plan) -> str:
     return json.dumps(plan_to_dict(plan), sort_keys=True, separators=(",", ":"))
 
 
-def _params_json(params: Mapping[str, float], study: Mapping[str, object]) -> str:
+def _params_json(
+    params: Mapping[str, float], study: Mapping[str, object], *, trial: int | None = None
+) -> str:
     clean: dict[str, object] = {
         k: (float(v) if math.isfinite(float(v)) else None) for k, v in params.items()
     }
-    clean[STUDY_KEY] = dict(study)
+    clean[STUDY_KEY] = dict(study) if trial is None else {**study, TRIAL_NUMBER_KEY: int(trial)}
     return json.dumps(clean, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
@@ -347,6 +354,7 @@ def _record_ok(
     window_kind: WindowKind,
     result: BacktestResult,
     metrics: Metrics,
+    trial: int | None = None,
 ) -> int:
     returns = result.returns.to_numpy(dtype=float)
     return ledger.record(
@@ -356,7 +364,7 @@ def _record_ok(
             status="ok",
             plan_hash=plan_hash(plan),
             plan_json=_plan_json(plan),
-            params_json=_params_json(params, study),
+            params_json=_params_json(params, study, trial=trial),
             symbol=plan.symbol,
             interval=plan.interval,
             window_kind=window_kind,
@@ -382,6 +390,7 @@ def _record_error(
     window: Window,
     window_kind: WindowKind,
     exc: BaseException,
+    trial: int | None = None,
 ) -> int:
     return ledger.record(
         TrialRecord(
@@ -390,7 +399,7 @@ def _record_error(
             status="error",
             plan_hash=plan_hash(plan),
             plan_json=_plan_json(plan),
-            params_json=_params_json(params, study),
+            params_json=_params_json(params, study, trial=trial),
             symbol=plan.symbol,
             interval=plan.interval,
             window_kind=window_kind,
@@ -504,6 +513,7 @@ def optuna_search(
                     window=window,
                     window_kind=window_kind,
                     exc=exc,
+                    trial=trial.number,
                 )
             )
             sharpes.append(math.nan)
@@ -522,6 +532,7 @@ def optuna_search(
                 window_kind=window_kind,
                 result=result,
                 metrics=metrics,
+                trial=trial.number,
             )
         )
         params_by_trial.append(params)
