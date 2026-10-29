@@ -32,5 +32,7 @@ Open after round 3 (minor):
 - refresh during a data update uses stale appliedRef (time in a just-appended bar clears the follower); source chart's own re-fire never republishes.
 - Re-picking the cursor bar itself is treated as resume (no replay paper reset).
 
+LWC 5.2.1 conflation crash (verified in dist 2026-10-29): `_sendUpdateToChart` runs `model.updateTimeScale` (can recalc the crosshair) BEFORE each affected series' `_internal_setData` clears its `_conflationByFactorCache`; DataLayer `assignIndexToPointData` already mutated row indexes in place. So ANY single setData that shifts existing indexes (insert before/middle, or removes a non-tail point held by its last series) with a crosshair set and conflation active throws in Histogram colorer. Fix = `clearCrosshairForSetData` at top of the Chart.tsx set/prepend branch (covers main, volume, applyPlan, backtestOverlay.setBars). Derivatives/regime/equity setData are filtered to plotted times (subset, no shift). Residual: follower `syncRefreshRef` re-sets the crosshair before the later derivatives/regime effects.
+
 **Why:** saves re-deriving lifecycle/closure semantics and re-measuring upstream behaviour.
 **How to apply:** start Phase 9 follow-up reviews here; related [[web-conventions]], [[web-no-trade-bars]], [[market-venue]].
