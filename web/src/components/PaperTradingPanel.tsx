@@ -27,6 +27,7 @@ import {
 import { replayTradeBlock } from '../state/paperFeeds'
 import type { PaperAccountApi } from '../state/usePaperAccount'
 import { formatPriceByTick } from '../state/chartTools'
+import { fmtQty, orderFeedback, type Feedback } from './paperFeedback'
 import { formatUtc } from './quote'
 import './Paper.css'
 
@@ -71,7 +72,6 @@ const TAB_LABELS: Readonly<Record<Tab, string>> = {
 const PERCENTS = [0.25, 0.5, 1] as const
 
 const MONEY = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-const QTY = new Intl.NumberFormat('en-US', { maximumFractionDigits: 8 })
 
 const money = (n: number) => MONEY.format(Math.abs(n) < 0.005 ? 0 : n)
 function signedMoney(n: number): string {
@@ -84,7 +84,6 @@ function signedPct(f: number): string {
   return `${p > 0 ? '+' : '−'}${Math.abs(p).toFixed(2)}%`
 }
 const tone = (n: number) => (n > 0.005 ? 'up' : n < -0.005 ? 'down' : 'flat')
-const fmtQty = (q: number) => QTY.format(q)
 
 /** Quote assets the reset form always offers (USDT for Binance, USD for Coinbase). */
 const QUOTE_CHOICES: readonly string[] = ['USDT', 'USD']
@@ -118,6 +117,15 @@ export function PaperTradingPanel(props: PaperTradingPanelProps) {
 
   const [tab, setTab] = useState<Tab>('positions')
   const [resetting, setResetting] = useState(false)
+  // The ticket's status line lives here so a position's Close can report its fill too. The panel
+  // is not remounted on a symbol or account (live/replay) switch, so the line is cleared during
+  // render when the ticket's key changes; switching back never brings an old message back.
+  const ticketKey = `${scope}:${symbol}`
+  const [feedback, setFeedback] = useState<{ key: string; value: Feedback }>({
+    key: ticketKey,
+    value: null,
+  })
+  if (feedback.key !== ticketKey) setFeedback({ key: ticketKey, value: null })
   const ids = useId()
   const tabId = (t: Tab) => `${ids}-tab-${t}`
 
@@ -161,10 +169,14 @@ export function PaperTradingPanel(props: PaperTradingPanelProps) {
     if (price === null || time === null) return
     const qty = availableQty(account, p.symbol)
     if (qty <= 0) return
-    paper.place(
+    const order = paper.place(
       { symbol: p.symbol, side: 'sell', type: 'market', qty, quoteAsset: symbolQuote },
       { price, time, blocked: blockedReason, marketBlocked: offlineReason },
     )
+    setFeedback({
+      key: ticketKey,
+      value: orderFeedback(order, symbolBaseAsset(p.symbol, symbolQuote), fmtPrice),
+    })
   }
 
   return (
@@ -239,7 +251,7 @@ export function PaperTradingPanel(props: PaperTradingPanelProps) {
         </div>
 
         <OrderTicket
-          key={`${scope}:${symbol}`}
+          key={ticketKey}
           symbol={symbol}
           symbolQuote={symbolQuote}
           price={price}
@@ -248,6 +260,14 @@ export function PaperTradingPanel(props: PaperTradingPanelProps) {
           blockedReason={blockedReason}
           offlineReason={offlineReason}
           fmtPrice={fmtPrice}
+          feedback={feedback.key === ticketKey ? feedback.value : null}
+          onFeedback={(value) =>
+            setFeedback((f) =>
+              f.key === ticketKey && f.value === null && value === null
+                ? f
+                : { key: ticketKey, value },
+            )
+          }
         />
 
         <div className="paper__tabs" role="tablist" aria-label="Paper account">
@@ -364,9 +384,10 @@ interface TicketProps {
   /** Orders that would fill now are refused (live feed offline). */
   offlineReason: string | null
   fmtPrice(symbol: string, price: number): string
+  /** The status line under the submit button (owned by the panel). */
+  feedback: Feedback
+  onFeedback(feedback: Feedback): void
 }
-
-type Feedback = { kind: 'ok' | 'error'; text: string } | null
 
 function OrderTicket({
   symbol,
@@ -377,6 +398,8 @@ function OrderTicket({
   blockedReason,
   offlineReason,
   fmtPrice,
+  feedback,
+  onFeedback: setFeedback,
 }: TicketProps) {
   const { account } = paper
   const quote = account.config.quoteAsset
@@ -387,7 +410,6 @@ function OrderTicket({
   const [type, setType] = useState<PaperOrderType>('market')
   const [qtyText, setQtyText] = useState('')
   const [limitText, setLimitText] = useState('')
-  const [feedback, setFeedback] = useState<Feedback>(null)
 
   const qty = parseNum(qtyText)
   const limit = parseNum(limitText)
@@ -458,22 +480,8 @@ function OrderTicket({
       },
       { price, time, blocked: blockedReason, marketBlocked: offlineReason },
     )
-    const verb = side === 'buy' ? 'Bought' : 'Sold'
-    if (order.status === 'rejected') {
-      setFeedback({ kind: 'error', text: order.reason ?? 'Order rejected' })
-    } else if (order.status === 'filled' && order.fillPrice !== null) {
-      setFeedback({
-        kind: 'ok',
-        text: `${verb} ${fmtQty(order.qty)} ${base} at ${fmtPrice(symbol, order.fillPrice)}`,
-      })
-      setQtyText('')
-    } else {
-      setFeedback({
-        kind: 'ok',
-        text: `Limit ${side} ${fmtQty(order.qty)} ${base} at ${fmtPrice(symbol, order.limitPrice ?? 0)} placed. Fills on later prices only.`,
-      })
-      setQtyText('')
-    }
+    setFeedback(orderFeedback(order, base, fmtPrice))
+    if (order.status !== 'rejected') setQtyText('')
   }
 
   const sideLabel = side === 'buy' ? 'Buy' : 'Sell'

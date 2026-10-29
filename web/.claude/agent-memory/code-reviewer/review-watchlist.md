@@ -28,6 +28,7 @@ Confirmed conventions (do not re-flag):
 - StrictMode: the chart-create cleanup calls `indicatorManager.detach()` (clears configs), so the remount's sync effect recreates every series.
 - Provider API takes `endTime` in UNIX seconds and converts to ms once (`binance.ts` getCandles); callers pass `oldest.time - 1`.
 - Binance.US REST weight limit is 6000/min (checked live); default watchlist symbols are all listed.
+- PaperTradingPanel is never keyed/remounted by App (one instance across symbol and live/replay switches); only OrderTicket is keyed `${scope}:${symbol}`. State lifted from the ticket into the panel and "keyed" by a stored key string resurfaces on A->B->A switches unless it is reset when the key changes (flagged 2026-10-29 in the ticket-feedback lift).
 - LWC keeps the view on prepend by itself (right-anchored rightOffset), so Chart's explicit `setVisibleLogicalRange(range + count)` is a no-op safety, not a double shift.
 
 **Why:** these are the resilience/perf gaps most likely to come back as history length and symbol count grow.
