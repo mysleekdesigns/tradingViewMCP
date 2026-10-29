@@ -23,7 +23,7 @@ done
 echo "Areas present:${areas:- none yet (Phase 0 not started)}"
 
 if [ -f .claude/lab.lock ]; then
-  echo "Lab lock: ON. lab/lab/engine, registry, stats and the success criteria are read-only (owner removes .claude/lab.lock to unlock)."
+  echo "Lab lock: ON. lab/lab/engine, registry, stats, research, search and the success criteria are read-only (owner removes .claude/lab.lock to unlock)."
 fi
 
 echo "PLAN.md progress (done/total build checkboxes):"

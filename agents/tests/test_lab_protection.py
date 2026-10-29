@@ -34,6 +34,8 @@ LOCKED_PATHS = (
     "lab/lab/stats/sharpe.py",
     "lab/lab/stats/cpcv.py",  # Phase 11: CPCV path Sharpes
     "lab/lab/stats/effective_n.py",  # Phase 11: effective number of trials
+    "lab/lab/research/criteria.py",  # what judges a plan (criteria rows, DSR's N, holdout gate)
+    "lab/lab/search/optuna_search.py",  # what the sweeps record in the ledger
     "lab/config/success_criteria.toml",
 )
 

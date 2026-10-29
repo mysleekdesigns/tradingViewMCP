@@ -49,8 +49,8 @@ esac
 # Lab lock (PLAN.md Phase 8 guardrail): once .claude/lab.lock exists, agents cannot make tests easier to pass.
 if [ -f "$root/.claude/lab.lock" ]; then
   case "$rel" in
-    lab/lab/engine/*|lab/lab/registry/*|lab/lab/stats/*|lab/config/success_criteria*)
-      block "'$rel' is read-only while the lab is locked (.claude/lab.lock). Engine, registry, stats, and success criteria change only by the owner. Propose the change in your report instead." ;;
+    lab/lab/engine/*|lab/lab/registry/*|lab/lab/stats/*|lab/lab/research/*|lab/lab/search/*|lab/config/success_criteria*)
+      block "'$rel' is read-only while the lab is locked (.claude/lab.lock). Engine, registry, stats, research (criteria, judging), search (Optuna), and success criteria change only by the owner. Propose the change in your report instead." ;;
   esac
 fi
 

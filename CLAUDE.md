@@ -65,7 +65,7 @@ If a hook blocks something legitimate, tell the owner instead of working around 
 
 ## Lab lock (Phase 8 guardrail)
 
-Once Phase 7 is verified, the owner runs `touch .claude/lab.lock` in their own terminal. While it exists, `lab/lab/engine/`, `lab/lab/registry/`, `lab/lab/stats/`, and `lab/config/success_criteria*` are read-only to Claude, so agents can't make tests easier to pass. Only the owner removes it, outside Claude Code. Propose lab changes in a report instead.
+Once Phase 7 is verified, the owner runs `touch .claude/lab.lock` in their own terminal. While it exists, `lab/lab/engine/`, `lab/lab/registry/`, `lab/lab/stats/`, `lab/lab/research/` (criteria and judging), `lab/lab/search/` (Optuna), and `lab/config/success_criteria*` are read-only to Claude, so agents can't make tests easier to pass. Only the owner removes it, outside Claude Code. Propose lab changes in a report instead.
 
 ## Strategy research (Phase 8)
 
