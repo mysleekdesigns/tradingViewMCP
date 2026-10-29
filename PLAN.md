@@ -1034,6 +1034,79 @@ pass.
 
 ---
 
+## Phase 17 — Jev Trade-Time Judge (forward only)
+
+Why: today Jev only judges research artefacts (sources, duplicates, sweeps, "done?"); it never sees
+a trade signal. A video that used Jev as a take/skip judge on rule-generated setups claimed a
+Jev-filtered opening-range bot beat its baseline ("Jev and Claude Code trading bots research",
+`agents/research/reports/`). That claim is not evidence: the backtest asked a language model about
+past sessions its training data very likely covers, and the filter was tuned on the same history.
+**An LLM decision layer cannot be backtested honestly here**, so this phase tests the idea the only
+honest way: forward, on bars after the model was trained, beside the seven HC exploratory paper bots
+(BTC, ETH, SOL, NEAR, AAVE, SUI, ONDO, 4h; test window 2026-10-30 to 2026-12-25, Phase 8). It works
+only in `agents/` and makes no edge claim. A late start only means fewer judged trades; the start time
+is recorded in the pre-registration.
+
+Traps this design must close:
+- **Steering the frozen tests.** The HC strategies and protocols are frozen, and `compare` refuses a
+  changed strategy file. The judge is a separate process that **watches, never steers**: it writes no
+  strategy, config, protocol or journal file of the HC bots and cannot change their verdicts.
+- **Hindsight.** Each verdict is written before the fill bar opens and before the outcome exists.
+  Nothing is ever judged after the fact, and no row is edited later.
+- **Memorization.** The snapshot is blind: rounded ratios only, no symbol, no dates, no prices.
+- **Silent gaps.** Jev down, a timeout or a bad answer is logged as `unavailable` (fail open), never as
+  a skip. A missed bar is logged as missed, never filled in later.
+- **Small sample.** Expect roughly 30–80 judged trades over 8 weeks. Only a large effect can show,
+  so "inconclusive" and "no information" are correct outcomes, written up as carefully as a positive.
+
+### Checklist
+- [ ] Shadow process `uv run python paper_trade.py shadow`: after each 4h close, recompute every registered HC candidate's entry signal from closed candles with the lab's `compile_plan` (read-only import, same candles, warm-up and data source as `compare`); no effect on the bots (test: the HC strategy, config, protocol and journal files are byte-identical before and after a run)
+- [ ] Blind snapshot built in Python (rounded ratios only: 1/6/42-bar returns, ATR %, distance to EMAs, RSI, volume ratio, BTC 4h trend; no symbol, dates or prices) and one batched Jev call per closed bar: `choice` take/skip, `noul` fake-out risk, `score` confidence; `TYPESAFE_API_KEY` from env only
+- [ ] Append-only, hash-chained `agents/data/paper/jev-shadow/decisions.jsonl` (signal bar, candidate, snapshot sha256, verdict, model id, latency, written-at time); every row written before its fill bar opens; Jev unavailable or a missed bar logged as such (tests: chain verification fails on any edited or deleted row; no row's written-at is at or after its fill bar's open)
+- [ ] Pre-registered analysis in a journal entry written before the first decision: start time, metric (mean net trade return of Jev-take vs Jev-skip trades, matched to the paper fills `compare` reads), a permutation test, and a minimum sample (at least 30 judged trades and 8 per arm, else "inconclusive"); never changed afterwards
+- [ ] `paper_trade.py shadow-report`: take vs skip returns matched to paper fills, `unavailable` and missed counts, "inconclusive" below the minimum sample; reproduces from the JSONL and dry-run DBs alone (test on a fixture)
+- [ ] Rule written into `.claude/rules/research-agents.md` and the `honest-backtesting` checklist: LLM decision layers are evaluated forward only, never inside lab backtests
+- [ ] (optional, after the judge has data) Decision stream panel beside the paper ticket: per candidate, each signal with Jev's verdict, confidence and fake-out score, the fill and (once closed) the trade return; read-only server endpoint over the JSONL and dry-run DBs
+- [ ] Quant review (look-ahead and pre-registration focus), code review for the panel, `uv run pytest -q`, `uv run ruff check .`, then `/run-gate 17`
+
+Not in this phase: any order path, Alpaca, shorts, or acting on a Jev verdict. A positive result
+would justify only a second pre-registered forward test, never trading.
+
+**Done when:** the shadow judge has logged every HC signal since its recorded start with no missing
+bar it could have judged (or each one logged as missed), the hash chain verifies, and shadow-report
+reproduces from the JSONL and dry-run DBs alone.
+
+---
+
+## Phase 18 — Session Ranges Overlay (chart)
+
+Why: the same video's futures bot found most of its profit in the Asia session. Crypto trades 24/7
+but liquidity is still uneven across Asia, London and New York hours. That is an unverified claim
+from another asset class. This phase is a **visual tool only**, like Phase 16: it lets the owner look
+at session structure on the chart before any lab budget is spent on it. It touches only `web/`.
+
+Definitions (UTC, defaults set before building): Asia 00:00–08:00, London 07:00–16:00, New York
+13:00–22:00 (overlaps allowed), plus an optional UTC-day opening range over the first N hours
+[N = 1]. Each box spans its session's high and low from closed bars only. Shown only on intervals
+below 1d.
+
+### Checklist
+- [ ] Pure compute `web/src/indicators/sessionRanges.ts`: per-session high/low boxes and the UTC opening range in one pass over closed bars; inputs for the session hours and N
+- [ ] Rendering as a series primitive under the drawings, themed for light and dark, with per-session toggles in the settings dialog (via `/add-indicator`)
+- [ ] Tests: known values on a hand-built fixture across a UTC midnight; a no-look-ahead perturbation test; the forming bar never moves a box's high or low; incremental tail recompute matches a full recompute
+- [ ] Definitions written in `web/README.md` ("visual only, no edge claim"); code review, `npx tsc -b`, `npx vitest run`, `npm run lint`, then `/run-gate 18`; browser checks listed for the owner
+
+Not in this phase: a lab opening-range breakout hypothesis. That needs owner registry features
+(hour-of-day, session high/low over the first N bars of a UTC day) under the lab lock, and its prior
+is weak (no opening auction in crypto, short-interval ports died on costs, DSR N is already 4685).
+Consider it only if this overlay makes the session structure look real.
+
+**Done when:** on BTCUSDT 1h the overlay draws Asia, London and New York boxes and the UTC opening
+range from closed bars, nothing moves while a candle is forming, and the known-value, no-look-ahead
+and incremental-vs-full tests pass.
+
+---
+
 ## Testing Strategy
 
 - **Unit (Vitest):** indicator math, data mappers (Binance kline → Candle).
@@ -1060,6 +1133,7 @@ pass.
 | Prompt injection from scraped web pages | Treat as data; screen with Jev/Claude before use |
 | Runaway API spend | Per-run budgets and spend caps |
 | Jev ecosystem is very new | Fail-open gates; pin versions; Claude fallback |
+| LLM trade judge "backtested" on history it memorized | Forward-only shadow test with a blind snapshot, verdicts logged before the fill (Phase 17) |
 | Equity-style assumptions on crypto (252-day year, survivorship, forward-filled gaps) | 365-day annualization, point-in-time universe, gaps marked untradeable |
 | hedgeFund code assumes daily bars | Audit before reuse; wrap or extend for intraday |
 
@@ -1086,5 +1160,7 @@ pass.
 | 14 | Chart upgrades (5.2 hit testing, conflation, screenshots with drawings, plugin packages, drawing-library evaluation, volume profile, anchored VWAP) | Medium |
 | 15 | Risk-overlay question (separate pre-registered criteria: CDaR vs exposure-matched buy-and-hold, Sharpe non-inferiority, break-even cost; overlay run; owner) | Large |
 | 16 | Market structure overlay (non-repainting swing points, BOS/ChoCh markers, flip zones with first retest; visual only, no lab changes) | Medium |
+| 17 | Jev trade-time judge (forward-only shadow judge on the HC paper bots, hash-chained decision log, pre-registered take-vs-skip test; optional decision panel) | Medium |
+| 18 | Session ranges overlay (Asia/London/New York boxes and UTC opening range; visual only, no lab changes) | Small |
 
 **First usable version = end of Phase 3.**
