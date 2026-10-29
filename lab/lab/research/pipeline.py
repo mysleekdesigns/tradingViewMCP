@@ -15,6 +15,12 @@ recorded report has the same shape:
 * :func:`crosscheck_evidence` re-runs a backtested plan in the event-driven engine
   (nautilus_trader) on the same design window and records whether the engines agree.
 
+Risk overlays (PLAN.md Phase 15): an overlay plan's backtest evidence drops the run-local DSR and
+adds the ``"overlay"`` block (:func:`lab.research.overlay.overlay_block`) that
+:mod:`lab.research.overlay_criteria` judges; the cross-check accepts a risk-overlay run. Every
+overlay entry point first applies :func:`lab.research.overlay_criteria.check_overlay_untuned`
+(one published parameter set per overlay logic, across every overlay run), before any trial.
+
 Only design-window bars are ever loaded (``loader(..., holdout_start)``); the holdout is
 reachable only through :mod:`lab.research.holdout`. Callers own budgets and locking.
 
@@ -39,6 +45,9 @@ from lab.research.contract import SuccessCriteria
 from lab.research.criteria import frozen_criteria, regime_breakdown
 from lab.research.evidence import compact_report, record_report
 from lab.research.logic import logic_hash
+from lab.research.overlay import overlay_block
+from lab.research.overlay_criteria import check_overlay_untuned
+from lab.research.runs import frozen_overlay_criteria, frozen_question
 from lab.runner import (
     CandleLoader,
     DataUnavailableError,
@@ -118,12 +127,62 @@ def backtest_evidence(
     ``DataUnavailableError``)."""
     plan = parse_plan(raw_plan)
     h = plan_hash(plan)
+    if plan.kind == "overlay":
+        return _overlay_backtest_evidence(
+            raw_plan, plan, h, run_id=run_id, cfg=cfg, ledger=ledger, loader=loader
+        )
     criteria = frozen_criteria(ledger, run_id)  # no frozen bar, no trials
     report = run_backtest_report(
         raw_plan, cfg=cfg, ledger=ledger, run_id=run_id, loader=loader, run_id_assigned=True
     )
     out = strip_report(report)
     out["regimes"] = _regimes(ledger, plan, report, cfg=cfg, loader=loader, criteria=criteria)
+    out["logic_hash"] = logic_hash(plan)
+    record_report(ledger, run_id, h, "backtest", out)
+    return out
+
+
+OVERLAY_EVIDENCE_NOTE = (
+    "risk-overlay run: the rows are judged on the overlay block (get_report); the run-local "
+    "deflated Sharpe is dropped (overlay trials count in the edge question's trial count N but "
+    "never in its V[SR] pools), and the remaining report fields are information only"
+)
+
+
+def _overlay_backtest_evidence(
+    raw_plan: Mapping[str, Any] | str,
+    plan: Plan,
+    h: str,
+    *,
+    run_id: str,
+    cfg: LabConfig,
+    ledger: Ledger,
+    loader: CandleLoader,
+) -> dict[str, Any]:
+    """``backtest_evidence`` for an overlay plan (PLAN.md Phase 15): the lab's design-window
+    report (its base trial is the ledgered overlay trial), without the run-local DSR, plus the
+    ``"overlay"`` block (:func:`lab.research.overlay.overlay_block`, with the run's FROZEN
+    overlay rows' CDaR level, episode depth and bootstrap block) whose 1x rerun is checked
+    against that base trial. Refused before any trial when the run is not a risk-overlay run."""
+    criteria = frozen_overlay_criteria(ledger, run_id)  # no frozen rows, no trials
+    check_overlay_untuned(ledger, plan)  # one parameter set per logic
+    report = run_backtest_report(
+        raw_plan, cfg=cfg, ledger=ledger, run_id=run_id, loader=loader, run_id_assigned=True
+    )
+    out = strip_report(report)
+    stats = out.get("stats")
+    if isinstance(stats, dict):
+        out["stats"] = {k: v for k, v in stats.items() if k != "dsr"}
+    out["overlay"] = overlay_block(
+        plan,
+        cfg=cfg,
+        ledger=ledger,
+        run_id=run_id,
+        loader=loader,
+        criteria=criteria,
+        trial_id=int(report["trial_id"]),
+    )
+    out["overlay_note"] = OVERLAY_EVIDENCE_NOTE
     out["logic_hash"] = logic_hash(plan)
     record_report(ledger, run_id, h, "backtest", out)
     return out
@@ -141,6 +200,8 @@ def adversarial_evidence(
     record it as ``"adversarial"`` evidence, and return the recorded dict."""
     plan = parse_plan(raw_plan)
     h = plan_hash(plan)
+    if plan.kind == "overlay":
+        check_overlay_untuned(ledger, plan)  # one parameter set per logic
     report = run_adversarial_report(raw_plan, cfg=cfg, ledger=ledger, run_id=run_id, loader=loader)
     out = strip_report(report)
     out["logic_hash"] = logic_hash(plan)
@@ -172,7 +233,12 @@ def crosscheck_evidence(
     gated plan's price clause does not select. Only design-window bars are loaded."""
     plan = parse_plan(raw_plan)
     h = plan_hash(plan)
-    frozen_criteria(ledger, run_id)  # the run must exist
+    if frozen_question(ledger, run_id) == "risk_overlay":  # the run must exist
+        frozen_overlay_criteria(ledger, run_id)
+        if plan.kind == "overlay":
+            check_overlay_untuned(ledger, plan)  # one parameter set per logic
+    else:
+        frozen_criteria(ledger, run_id)
     rows = ledger.evidence(run_id, plan_hash=h, kind="backtest")
     if not rows:
         raise ValueError(

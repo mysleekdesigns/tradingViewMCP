@@ -91,6 +91,12 @@ CPCV test bar included) and ``cpcv_startup`` over only the sampler's random star
 When ``dsr_min`` does not pass and the design window is below MinTRL or MinBTL, its note
 states "design window too short".
 
+Risk-overlay runs (PLAN.md Phase 15) are judged by :mod:`lab.research.overlay_criteria`, which
+reuses the holdout and cross-check rows here (:func:`holdout_row`, :func:`crosscheck_row`) and
+adds the ``"not_testable"`` status (never a pass). Their trials COUNT in this module's N like any
+other trial (owner decision 2026-10-29, "count in N, not V[SR]"), but never enter its V[SR]
+pools (:mod:`lab.ledger` excludes risk-overlay runs from every research-wide Sharpe pool).
+
 Results are historical and not forward-looking.
 """
 
@@ -140,13 +146,21 @@ __all__ = [
     "CriteriaReport",
     "CriterionRow",
     "CriterionStatus",
+    "criterion_row",
+    "crosscheck_row",
     "evaluate_plan",
     "frozen_criteria",
+    "holdout_row",
+    "latest_evidence",
+    "plan_derivatives_dict",
+    "plan_family",
     "plan_statistics",
     "regime_breakdown",
 ]
 
-CriterionStatus = Literal["pass", "fail", "missing"]
+# "not_testable" is used only by the risk-overlay rows (lab.research.overlay_criteria): the
+# evidence exists but cannot answer the question (too few drawdown episodes). It is never a pass.
+CriterionStatus = Literal["pass", "fail", "missing", "not_testable"]
 
 # Rows that do not gate the holdout check (they are the holdout and what comes after it).
 # The event-driven cross-check is NOT excluded: a holdout check is only spent on a plan whose
@@ -328,6 +342,24 @@ def _missing(name: str, threshold: float | bool | None, note: str) -> CriterionR
     return _row(name, "missing", None, threshold, note)
 
 
+def criterion_row(
+    name: str,
+    status: CriterionStatus,
+    value: float | bool | None,
+    threshold: float | bool | None,
+    note: str,
+) -> CriterionRow:
+    """A :class:`CriterionRow` (a non-finite float value becomes None)."""
+    return _row(name, status, value, threshold, note)
+
+
+def latest_evidence(
+    ledger: Ledger, run_id: str, plan_hash_: str, kind: str
+) -> dict[str, Any] | None:
+    """The newest evidence payload of ``kind`` for ``plan_hash_`` in ``run_id`` (or None)."""
+    return _latest(ledger, run_id, plan_hash_, kind)
+
+
 def _fmt(x: float | None) -> str:
     return "n/a" if x is None or not math.isfinite(x) else f"{x:.3g}"
 
@@ -370,6 +402,25 @@ def _derivatives_plan(
     if base is not None and plan_derivative_columns(base.plan_json):
         return base.plan_json
     return None
+
+
+def plan_derivatives_dict(
+    ledger: Ledger, run_id: str, plan_hash_: str, bt: dict[str, Any] | None
+) -> Mapping[str, Any] | str | None:
+    """The plan when it reads a derivatives column (its snapshot must be checked), else None."""
+    return _derivatives_plan(ledger, run_id, plan_hash_, bt)
+
+
+def plan_family(
+    ledger: Ledger,
+    run_id: str,
+    plan_hash_: str,
+    bt: dict[str, Any] | None,
+    cfg: LabConfig,
+    loader: CandleLoader | None = None,
+) -> FamilyInfo:
+    """The plan's behaviour family (any run, either research question)."""
+    return _family(ledger, run_id, plan_hash_, bt, cfg, loader)
 
 
 def _family(
@@ -1041,7 +1092,20 @@ def _holdout_row(
     plan_hash_: str,
     family: FamilyInfo,
 ) -> CriterionRow:
-    name, required = "require_holdout_pass", c.require_holdout_pass
+    return holdout_row(c.require_holdout_pass, ledger, run_id, plan_hash_, family)
+
+
+def holdout_row(
+    required: bool,
+    ledger: Ledger,
+    run_id: str,
+    plan_hash_: str,
+    family: FamilyInfo,
+) -> CriterionRow:
+    """The ``require_holdout_pass`` row for either research question: the plan's own holdout
+    evidence in the run, else "fail" when a member of its behaviour family (any run, either
+    question) already used the single holdout check, else "missing"."""
+    name = "require_holdout_pass"
     if not required:
         return _row(name, "pass", None, required, "not required by this run's criteria")
     own = _latest(ledger, run_id, plan_hash_, "holdout")
@@ -1062,7 +1126,13 @@ def _holdout_row(
 
 
 def _crosscheck_row(c: SuccessCriteria, cross: dict[str, Any] | None) -> CriterionRow:
-    name, required = "require_crosscheck_match", c.require_crosscheck_match
+    return crosscheck_row(c.require_crosscheck_match, cross)
+
+
+def crosscheck_row(required: bool, cross: Mapping[str, Any] | None) -> CriterionRow:
+    """The ``require_crosscheck_match`` row for either research question (unavailable engine
+    -> missing, matched -> pass, else fail)."""
+    name = "require_crosscheck_match"
     if not required:
         return _row(name, "pass", None, required, "not required by this run's criteria")
     if cross is None or not isinstance(cross.get("matched"), bool):

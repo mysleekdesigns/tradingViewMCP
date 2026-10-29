@@ -12,6 +12,15 @@ with the one being deflated: the same interval, the same ``[window_start, window
 same cost model (``costs_json``), and never ``walk_forward_test`` rows (an out-of-sample fold
 Sharpe must not replace a plan's selection Sharpe). :meth:`Ledger.count` is the raw row count.
 
+Risk-overlay research runs (Phase 15, frozen ``"question": "risk_overlay"``; owner decision
+2026-10-29, "count in N, not V[SR]"): their trials COUNT in the research-wide trial count N
+(:meth:`Ledger.count_distinct_plans_research`, and so in the effective-N plan set) exactly like
+any other trial, so a timing rule explored as an overlay and later ported to an edge plan was
+still tried; they are EXCLUDED from every research-wide V[SR] / Sharpe pool
+(:meth:`Ledger.latest_sharpes_per_plan_research`, :meth:`Ledger.research_design_sharpes`),
+because a buy-and-hold overlay's Sharpe is not a selection Sharpe of the edge search. They also
+count toward the overlay question's own N_overlay.
+
 Phase 8 research runs judge candidates with a *global* ``N``:
 :meth:`Ledger.count_distinct_plans_research` counts distinct plans across EVERY run of the
 ledger (research runs and the web UI's / ad-hoc API runs; all symbols, all intervals), so
@@ -114,6 +123,18 @@ class HoldoutAlreadyCheckedError(RuntimeError):
 # neighbourhood grid tried while looking for a strategy. DSR's N counts distinct plans among
 # these. Adversarial variants and benchmark/null summaries are recorded but are not candidates.
 SELECTION_SOURCES: tuple[str, ...] = ("manual", "api", "optuna", "neighbourhood")
+# Risk-overlay research runs (PLAN.md Phase 15): their frozen config has "question":
+# "risk_overlay". Owner decision 2026-10-29 ("count in N, not V[SR]"): their trials COUNT in the
+# research-wide trial count N and the effective-N plan set exactly like any other trial, but are
+# EXCLUDED from every research-wide V[SR] / Sharpe pool (a buy-and-hold overlay's Sharpe is not
+# a selection Sharpe of the edge search). They also count toward N_overlay
+# (lab.research.overlay_criteria). Behaviour families and holdout checks span both questions
+# (a hypothesis gets one holdout check, whatever it was asked as). With no overlay run in the
+# ledger this subquery is empty and every pool is unchanged.
+_OVERLAY_RUNS_SQL = (
+    "SELECT run_id FROM research_runs WHERE json_valid(config_json)"
+    " AND json_extract(config_json, '$.question') = 'risk_overlay'"
+)
 
 
 # --------------------------------------------------------------------------- migrations
@@ -998,7 +1019,9 @@ class Ledger:
         This is the Phase 8 DSR ``N``: every configuration ever tried in this lab, so a new run,
         another interval, or a configuration first tried in the web UI never resets the
         multiple-testing bar. (The name is kept for ``agents/``; before round 4 it counted
-        research runs only.)
+        research runs only.) Trials of risk-overlay research runs (Phase 15) count here like any
+        other trial (owner decision 2026-10-29: "count in N, not V[SR]"); they stay out of the
+        V[SR] pools.
         """
         srcs = self._check_sources(sources)
         sql = (
@@ -1034,6 +1057,7 @@ class Ledger:
             args.append(run_id)
         else:
             sql += " AND run_id IN (SELECT run_id FROM research_runs)"
+            sql += f" AND run_id NOT IN ({_OVERLAY_RUNS_SQL})"
         if interval is not None:
             sql += " AND interval = ?"
             args.append(interval)
@@ -1091,7 +1115,8 @@ class Ledger:
     ) -> dict[str, float]:
         """Like :meth:`latest_sharpes_per_plan` but over EVERY registered research run (the
         latest Sharpe per distinct plan wherever it ran), without ``walk_forward_test`` and
-        ``holdout`` rows. Trials of non-research runs (web UI, ad-hoc API) are not included."""
+        ``holdout`` rows. Trials of non-research runs (web UI, ad-hoc API) and of risk-overlay
+        research runs are not included."""
         return self._latest_sharpes(
             None,
             sources=sources,
@@ -1278,6 +1303,24 @@ class Ledger:
         rows = self._conn.execute(sql + " GROUP BY plan_hash", args).fetchall()
         return {r[0]: r[1] for r in rows}
 
+    def first_plan_trials(
+        self, *, sources: Iterable[str], overlay_runs: bool
+    ) -> builtins.list[tuple[str, str, str]]:
+        """``(plan_hash, plan_json, run_id)`` of the FIRST trial (lowest id) of every distinct plan
+        whose source is in ``sources`` (ok or error, any window), in the risk-overlay research
+        runs (``overlay_runs=True``) or in every other run of the ledger (``False``: edge
+        research runs, the web UI's and ad-hoc runs), oldest first. Used by the overlay
+        one-parameter-set rule (:func:`lab.research.overlay_criteria.check_overlay_untuned`)."""
+        srcs = self._check_sources(sources)
+        scope = "IN" if overlay_runs else "NOT IN"
+        sql = (
+            "SELECT plan_hash, MIN(id) AS first_id, plan_json, run_id FROM trials"
+            f" WHERE source IN ({', '.join('?' * len(srcs))})"
+            f" AND run_id {scope} ({_OVERLAY_RUNS_SQL})"
+            " GROUP BY plan_hash ORDER BY first_id"
+        )
+        return [(r[0], r[2], r[3]) for r in self._conn.execute(sql, srcs).fetchall()]
+
     def research_study_spaces(
         self, *, symbol: str | None = None, research_only: bool = True
     ) -> builtins.list[tuple[str, str]]:
@@ -1349,7 +1392,8 @@ class Ledger:
         effective-N diagnostic), WITHOUT the returns.
 
         The plan set is exactly the one :meth:`count_distinct_plans_research` (``run_id`` None:
-        every run, every window, ok and error rows) or :meth:`count_distinct_plans` (``run_id``
+        every run, risk-overlay runs included, every window, ok and error rows) or
+        :meth:`count_distinct_plans` (``run_id``
         given) counts for ``sources``, so ``len(meta) + len(missing)`` equals that count. For each
         plan the trial is its LATEST ok trial with stored returns whose source is in ``sources``
         (an ``adversarial`` or ``benchmark`` row filed under the same hash is a different
@@ -1424,13 +1468,15 @@ class Ledger:
         """``(plan_hash, interval, sharpe_per_bar)`` of the LATEST ok ``window_kind="design"``
         trial with a finite Sharpe per distinct plan whose source is in ``sources`` and whose
         cost model is exactly ``costs_json``, in EVERY research run (any interval, any design
-        window). The DSR's cross-interval pooled ``V[SR]`` annualises these per interval."""
+        window; risk-overlay runs excluded). The DSR's cross-interval pooled ``V[SR]``
+        annualises these per interval."""
         srcs = self._check_sources(sources)
         sql = (
             "SELECT plan_hash, interval, sharpe_per_bar FROM trials"
             " WHERE status = 'ok' AND sharpe_per_bar IS NOT NULL AND window_kind = 'design'"
             f" AND source IN ({', '.join('?' * len(srcs))}) AND costs_json = ?"
-            " AND run_id IN (SELECT run_id FROM research_runs) ORDER BY id"
+            " AND run_id IN (SELECT run_id FROM research_runs)"
+            f" AND run_id NOT IN ({_OVERLAY_RUNS_SQL}) ORDER BY id"
         )
         latest: dict[str, tuple[str, float]] = {}
         args = [*srcs, _check_json(costs_json, "costs_json")]

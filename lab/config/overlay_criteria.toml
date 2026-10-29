@@ -1,0 +1,76 @@
+# PROPOSED Phase 15 risk-overlay criteria and per-run budget (PLAN.md "Phase 15 — Risk-Overlay
+# Question"). Nothing reads this file. The owner installs it, in their own terminal (the target
+# is read-only to Claude while .claude/lab.lock exists):
+#
+#   cp agents/config/overlay_criteria.proposed.toml lab/config/overlay_criteria.toml
+#
+# No installed file means no overlay research: start_run(label, question="risk_overlay") is
+# refused without it. Once installed it is fixed before a run and never relaxed mid-run; the MCP
+# server snapshots it (with its sha256) into the ledger when an overlay run starts.
+#
+# The question these rows answer, pre-registered before any run: does ONE slow overlay on
+# buy-and-hold of one symbol cut drawdown, without a significant Sharpe loss, with a break-even
+# cost of at least twice the base cost? An overlay holds the coin (exposure 1) and goes flat
+# (exposure 0) for the next bar whenever its rule is true at a bar's close.
+#
+# A pass is reported as a RISK OVERLAY (smaller drawdowns at a similar risk-adjusted return),
+# never as a return claim, and it still needs 4-8 weeks of freqtrade --dry-run paper trading
+# before it is called a working risk overlay. The edge question, its success_criteria.toml and
+# its bar are unchanged by this file.
+#
+# Owner decisions (confirmed 2026-10-29):
+# - the row values below, as proposed in PLAN.md;
+# - minimum average exposure 0.5;
+# - exposure is 0 or 1 only (no half exposure, so no engine change);
+# - a slate of three literature overlays with their PUBLISHED parameters, untuned: run_sweep and
+#   walk_forward are refused in overlay runs, and each overlay logic may be tried with ONE
+#   published parameter set only, across every overlay run. Before anything is recorded the lab
+#   refuses another parameter set or a renamed copy of a submitted overlay logic, the same
+#   registry features with other parameters (or another interval) as an earlier overlay
+#   submission, and a logic whose parameters were already tried outside the overlay runs. A
+#   copy on other features is not refused, but alike overlays (returns correlated at or above
+#   family_return_corr) make the PBO row fail; otherwise it passes with the note "nothing
+#   swept: overlays are untuned by rule";
+# - the walk-forward row is a sub-window robustness check on the stitched fixed-parameter
+#   walk-forward test folds (the same design bars, not out-of-sample);
+# - overlay trials count toward N_overlay (the Bonferroni divisor below) AND, like any other
+#   trial, toward the trial count N of the edge question ("count in N, not V[SR]"), but they
+#   never enter the Sharpe-variance pools of the edge question;
+# - each deep buy-and-hold drawdown episode is also compared one by one
+#   (min_episodes_improved_share).
+#
+# Words used below:
+# - CDaR95 (conditional drawdown at risk): the mean of the worst 5% of the bar-by-bar drawdowns
+#   from the running equity peak. It uses the whole drawdown path, not one max-drawdown number.
+# - exposure-matched buy-and-hold: buy-and-hold scaled to the overlay's own average exposure and
+#   rebalanced every bar at zero cost (this favours the benchmark). Holding less always cuts
+#   drawdown, so beating plain buy-and-hold alone proves nothing; this comparison is the real one.
+# - N_overlay: the number of distinct overlay logics across every overlay run; each logic may be
+#   tried with one published parameter set only, so this is also the number of overlay
+#   configurations tried. A new run never resets it.
+# - episode: one buy-and-hold drawdown from a peak to the first bar back at that peak (or to the
+#   window end if it never recovers), counted when deeper than episode_depth_min.
+
+[overlay]
+cdar_vs_buy_hold_max = 0.75          # the overlay's CDaR95 is at most 75% of buy-and-hold's
+beat_exposure_matched = true         # the overlay's CDaR95 is below exposure-matched buy-and-hold's, paired-bootstrap p <= alpha / N_overlay
+sharpe_non_inferiority = 0.2         # one-sided 95% lower bound of Sharpe(overlay) - Sharpe(buy-and-hold), paired bootstrap, 365-day annualised, is at least -0.2
+break_even_cost_multiple_min = 2.0   # the drawdown and Sharpe rows still hold at twice the base fees and slippage
+min_drawdown_episodes = 3            # buy-and-hold needs at least 3 separate drawdowns deeper than episode_depth_min in the scored window; fewer = "not testable", never a pass
+min_avg_exposure = 0.5               # invested on at least half the bars on average: an overlay, not a timing strategy
+alpha = 0.05                         # significance level, divided by N_overlay (Bonferroni)
+wf_rows_hold = true                  # sub-window robustness: the rows also hold on the stitched fixed-parameter walk-forward test folds (same design bars, not out-of-sample)
+pbo_max = 0.2                        # probability of backtest overfitting, only if anything were swept (overlays are untuned by rule)
+require_holdout_pass = true          # passes the locked holdout check (pass/fail only), at most the budgeted number of times
+require_crosscheck_match = true      # the event-driven cross-check engine agrees, as for every plan
+cdar_confidence = 0.95               # CDaR level: the worst 5% of drawdowns (Chekhlov-Uryasev-Zabarankin, bar level)
+episode_depth_min = 0.30             # a drawdown episode (peak to recovery) counts when deeper than 30%
+bootstrap_mean_block_days = 60       # stationary-bootstrap mean block length: about two months, so drawdown clusters stay whole
+min_episodes_improved_share = 0.5    # in MORE than half of buy-and-hold's deep drawdown episodes, the overlay's drawdown inside that episode is smaller than exposure-matched buy-and-hold's (3 episodes need 2, 4 need 3)
+
+[budget]
+max_hypotheses = 3                   # the slate: at most three literature overlays
+max_proposals = 6                    # distinct plans submitted for a backtest
+max_backtests = 600                  # ledger trials under the run, every variant included (nothing is swept)
+max_holdout_checks = 1               # also capped by lab.toml holdout_budget
+max_usd = 10.0                       # model spend cap for an autonomous run

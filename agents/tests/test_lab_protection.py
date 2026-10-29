@@ -37,6 +37,7 @@ LOCKED_PATHS = (
     "lab/lab/research/criteria.py",  # what judges a plan (criteria rows, DSR's N, holdout gate)
     "lab/lab/search/optuna_search.py",  # what the sweeps record in the ledger
     "lab/config/success_criteria.toml",
+    "lab/config/overlay_criteria.toml",  # Phase 15: the risk-overlay question's frozen bar
 )
 
 
@@ -221,6 +222,9 @@ def _bash(root: Path, command: str) -> dict[str, Any] | None:
         "echo 'dsr_min = 0' > lab/config/success_criteria.toml",
         "cp /tmp/evil.py lab/lab/registry/features.py",
         "git checkout HEAD~5 -- lab/lab/stats/sharpe.py",
+        "cp agents/config/overlay_criteria.proposed.toml lab/config/overlay_criteria.toml",
+        "sed -i '' 's/0.05/0.5/' lab/lab/research/criteria.py",
+        "echo x > lab/lab/search/optuna_search.py",
     ],
 )
 def test_guard_bash_denies_lab_writes_under_the_lock(project: Path, command: str) -> None:

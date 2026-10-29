@@ -52,6 +52,10 @@ ExitReason = Literal["signal", "stop_loss", "take_profit", "end"]
 WindowKind = Literal["design", "walk_forward_train", "walk_forward_test", "holdout", "custom"]
 TrialSource = Literal["manual", "api", "optuna", "neighbourhood", "adversarial", "benchmark"]
 TrialStatus = Literal["ok", "error"]
+# "signal": an edge plan (long_entry / long_exit / risk). "overlay": a risk overlay on
+# buy-and-hold of one symbol (PLAN.md Phase 15): flat at bar t+1's open iff its ``flat_when``
+# rule holds at bar t's close, otherwise 100% invested; exposure is 0 or 1 only.
+PlanKind = Literal["signal", "overlay"]
 
 
 def interval_seconds(interval: Interval) -> int:
@@ -144,7 +148,15 @@ class FeatureRef:
 
 @dataclass(frozen=True)
 class Plan:
-    """A validated strategy plan (see ``lab.plan``). Long/flat only: Binance spot has no shorts."""
+    """A validated strategy plan (see ``lab.plan``). Long/flat only: Binance spot has no shorts.
+
+    ``kind="overlay"`` (PLAN.md Phase 15) is a risk overlay on buy-and-hold: ``long_exit`` holds
+    its ``flat_when`` rule, ``long_entry`` is ``not (flat_when)`` and ``risk`` is always the
+    default (100% of equity, no stops). :func:`lab.plan.compile_plan` turns it into
+    ``exits = flat_when`` (NaN -> False) and ``entries = ~exits``, so a missing value keeps the
+    position invested (it falls back to the base). ``kind`` is the LAST field with a default so
+    every existing constructor call is unchanged.
+    """
 
     name: str
     symbol: str
@@ -154,6 +166,7 @@ class Plan:
     long_exit: str
     risk: RiskSpec = field(default_factory=RiskSpec)
     description: str = ""
+    kind: PlanKind = "signal"
 
 
 @dataclass(frozen=True)

@@ -81,6 +81,7 @@ def test_columns_and_inputs_match_the_published_interface() -> None:
         "basis_pct": (DRV_MARK_CLOSE, DRV_INDEX_CLOSE),
         "oi_change": (DRV_OI,),
         "long_short_ratio": (DRV_LS_RATIO,),
+        "premium_mean_rank": (DRV_PREMIUM_CLOSE,),
     }
     assert isinstance(DERIVATIVES_INPUTS, MappingProxyType)
     with pytest.raises(TypeError):
@@ -89,7 +90,7 @@ def test_columns_and_inputs_match_the_published_interface() -> None:
     assert {s.name for s in DERIVATIVES_FEATURE_SPECS} == DERIVATIVES_FEATURES
 
 
-def test_all_six_are_registered_with_single_value_outputs() -> None:
+def test_every_derivatives_feature_is_registered_with_single_value_outputs() -> None:
     for spec in DERIVATIVES_FEATURE_SPECS:
         assert REGISTRY[spec.name] is spec
         assert spec.outputs == ("value",)

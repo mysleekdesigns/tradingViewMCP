@@ -1,0 +1,823 @@
+{
+ "lax": {
+  "budget_post_holdout": {
+   "budget": {
+    "backtests": 3000,
+    "holdout_checks": 1,
+    "proposals": 15
+   },
+   "remaining": {
+    "backtests": 2955,
+    "holdout_checks": 0,
+    "proposals": 14
+   },
+   "used": {
+    "backtests": 45,
+    "holdout_checks": 1,
+    "proposals": 1
+   }
+  },
+  "budget_pre_holdout": {
+   "budget": {
+    "backtests": 3000,
+    "holdout_checks": 1,
+    "proposals": 15
+   },
+   "remaining": {
+    "backtests": 2956,
+    "holdout_checks": 1,
+    "proposals": 14
+   },
+   "used": {
+    "backtests": 44,
+    "holdout_checks": 0,
+    "proposals": 1
+   }
+  },
+  "holdout_check": {
+   "checks_left": 0,
+   "checks_used": 1,
+   "passed": true
+  },
+  "report_post_holdout": {
+   "budget": {
+    "budget": {
+     "backtests": 3000,
+     "holdout_checks": 1,
+     "proposals": 15
+    },
+    "remaining": {
+     "backtests": 2955,
+     "holdout_checks": 0,
+     "proposals": 14
+    },
+    "used": {
+     "backtests": 45,
+     "holdout_checks": 1,
+     "proposals": 1
+    }
+   },
+   "ledger_n": 25,
+   "missing": [],
+   "passed": true,
+   "plan_hash": "d3d67a1fc852a88331d2ac8bb1384ccf66589e329eb643e4f2cd1d0bbe61fe27",
+   "pre_holdout_passed": true,
+   "rows": [
+    {
+     "criterion": "wf_oos_sharpe_min",
+     "note": "minimum stitched out-of-sample net Sharpe over 1 walk_forward result(s) of this plan's behaviour family in every research run (behaviour family = this logic + 0 correlated logic(s); params tuned on each train window only; repeating walk_forward, here or in a new run, can only lower it)",
+     "status": "pass",
+     "threshold": 0.5,
+     "value": 7.479661513792062
+    },
+    {
+     "criterion": "dsr_min",
+     "note": "re-deflated now with N = 25 distinct plans tried in every run of the lab (research runs and the web UI; all symbols and intervals; the run's frozen dsr_trial_count = \"nominal\"; the effective-N diagnostic in statistics is never the DSR's N); the report used N = 5; V[SR] 4.86e-06 = max(V over 21 commensurable trial Sharpes in this run 4.86e-06, V over 21 in every research run 4.86e-06 (same interval, design window, and costs), V over 21 plans pooled across 1 interval(s) 4.86e-06 (every research run, same costs, any design window; each Sharpe annualised with 365-day bars of its interval and rescaled to 4h bars)); latest Sharpe per distinct plan",
+     "status": "pass",
+     "threshold": 0.0,
+     "value": 0.9999999999999991
+    },
+    {
+     "criterion": "pbo_max",
+     "note": "max of sweep CSCV 0.125 over 16 design-window Optuna trials of 1 study(ies) of this behaviour family (every research run; matrices with >= 16 usable trials); neighbourhood CSCV 0.918 over the base plan and 5 \u00b120% trials",
+     "status": "pass",
+     "threshold": 1.0,
+     "value": 0.9177933177933177
+    },
+    {
+     "criterion": "beat_buy_hold",
+     "note": "not required by this run's criteria",
+     "status": "pass",
+     "threshold": false,
+     "value": null
+    },
+    {
+     "criterion": "beat_vol_target",
+     "note": "not required by this run's criteria",
+     "status": "pass",
+     "threshold": false,
+     "value": null
+    },
+    {
+     "criterion": "random_entry_percentile_min",
+     "note": "Sharpe percentile vs 10 random-entry paths with the same trade count",
+     "status": "pass",
+     "threshold": 0.0,
+     "value": 40.0
+    },
+    {
+     "criterion": "cost_stress_factor",
+     "note": "net total return at x2 costs",
+     "status": "pass",
+     "threshold": 2.0,
+     "value": 54.568202395918846
+    },
+    {
+     "criterion": "require_gradual_delay_decay",
+     "note": "not required by this run's criteria",
+     "status": "pass",
+     "threshold": false,
+     "value": null
+    },
+    {
+     "criterion": "max_drawdown_max",
+     "note": "net max drawdown (fraction) on the design window",
+     "status": "pass",
+     "threshold": 1.0,
+     "value": 0.11403915537398357
+    },
+    {
+     "criterion": "min_trades",
+     "note": "trades on the design window",
+     "status": "pass",
+     "threshold": 0,
+     "value": 9.0
+    },
+    {
+     "criterion": "min_profitable_regimes",
+     "note": "not required by this run's criteria",
+     "status": "pass",
+     "threshold": 0,
+     "value": null
+    },
+    {
+     "criterion": "neighbourhood_pct",
+     "note": "not required by this run's criteria",
+     "status": "pass",
+     "threshold": 0.0,
+     "value": null
+    },
+    {
+     "criterion": "require_holdout_pass",
+     "note": "locked holdout: passed = True",
+     "status": "pass",
+     "threshold": true,
+     "value": true
+    },
+    {
+     "criterion": "require_crosscheck_match",
+     "note": "event-driven cross-check: matched = True; 9 of 9 vectorbt trades matched by 9 event-driven trades, return diff 8.73e-07%",
+     "status": "pass",
+     "threshold": true,
+     "value": true
+    }
+   ],
+   "run_id": "r-20261029-000000-abc123",
+   "statistics": {
+    "cpcv": {
+     "basis": "upper bound: candidates were chosen by a search that saw every test bar (TPE proposed them from objective values over the whole design window, so the out-of-sample paths are not out of the search's sample)",
+     "chosen": [
+      11,
+      11,
+      11,
+      0,
+      11,
+      11,
+      11,
+      11,
+      11,
+      11,
+      11,
+      11,
+      11,
+      11,
+      11
+     ],
+     "configs_source": "16 design-window Optuna trials (4h, 2018-07-01 to 2019-10-01) of study(ies) r-20261029-000000-abc123:ema_trend:design:20180701-20191001:seed7 in run r-20261029-000000-abc123: the plan's behaviour-family sweep, read from the ledger (same bars and costs as those trials). In each split the in-sample best configuration is scored on its purged, embargoed test groups; the paths are those out-of-sample pieces stitched together. No new backtests, nothing recorded, and the DSR's N is unchanged (it counts configurations searched, not paths). Information only.",
+     "embargo_bars": 28,
+     "n_bars": 2742,
+     "n_configs": 16,
+     "n_groups": 6,
+     "n_paths": 5,
+     "n_splits": 15,
+     "n_test_groups": 2,
+     "path_sharpes": [
+      7.450181029331544,
+      7.54991859189376,
+      7.54991859189376,
+      7.4345684981534115,
+      7.54991859189376
+     ],
+     "purge_bars": 1,
+     "quantiles": {
+      "max": 7.54991859189376,
+      "median": 7.54991859189376,
+      "min": 7.4345684981534115,
+      "p05": 7.437691004389038,
+      "p25": 7.450181029331544,
+      "p75": 7.54991859189376,
+      "p95": 7.54991859189376
+     },
+     "share_positive": 1.0
+    },
+    "cpcv_startup": {
+     "basis": "random start-up trials only: TPE drew them from the search space before using any objective value, so no test bar shaped which configurations are compared",
+     "chosen": [
+      5,
+      5,
+      5,
+      0,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5
+     ],
+     "configs_source": "10 of the 16 design-window Optuna trials above (4h, 2018-07-01 to 2019-10-01, study(ies) r-20261029-000000-abc123:ema_trend:design:20180701-20191001:seed7, run r-20261029-000000-abc123): those with Optuna trial number < n_startup_trials = 10 within their study, numbered by the recorded Optuna trial number. In each split the in-sample best configuration is scored on its purged, embargoed test groups; the paths are those out-of-sample pieces stitched together. No new backtests, nothing recorded, and the DSR's N is unchanged (it counts configurations searched, not paths). Information only.",
+     "embargo_bars": 28,
+     "n_bars": 2742,
+     "n_configs": 10,
+     "n_groups": 6,
+     "n_paths": 5,
+     "n_splits": 15,
+     "n_test_groups": 2,
+     "path_sharpes": [
+      7.417175463689618,
+      7.50847463820125,
+      7.50847463820125,
+      7.427907773636999,
+      7.50847463820125
+     ],
+     "purge_bars": 1,
+     "quantiles": {
+      "max": 7.50847463820125,
+      "median": 7.50847463820125,
+      "min": 7.417175463689618,
+      "p05": 7.419321925679094,
+      "p25": 7.427907773636999,
+      "p75": 7.50847463820125,
+      "p95": 7.50847463820125
+     },
+     "share_positive": 1.0
+    },
+    "min_backtest_length": {
+     "bars": 162.2369295778294,
+     "basis": "MinBTL = (E[max Z] of N = 25 trials / annualised Sharpe)^2 years (Bailey, Borwein, Lopez de Prado & Zhu 2014): below it, the plan's observed design-window net Sharpe 7.34 (4h, 365-day year of 2190 bars) is within what selecting the best of N zero-skill trials produces. Design window 2742 bars = 1.25 years. Information only.",
+     "design_bars": 2742,
+     "design_years": 1.252054794520548,
+     "n_trials": 25,
+     "ok": true,
+     "target_sharpe_annual": 7.337664630894094,
+     "years": 0.07408078976156593
+    },
+    "min_track_record_length": {
+     "missing": "confidence = the frozen dsr_min 0 is not strictly between 0 and 1, so MinTRL is not defined"
+    },
+    "note": "information only: none of these is a criterion row and none changes pass/fail; a too-short design window is stated on the dsr_min row",
+    "trial_count": {
+     "basis": "Diagnostic only, NOT used for the DSR (which deflates with the nominal N above): the participation ratio of the plans' return correlations is dominated by the one market factor long-only crypto plans share, which V[SR] already reflects, so as N it would count that factor twice; it falls when near-copies are added, and with M plans over T days it is biased down (Marchenko-Pastur). effective_null is the same ratio after shuffling each plan's daily returns in time within its own observed days (seed 0): what M independent plans on these days would score. Read effective_diagnostic against effective_null, not against nominal. Method: Effective N = eigenvalue participation ratio of the pairwise Pearson correlation of each plan's latest pre-holdout returns (design window preferred), summed to daily UTC log returns on complete days; pairs with fewer than 60 common days and the 0 of 25 plans without usable returns count as independent. The null shuffles each plan's days in time (seed 0) and is scored the same way. Information only.",
+     "dsr_n": 25,
+     "effective_diagnostic": 1.018141676656045,
+     "effective_null": 23.27565594967258,
+     "frozen_choice": "nominal",
+     "n_without_returns": 0,
+     "nominal": 25,
+     "plans": 25,
+     "rows": 456,
+     "run_effective_diagnostic": 1.018141676656045,
+     "run_effective_null": 23.27565594967258,
+     "run_nominal": 25,
+     "run_plans": 25,
+     "run_rows": 456,
+     "used_for_dsr": "nominal"
+    }
+   }
+  },
+  "report_pre_holdout": {
+   "budget": {
+    "budget": {
+     "backtests": 3000,
+     "holdout_checks": 1,
+     "proposals": 15
+    },
+    "remaining": {
+     "backtests": 2956,
+     "holdout_checks": 1,
+     "proposals": 14
+    },
+    "used": {
+     "backtests": 44,
+     "holdout_checks": 0,
+     "proposals": 1
+    }
+   },
+   "ledger_n": 25,
+   "missing": [
+    "require_holdout_pass"
+   ],
+   "passed": false,
+   "plan_hash": "d3d67a1fc852a88331d2ac8bb1384ccf66589e329eb643e4f2cd1d0bbe61fe27",
+   "pre_holdout_passed": true,
+   "rows": [
+    {
+     "criterion": "wf_oos_sharpe_min",
+     "note": "minimum stitched out-of-sample net Sharpe over 1 walk_forward result(s) of this plan's behaviour family in every research run (behaviour family = this logic + 0 correlated logic(s); params tuned on each train window only; repeating walk_forward, here or in a new run, can only lower it)",
+     "status": "pass",
+     "threshold": 0.5,
+     "value": 7.479661513792062
+    },
+    {
+     "criterion": "dsr_min",
+     "note": "re-deflated now with N = 25 distinct plans tried in every run of the lab (research runs and the web UI; all symbols and intervals; the run's frozen dsr_trial_count = \"nominal\"; the effective-N diagnostic in statistics is never the DSR's N); the report used N = 5; V[SR] 4.86e-06 = max(V over 21 commensurable trial Sharpes in this run 4.86e-06, V over 21 in every research run 4.86e-06 (same interval, design window, and costs), V over 21 plans pooled across 1 interval(s) 4.86e-06 (every research run, same costs, any design window; each Sharpe annualised with 365-day bars of its interval and rescaled to 4h bars)); latest Sharpe per distinct plan",
+     "status": "pass",
+     "threshold": 0.0,
+     "value": 0.9999999999999991
+    },
+    {
+     "criterion": "pbo_max",
+     "note": "max of sweep CSCV 0.125 over 16 design-window Optuna trials of 1 study(ies) of this behaviour family (every research run; matrices with >= 16 usable trials); neighbourhood CSCV 0.918 over the base plan and 5 \u00b120% trials",
+     "status": "pass",
+     "threshold": 1.0,
+     "value": 0.9177933177933177
+    },
+    {
+     "criterion": "beat_buy_hold",
+     "note": "not required by this run's criteria",
+     "status": "pass",
+     "threshold": false,
+     "value": null
+    },
+    {
+     "criterion": "beat_vol_target",
+     "note": "not required by this run's criteria",
+     "status": "pass",
+     "threshold": false,
+     "value": null
+    },
+    {
+     "criterion": "random_entry_percentile_min",
+     "note": "Sharpe percentile vs 10 random-entry paths with the same trade count",
+     "status": "pass",
+     "threshold": 0.0,
+     "value": 40.0
+    },
+    {
+     "criterion": "cost_stress_factor",
+     "note": "net total return at x2 costs",
+     "status": "pass",
+     "threshold": 2.0,
+     "value": 54.568202395918846
+    },
+    {
+     "criterion": "require_gradual_delay_decay",
+     "note": "not required by this run's criteria",
+     "status": "pass",
+     "threshold": false,
+     "value": null
+    },
+    {
+     "criterion": "max_drawdown_max",
+     "note": "net max drawdown (fraction) on the design window",
+     "status": "pass",
+     "threshold": 1.0,
+     "value": 0.11403915537398357
+    },
+    {
+     "criterion": "min_trades",
+     "note": "trades on the design window",
+     "status": "pass",
+     "threshold": 0,
+     "value": 9.0
+    },
+    {
+     "criterion": "min_profitable_regimes",
+     "note": "not required by this run's criteria",
+     "status": "pass",
+     "threshold": 0,
+     "value": null
+    },
+    {
+     "criterion": "neighbourhood_pct",
+     "note": "not required by this run's criteria",
+     "status": "pass",
+     "threshold": 0.0,
+     "value": null
+    },
+    {
+     "criterion": "require_holdout_pass",
+     "note": "no locked holdout evidence yet",
+     "status": "missing",
+     "threshold": true,
+     "value": null
+    },
+    {
+     "criterion": "require_crosscheck_match",
+     "note": "event-driven cross-check: matched = True; 9 of 9 vectorbt trades matched by 9 event-driven trades, return diff 8.73e-07%",
+     "status": "pass",
+     "threshold": true,
+     "value": true
+    }
+   ],
+   "run_id": "r-20261029-000000-abc123",
+   "statistics": {
+    "cpcv": {
+     "basis": "upper bound: candidates were chosen by a search that saw every test bar (TPE proposed them from objective values over the whole design window, so the out-of-sample paths are not out of the search's sample)",
+     "chosen": [
+      11,
+      11,
+      11,
+      0,
+      11,
+      11,
+      11,
+      11,
+      11,
+      11,
+      11,
+      11,
+      11,
+      11,
+      11
+     ],
+     "configs_source": "16 design-window Optuna trials (4h, 2018-07-01 to 2019-10-01) of study(ies) r-20261029-000000-abc123:ema_trend:design:20180701-20191001:seed7 in run r-20261029-000000-abc123: the plan's behaviour-family sweep, read from the ledger (same bars and costs as those trials). In each split the in-sample best configuration is scored on its purged, embargoed test groups; the paths are those out-of-sample pieces stitched together. No new backtests, nothing recorded, and the DSR's N is unchanged (it counts configurations searched, not paths). Information only.",
+     "embargo_bars": 28,
+     "n_bars": 2742,
+     "n_configs": 16,
+     "n_groups": 6,
+     "n_paths": 5,
+     "n_splits": 15,
+     "n_test_groups": 2,
+     "path_sharpes": [
+      7.450181029331544,
+      7.54991859189376,
+      7.54991859189376,
+      7.4345684981534115,
+      7.54991859189376
+     ],
+     "purge_bars": 1,
+     "quantiles": {
+      "max": 7.54991859189376,
+      "median": 7.54991859189376,
+      "min": 7.4345684981534115,
+      "p05": 7.437691004389038,
+      "p25": 7.450181029331544,
+      "p75": 7.54991859189376,
+      "p95": 7.54991859189376
+     },
+     "share_positive": 1.0
+    },
+    "cpcv_startup": {
+     "basis": "random start-up trials only: TPE drew them from the search space before using any objective value, so no test bar shaped which configurations are compared",
+     "chosen": [
+      5,
+      5,
+      5,
+      0,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5
+     ],
+     "configs_source": "10 of the 16 design-window Optuna trials above (4h, 2018-07-01 to 2019-10-01, study(ies) r-20261029-000000-abc123:ema_trend:design:20180701-20191001:seed7, run r-20261029-000000-abc123): those with Optuna trial number < n_startup_trials = 10 within their study, numbered by the recorded Optuna trial number. In each split the in-sample best configuration is scored on its purged, embargoed test groups; the paths are those out-of-sample pieces stitched together. No new backtests, nothing recorded, and the DSR's N is unchanged (it counts configurations searched, not paths). Information only.",
+     "embargo_bars": 28,
+     "n_bars": 2742,
+     "n_configs": 10,
+     "n_groups": 6,
+     "n_paths": 5,
+     "n_splits": 15,
+     "n_test_groups": 2,
+     "path_sharpes": [
+      7.417175463689618,
+      7.50847463820125,
+      7.50847463820125,
+      7.427907773636999,
+      7.50847463820125
+     ],
+     "purge_bars": 1,
+     "quantiles": {
+      "max": 7.50847463820125,
+      "median": 7.50847463820125,
+      "min": 7.417175463689618,
+      "p05": 7.419321925679094,
+      "p25": 7.427907773636999,
+      "p75": 7.50847463820125,
+      "p95": 7.50847463820125
+     },
+     "share_positive": 1.0
+    },
+    "min_backtest_length": {
+     "bars": 162.2369295778294,
+     "basis": "MinBTL = (E[max Z] of N = 25 trials / annualised Sharpe)^2 years (Bailey, Borwein, Lopez de Prado & Zhu 2014): below it, the plan's observed design-window net Sharpe 7.34 (4h, 365-day year of 2190 bars) is within what selecting the best of N zero-skill trials produces. Design window 2742 bars = 1.25 years. Information only.",
+     "design_bars": 2742,
+     "design_years": 1.252054794520548,
+     "n_trials": 25,
+     "ok": true,
+     "target_sharpe_annual": 7.337664630894094,
+     "years": 0.07408078976156593
+    },
+    "min_track_record_length": {
+     "missing": "confidence = the frozen dsr_min 0 is not strictly between 0 and 1, so MinTRL is not defined"
+    },
+    "note": "information only: none of these is a criterion row and none changes pass/fail; a too-short design window is stated on the dsr_min row",
+    "trial_count": {
+     "basis": "Diagnostic only, NOT used for the DSR (which deflates with the nominal N above): the participation ratio of the plans' return correlations is dominated by the one market factor long-only crypto plans share, which V[SR] already reflects, so as N it would count that factor twice; it falls when near-copies are added, and with M plans over T days it is biased down (Marchenko-Pastur). effective_null is the same ratio after shuffling each plan's daily returns in time within its own observed days (seed 0): what M independent plans on these days would score. Read effective_diagnostic against effective_null, not against nominal. Method: Effective N = eigenvalue participation ratio of the pairwise Pearson correlation of each plan's latest pre-holdout returns (design window preferred), summed to daily UTC log returns on complete days; pairs with fewer than 60 common days and the 0 of 25 plans without usable returns count as independent. The null shuffles each plan's days in time (seed 0) and is scored the same way. Information only.",
+     "dsr_n": 25,
+     "effective_diagnostic": 1.018141676656045,
+     "effective_null": 23.27565594967258,
+     "frozen_choice": "nominal",
+     "n_without_returns": 0,
+     "nominal": 25,
+     "plans": 25,
+     "rows": 456,
+     "run_effective_diagnostic": 1.018141676656045,
+     "run_effective_null": 23.27565594967258,
+     "run_nominal": 25,
+     "run_plans": 25,
+     "run_rows": 456,
+     "used_for_dsr": "nominal"
+    }
+   }
+  }
+ },
+ "strict": {
+  "budget": {
+   "budget": {
+    "backtests": 3000,
+    "holdout_checks": 1,
+    "proposals": 15
+   },
+   "remaining": {
+    "backtests": 2956,
+    "holdout_checks": 1,
+    "proposals": 14
+   },
+   "used": {
+    "backtests": 44,
+    "holdout_checks": 0,
+    "proposals": 1
+   }
+  },
+  "holdout_refusal": "Error executing tool holdout_check: holdout check refused: plan d3d67a1fc852 does not pass the pre-holdout success criteria yet, so no holdout check was spent: pbo_max (fail), beat_buy_hold (fail), beat_vol_target (fail), random_entry_percentile_min (fail), require_gradual_delay_decay (fail), min_trades (fail), min_profitable_regimes (fail), neighbourhood_pct (missing). See get_report for details.",
+  "report": {
+   "budget": {
+    "budget": {
+     "backtests": 3000,
+     "holdout_checks": 1,
+     "proposals": 15
+    },
+    "remaining": {
+     "backtests": 2956,
+     "holdout_checks": 1,
+     "proposals": 14
+    },
+    "used": {
+     "backtests": 44,
+     "holdout_checks": 0,
+     "proposals": 1
+    }
+   },
+   "ledger_n": 25,
+   "missing": [
+    "neighbourhood_pct",
+    "require_holdout_pass"
+   ],
+   "passed": false,
+   "plan_hash": "d3d67a1fc852a88331d2ac8bb1384ccf66589e329eb643e4f2cd1d0bbe61fe27",
+   "pre_holdout_passed": false,
+   "rows": [
+    {
+     "criterion": "wf_oos_sharpe_min",
+     "note": "minimum stitched out-of-sample net Sharpe over 1 walk_forward result(s) of this plan's behaviour family in every research run (behaviour family = this logic + 0 correlated logic(s); params tuned on each train window only; repeating walk_forward, here or in a new run, can only lower it)",
+     "status": "pass",
+     "threshold": 1.0,
+     "value": 7.972338370536788
+    },
+    {
+     "criterion": "dsr_min",
+     "note": "re-deflated now with N = 25 distinct plans tried in every run of the lab (research runs and the web UI; all symbols and intervals; the run's frozen dsr_trial_count = \"nominal\"; the effective-N diagnostic in statistics is never the DSR's N); the report used N = 5; V[SR] 5.78e-06 = max(V over 21 commensurable trial Sharpes in this run 5.78e-06, V over 21 in every research run 5.78e-06 (same interval, design window, and costs), V over 21 plans pooled across 1 interval(s) 5.78e-06 (every research run, same costs, any design window; each Sharpe annualised with 365-day bars of its interval and rescaled to 4h bars)); latest Sharpe per distinct plan",
+     "status": "pass",
+     "threshold": 0.95,
+     "value": 1.0
+    },
+    {
+     "criterion": "pbo_max",
+     "note": "max of sweep CSCV 0.311 over 16 design-window Optuna trials of 1 study(ies) of this behaviour family (every research run; matrices with >= 16 usable trials); neighbourhood CSCV 0.897 over the base plan and 5 \u00b120% trials",
+     "status": "fail",
+     "threshold": 0.2,
+     "value": 0.8972804972804973
+    },
+    {
+     "criterion": "beat_buy_hold",
+     "note": "net Sharpe 7.81 vs buy-and-hold 8.09",
+     "status": "fail",
+     "threshold": true,
+     "value": false
+    },
+    {
+     "criterion": "beat_vol_target",
+     "note": "net Sharpe 7.81 vs vol-targeted buy-and-hold 8.18",
+     "status": "fail",
+     "threshold": true,
+     "value": false
+    },
+    {
+     "criterion": "random_entry_percentile_min",
+     "note": "Sharpe percentile vs 10 random-entry paths with the same trade count",
+     "status": "fail",
+     "threshold": 95.0,
+     "value": 70.0
+    },
+    {
+     "criterion": "cost_stress_factor",
+     "note": "net total return at x2 costs",
+     "status": "pass",
+     "threshold": 2.0,
+     "value": 60.691768908977
+    },
+    {
+     "criterion": "require_gradual_delay_decay",
+     "note": "suspicious: edge unchanged at 5 bars (Sharpe 0 bars 7.81, 1 bars 7.75, 3 bars 7.89, 5 bars 7.85)",
+     "status": "fail",
+     "threshold": true,
+     "value": false
+    },
+    {
+     "criterion": "max_drawdown_max",
+     "note": "net max drawdown (fraction) on the design window",
+     "status": "pass",
+     "threshold": 0.25,
+     "value": 0.12201929097623132
+    },
+    {
+     "criterion": "min_trades",
+     "note": "trades on the design window",
+     "status": "fail",
+     "threshold": 100,
+     "value": 12.0
+    },
+    {
+     "criterion": "min_profitable_regimes",
+     "note": "bear n/a (0 active bars), bull 33.6 (1987 active bars), sideways n/a (0 active bars). trailing 90-day simple return (540 bars): above +10% bull, below -10% bear, else sideways (regime definition from the run's frozen success criteria); bar t's return is assigned to the regime at close t-1",
+     "status": "fail",
+     "threshold": 2,
+     "value": 1.0
+    },
+    {
+     "criterion": "neighbourhood_pct",
+     "note": "only 4 of 8 expected \u00b120% neighbours were run on the design window with the same costs (lab.toml neighbourhood_max_trials = 5 caps the grid at 4; or an older backtest, or trials run with other costs); robustness is not established",
+     "status": "missing",
+     "threshold": 0.2,
+     "value": null
+    },
+    {
+     "criterion": "require_holdout_pass",
+     "note": "no locked holdout evidence yet",
+     "status": "missing",
+     "threshold": true,
+     "value": null
+    },
+    {
+     "criterion": "require_crosscheck_match",
+     "note": "event-driven cross-check: matched = True; 12 of 12 vectorbt trades matched by 12 event-driven trades, return diff 1.08e-06%",
+     "status": "pass",
+     "threshold": true,
+     "value": true
+    }
+   ],
+   "run_id": "r-20261029-000000-abc123",
+   "statistics": {
+    "cpcv": {
+     "basis": "upper bound: candidates were chosen by a search that saw every test bar (TPE proposed them from objective values over the whole design window, so the out-of-sample paths are not out of the search's sample)",
+     "chosen": [
+      7,
+      7,
+      7,
+      7,
+      11,
+      7,
+      9,
+      7,
+      11,
+      7,
+      7,
+      11,
+      7,
+      7,
+      11
+     ],
+     "configs_source": "16 design-window Optuna trials (4h, 2018-07-01 to 2019-10-01) of study(ies) r-20261029-000000-abc123:ema_trend:design:20180701-20191001:seed7 in run r-20261029-000000-abc123: the plan's behaviour-family sweep, read from the ledger (same bars and costs as those trials). In each split the in-sample best configuration is scored on its purged, embargoed test groups; the paths are those out-of-sample pieces stitched together. No new backtests, nothing recorded, and the DSR's N is unchanged (it counts configurations searched, not paths). Information only.",
+     "embargo_bars": 28,
+     "n_bars": 2742,
+     "n_configs": 16,
+     "n_groups": 6,
+     "n_paths": 5,
+     "n_splits": 15,
+     "n_test_groups": 2,
+     "path_sharpes": [
+      7.95457824690863,
+      7.885428565899817,
+      7.822660142253986,
+      8.0399155004085,
+      7.947038617804083
+     ],
+     "purge_bars": 1,
+     "quantiles": {
+      "max": 8.0399155004085,
+      "median": 7.947038617804083,
+      "min": 7.822660142253986,
+      "p05": 7.835213826983153,
+      "p25": 7.885428565899817,
+      "p75": 7.95457824690863,
+      "p95": 8.022848049708525
+     },
+     "share_positive": 1.0
+    },
+    "cpcv_startup": {
+     "basis": "random start-up trials only: TPE drew them from the search space before using any objective value, so no test bar shaped which configurations are compared",
+     "chosen": [
+      7,
+      7,
+      7,
+      7,
+      5,
+      7,
+      9,
+      7,
+      7,
+      7,
+      7,
+      7,
+      7,
+      7,
+      7
+     ],
+     "configs_source": "10 of the 16 design-window Optuna trials above (4h, 2018-07-01 to 2019-10-01, study(ies) r-20261029-000000-abc123:ema_trend:design:20180701-20191001:seed7, run r-20261029-000000-abc123): those with Optuna trial number < n_startup_trials = 10 within their study, numbered by the recorded Optuna trial number. In each split the in-sample best configuration is scored on its purged, embargoed test groups; the paths are those out-of-sample pieces stitched together. No new backtests, nothing recorded, and the DSR's N is unchanged (it counts configurations searched, not paths). Information only.",
+     "embargo_bars": 28,
+     "n_bars": 2742,
+     "n_configs": 10,
+     "n_groups": 6,
+     "n_paths": 5,
+     "n_splits": 15,
+     "n_test_groups": 2,
+     "path_sharpes": [
+      7.926730150805146,
+      7.970661513736686,
+      7.90820505998293,
+      8.0399155004085,
+      7.980828221693521
+     ],
+     "purge_bars": 1,
+     "quantiles": {
+      "max": 8.0399155004085,
+      "median": 7.970661513736686,
+      "min": 7.90820505998293,
+      "p05": 7.911910078147374,
+      "p25": 7.926730150805146,
+      "p75": 7.980828221693521,
+      "p95": 8.028098044665503
+     },
+     "share_positive": 1.0
+    },
+    "min_backtest_length": {
+     "bars": 143.06115058560806,
+     "basis": "MinBTL = (E[max Z] of N = 25 trials / annualised Sharpe)^2 years (Bailey, Borwein, Lopez de Prado & Zhu 2014): below it, the plan's observed design-window net Sharpe 7.81 (4h, 365-day year of 2190 bars) is within what selecting the best of N zero-skill trials produces. Design window 2742 bars = 1.25 years. Information only.",
+     "design_bars": 2742,
+     "design_years": 1.252054794520548,
+     "n_trials": 25,
+     "ok": true,
+     "target_sharpe_annual": 7.813972182556228,
+     "years": 0.0653247262947982
+    },
+    "min_track_record_length": {
+     "bars": 104.216306415323,
+     "basis": "MinTRL = bars needed before the Probabilistic Sharpe Ratio against the DSR's deflated benchmark SR0 = 0.0048 per bar reaches the frozen dsr_min = 0.95 (Bailey & Lopez de Prado 2012 eq. 13, with the plan's skew and kurtosis); with at least MinTRL bars the DSR reaches dsr_min (the same inversion). Information only.",
+     "confidence": 0.95,
+     "design_bars": 2742,
+     "ok": true,
+     "target_sharpe_per_bar": 0.004802833515357814
+    },
+    "note": "information only: none of these is a criterion row and none changes pass/fail; a too-short design window is stated on the dsr_min row",
+    "trial_count": {
+     "basis": "Diagnostic only, NOT used for the DSR (which deflates with the nominal N above): the participation ratio of the plans' return correlations is dominated by the one market factor long-only crypto plans share, which V[SR] already reflects, so as N it would count that factor twice; it falls when near-copies are added, and with M plans over T days it is biased down (Marchenko-Pastur). effective_null is the same ratio after shuffling each plan's daily returns in time within its own observed days (seed 0): what M independent plans on these days would score. Read effective_diagnostic against effective_null, not against nominal. Method: Effective N = eigenvalue participation ratio of the pairwise Pearson correlation of each plan's latest pre-holdout returns (design window preferred), summed to daily UTC log returns on complete days; pairs with fewer than 60 common days and the 0 of 25 plans without usable returns count as independent. The null shuffles each plan's days in time (seed 0) and is scored the same way. Information only.",
+     "dsr_n": 25,
+     "effective_diagnostic": 1.0290302087819527,
+     "effective_null": 22.970480436313956,
+     "frozen_choice": "nominal",
+     "n_without_returns": 0,
+     "nominal": 25,
+     "plans": 25,
+     "rows": 456,
+     "run_effective_diagnostic": 1.0290302087819527,
+     "run_effective_null": 22.970480436313956,
+     "run_nominal": 25,
+     "run_plans": 25,
+     "run_rows": 456,
+     "used_for_dsr": "nominal"
+    }
+   }
+  }
+ }
+}

@@ -5,8 +5,9 @@ Run: ``uv run python -m lab.mcp_server`` (stdio). Register with Claude Code:
 
 Tools (all return compact JSON: never equity curves or trade lists):
 
-* ``start_run(label)``: freeze the owner's success criteria + budget into the ledger under a
-  server-assigned run id.
+* ``start_run(label, question="edge")``: freeze the owner's success criteria + budget into the
+  ledger under a server-assigned run id; ``question="risk_overlay"`` (PLAN.md Phase 15) freezes
+  ``lab/config/overlay_criteria.toml`` instead (no file, no overlay research).
 * ``list_features()``, ``validate_plan(plan)``: registry and validator (no ledger, no budget).
 * ``run_backtest``, ``run_sweep``, ``walk_forward``, ``run_adversarial``: design window only;
   every trial goes to the ledger and the report is recorded as research evidence for the
@@ -29,6 +30,12 @@ bug), and ``get_report`` adds the ``[portfolio]`` criteria rows. ``rebalance.off
 at 0 (validate_plan and every portfolio tool reject another value; run_adversarial's
 other-weekday table is descriptive timing luck).
 Single-symbol plans behave exactly as before.
+
+Risk-overlay runs (PLAN.md Phase 15) take only ``{"kind": "overlay", ...}`` plans, and edge runs
+refuse them (:func:`lab.research.runs.check_question`, before a plan is parsed or anything is
+recorded). Overlays use published parameters, untuned: ``run_sweep`` and ``walk_forward`` are
+refused in overlay runs before any criteria are read. An edge run's tools and outputs are
+unchanged.
 
 Budgets are enforced here, before anything runs: an unknown run id, a run whose frozen lab.toml
 fingerprint differs from the server's, a new plan beyond ``max_proposals``, or a call whose
@@ -88,14 +95,20 @@ from lab.ledger import SELECTION_SOURCES, Ledger
 from lab.plan import parse_plan, plan_hash, plan_to_dict, tunable_params
 from lab.plan import portfolio as pf
 from lab.plan import validate_plan as _validate_plan
+from lab.plan.schema import overlay_plan_json_schema
 from lab.plan.validator import PlanValidationError, format_errors
 from lab.registry import REGISTRY
 from lab.registry.derivatives import DERIVATIVES_FEATURES
 from lab.report import ledger_item, metrics_dict, num, seconds
 from lab.research.contract import (
+    OVERLAY_CRITERIA_PATH,
+    QUESTIONS,
     SUCCESS_CRITERIA_PATH,
+    OverlayResearchConfig,
+    ResearchConfig,
     ResearchConfigError,
     SuccessCriteria,
+    load_overlay_config,
     load_research_config,
 )
 from lab.research.criteria import evaluate_plan, frozen_criteria
@@ -109,6 +122,12 @@ from lab.research.family import (
 )
 from lab.research.holdout import HoldoutRefusedError, run_holdout_check
 from lab.research.logic import canonical_space, logic_hash
+from lab.research.overlay_criteria import (
+    N_OVERLAY_BASIS,
+    check_overlay_untuned,
+    evaluate_overlay_plan,
+    overlay_trial_count,
+)
 from lab.research.pipeline import adversarial_evidence, backtest_evidence, crosscheck_evidence
 from lab.research.portfolio import (
     portfolio_adversarial_evidence,
@@ -124,8 +143,11 @@ from lab.research.runs import (
     budget_status,
     check_derivatives_snapshot,
     check_lab_fingerprint,
+    check_question,
     check_universe_manifest,
+    frozen_question,
     holdout_budget,
+    overlay_run_ids,
     start_research_run,
     universe_manifest,
 )
@@ -165,6 +187,26 @@ DERIVATIVES_GATE_NOTE = (
     "exposure or crash-risk filter, not a direction signal: may only gate long_entry as an "
     "`and` conjunct beside a price signal (e.g. close > ema_slow and funding_zscore < 2), never "
     "in long_exit"
+)
+
+OVERLAY_NOTE = (
+    'An overlay plan has "kind": "overlay" and answers the risk-overlay question only (start_run '
+    'with question="risk_overlay"): buy-and-hold of one symbol, flat for the next bar whenever '
+    "flat_when is true at a bar's close (exposure is 1 or 0; a NaN in any operand makes the "
+    "whole rule unknown, and an unknown rule keeps the overlay invested). "
+    "Registry features only, at most 3 features and 3 parameters; derivatives features may "
+    "appear anywhere in flat_when. Overlays use published parameters, untuned: run_sweep and "
+    "walk_forward are refused in risk-overlay runs, and each overlay logic may be tried with "
+    "one published parameter set only, across every overlay run: another parameter set or a "
+    "renamed copy of a submitted overlay logic, the same features with other parameters as an "
+    "earlier overlay, and a logic already tuned in an edge run are refused before anything is "
+    "recorded; alike copies on other features make get_report's pbo_max fail."
+)
+OVERLAY_VALIDATE_NOTE = (
+    'overlay plans run only in a risk-overlay run (start_run with question="risk_overlay") and '
+    "use their published parameters untuned: tunable_params lists them for the record, but "
+    "run_sweep and walk_forward are refused in risk-overlay runs, and each overlay logic may be "
+    "tried with one published parameter set only, across every overlay run"
 )
 
 INSTRUCTIONS = """\
@@ -221,6 +263,18 @@ design window; the holdout is reachable only via holdout_check, which returns pa
 A hypothesis gets one holdout check ever (renaming or re-tuning the same logic, or a copy that
 trades alike as above, does not make a new one); if it fails it is dead. "No edge found" is a
 correct outcome.
+Risk-overlay runs: start_run(label, question="risk_overlay") freezes the owner-installed
+lab/config/overlay_criteria.toml (no file, no overlay research). They take only
+{"kind": "overlay", ...} plans (list_features shows the schema): buy-and-hold of one symbol,
+flat for the next bar whenever flat_when is true at a bar's close; derivatives features may
+appear in flat_when (a NaN in any operand makes the whole rule unknown, and an unknown rule
+keeps the overlay invested). Overlays use published parameters, untuned: run_sweep and
+walk_forward are refused in them, and each overlay logic may be tried with one published
+parameter set only, across every overlay run. Edge runs refuse overlay plans and overlay
+runs refuse every other plan.
+A pass is reported as a risk overlay (smaller drawdowns than buy-and-hold and than
+buy-and-hold scaled to the same exposure, without a significant Sharpe loss), not as a
+return claim. The edge question is unchanged.
 Results are historical and not forward-looking."""
 
 _T = TypeVar("_T")
@@ -251,6 +305,11 @@ def _portfolio_or_error(raw: Mapping[str, Any], cfg: LabConfig) -> tuple[pf.Port
             + format_errors(exc.errors)
         ) from None
     return plan, pf.portfolio_plan_hash(plan)
+
+
+def _overlay_schema() -> dict[str, Any]:
+    """The overlay plan JSON schema (:func:`lab.plan.schema.overlay_plan_json_schema`)."""
+    return dict(overlay_plan_json_schema())
 
 
 def _plan_or_error(raw: Mapping[str, Any]) -> tuple[Plan, str]:
@@ -444,9 +503,10 @@ def build_server(
     research_config_path: Path | str = SUCCESS_CRITERIA_PATH,
     pinned_run_id: str | None = None,
     holdout_enabled: bool = True,
+    overlay_config_path: Path | str = OVERLAY_CRITERIA_PATH,
 ) -> MCPServer:
     """Build the server. Tests inject ``cfg``, a tmp ``ledger_path``, a synthetic ``loader``,
-    and a tmp criteria file; :func:`main` passes the real ones."""
+    and tmp criteria files (edge and risk-overlay); :func:`main` passes the real ones."""
     config = cfg if cfg is not None else load_config()
     db_path = Path(ledger_path) if ledger_path is not None else config.ledger_path
     load = loader or default_loader(config)
@@ -479,6 +539,23 @@ def build_server(
                     yield
                 finally:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def overlay_lock(plan: object) -> Iterator[None]:
+        """Overlay plans only: an exclusive flock on ONE lab-wide lock file, held (inside the
+        run's lock) from the one-parameter-set check until the trials are recorded, so two
+        servers on different overlay runs cannot both pass the check for alike submissions.
+        Other plans: no-op. Always taken after ``run_lock`` (one lock order, no deadlock)."""
+        if getattr(plan, "kind", None) != "overlay":
+            yield
+            return
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        with open(lock_dir / "overlay-submissions.lock", "a+b") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
     @contextmanager
     def open_ledger() -> Iterator[Ledger]:
@@ -516,6 +593,41 @@ def build_server(
             return
         try:
             check_derivatives_snapshot(led, run_id, config, plan)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from None
+
+    def check_plan_question(run_id: str, raw: object, *, tool_name: str | None = None) -> None:
+        """Before a plan is parsed: the plan must answer the run's frozen question (overlay
+        plans only in risk-overlay runs, every other plan only in edge runs). ``tool_name``
+        (run_sweep / walk_forward) is refused outright in a risk-overlay run, before any
+        criteria are read: overlays use published parameters, untuned. An unknown or pinned-
+        away run is left to ``check_run`` (same errors as before)."""
+        with open_ledger() as led:
+            if led.research_run(run_id) is None:
+                return
+            if pinned_run_id is not None and run_id != pinned_run_id:
+                return
+            try:
+                question = frozen_question(led, run_id)
+                if tool_name is not None and question == "risk_overlay":
+                    raise ToolError(
+                        f"{tool_name} is refused in risk-overlay run {run_id}: overlays use "
+                        "published parameters, untuned (nothing is swept, so nothing is "
+                        "selected in-sample). Use run_backtest, run_adversarial, "
+                        "run_crosscheck and get_report"
+                    )
+                check_question(led, run_id, raw)
+            except ValueError as exc:
+                raise ToolError(str(exc)) from None
+
+    def check_untuned(led: Ledger, plan: Plan, h: str) -> None:
+        """Overlay plans: each overlay logic may be submitted with ONE published parameter set
+        across every overlay run (:func:`lab.research.overlay_criteria.check_overlay_untuned`).
+        Checked before the budget guard and before any trial is recorded."""
+        if getattr(plan, "kind", None) != "overlay":
+            return
+        try:
+            check_overlay_untuned(led, plan)
         except ValueError as exc:
             raise ToolError(str(exc)) from None
 
@@ -566,18 +678,19 @@ def build_server(
     # ------------------------------------------------------------------ run lifecycle
 
     @tool(_WRITES)
-    def start_run(label: str) -> dict[str, Any]:
+    def start_run(label: str, question: str = "edge") -> dict[str, Any]:
         """Start a research run: freeze the owner's success criteria and budget (with their
         sha256), the lab.toml fingerprint, the universe manifest and the derivatives archive
         snapshot into the ledger, and return the server-assigned run_id.
         Use when: once, before any run-scoped tool; every later call passes this run_id.
         Not for: resetting budgets or the DSR trial count (N spans every research run); a
         server pinned by STRATEGY_LAB_RUN_ID refuses it (use the pinned run_id).
-        Params: label — short human name for the run, 1-200 characters.
+        Params: label — short human name for the run, 1-200 characters; question — "edge"
+        (default) or "risk_overlay" (overlay plans only, judged on the overlay rows).
         Example: start_run(label="btc-4h-trend-pullback")
         Limits: refused without lab/config/success_criteria.toml (no criteria, no research);
-        the frozen criteria (including dsr_trial_count; only "nominal" is accepted) and budget
-        never change mid-run."""
+        "risk_overlay" is refused without lab/config/overlay_criteria.toml. The frozen
+        question, criteria (dsr_trial_count: only "nominal") and budget never change mid-run."""
         if pinned_run_id is not None:
             raise ToolError(
                 f"this server is pinned to research run {pinned_run_id}; use that run_id "
@@ -586,22 +699,45 @@ def build_server(
         text = label.strip()
         if not text or len(text) > MAX_LABEL_LEN:
             raise ToolError(f"label must be 1-{MAX_LABEL_LEN} characters")
+        if question not in QUESTIONS:
+            raise ToolError(
+                f"question must be one of {', '.join(repr(q) for q in QUESTIONS)}, got {question!r}"
+            )
+        research: ResearchConfig | OverlayResearchConfig
         try:
-            research = load_research_config(research_config_path)
+            if question == "risk_overlay":
+                research = load_overlay_config(overlay_config_path)
+            else:
+                research = load_research_config(research_config_path)
         except ResearchConfigError as exc:
+            if question == "risk_overlay":
+                raise ToolError(
+                    f"cannot start a risk-overlay run without its pre-registered criteria: {exc}"
+                ) from None
             raise ToolError(f"cannot start a research run without a success bar: {exc}") from None
         with lock, open_ledger() as led:
             run_id = start_research_run(led, research, label=text, cfg=config)
             hb = holdout_budget(led, run_id, config)
-        out: dict[str, Any] = {
-            "run_id": run_id,
-            "criteria": asdict(research.criteria),
-            "budget": asdict(research.budget),
-            "holdout_budget": hb,
-            "config_sha256": research.sha256,
-        }
-        if research.portfolio is not None:
-            out["portfolio_criteria"] = asdict(research.portfolio)
+        out: dict[str, Any]
+        if isinstance(research, OverlayResearchConfig):
+            out = {
+                "run_id": run_id,
+                "question": research.question,
+                "overlay_criteria": asdict(research.criteria),
+                "budget": asdict(research.budget),
+                "holdout_budget": hb,
+                "config_sha256": research.sha256,
+            }
+        else:
+            out = {
+                "run_id": run_id,
+                "criteria": asdict(research.criteria),
+                "budget": asdict(research.budget),
+                "holdout_budget": hb,
+                "config_sha256": research.sha256,
+            }
+            if research.portfolio is not None:
+                out["portfolio_criteria"] = asdict(research.portfolio)
         manifest = universe_manifest(config)
         if manifest is not None:
             out["universe_manifest_sha256"] = manifest["sha256"]
@@ -618,7 +754,7 @@ def build_server(
     @tool(_READ_ONLY)
     def list_features() -> dict[str, Any]:
         """List every registry feature a plan may use (name, description, outputs, params with
-        kind, default and inclusive low/high bounds) plus the portfolio plan schema.
+        kind, default and inclusive low/high bounds) plus the portfolio and overlay schemas.
         Use when: designing a plan, before validate_plan; plans may use these features only.
         Not for: checking a plan (validate_plan) or adding features (a human adds registry
         features, with look-ahead tests).
@@ -626,8 +762,9 @@ def build_server(
         Example: list_features()
         Limits: free (no ledger trial, no budget). Features with "role": "gate" (funding,
         premium, basis, open interest, long/short ratio) are exposure filters, not signals:
-        only an `and` conjunct of long_entry beside a price signal, never in long_exit."""
-        return {
+        only an `and` conjunct of long_entry beside a price signal, never in long_exit
+        (overlay plans, for risk-overlay runs: anywhere in flat_when)."""
+        out: dict[str, Any] = {
             "features": [
                 {
                     "name": spec.name,
@@ -674,6 +811,8 @@ def build_server(
                 "schema": pf.portfolio_plan_json_schema(),
             },
         }
+        out["overlay"] = {"note": OVERLAY_NOTE, "schema": _overlay_schema()}
+        return out
 
     @tool(_READ_ONLY)
     def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
@@ -682,7 +821,7 @@ def build_server(
         Use when: after every plan edit, until valid, before any run_* tool.
         Not for: evidence of performance; it runs nothing.
         Params: plan — plan JSON: name, symbol, interval, features, long_entry, long_exit,
-        optional risk; or {"kind": "portfolio", ...} (schema in list_features).
+        optional risk; or {"kind": "portfolio" | "overlay", ...} (schemas in list_features).
         Example: validate_plan(plan={"name": "ema_trend", "symbol": "BTCUSDT", "interval":
         "4h", "features": {"f": {"ema": {"period": 20}}, "s": {"ema": {"period": 50}}},
         "long_entry": "f > s", "long_exit": "f < s"})
@@ -737,7 +876,7 @@ def build_server(
                 "errors": [{"path": e.path, "message": e.message} for e in errors],
             }
         caps = derivatives_period_caps(parsed, config)
-        return {
+        out: dict[str, Any] = {
             "valid": True,
             "errors": [],
             "plan_hash": plan_hash(parsed),
@@ -752,6 +891,10 @@ def build_server(
                 for k, s in tunable_params(parsed).items()
             },
         }
+        if getattr(parsed, "kind", None) == "overlay":  # edge output is unchanged
+            out["kind"] = "overlay"
+            out["note"] = OVERLAY_VALIDATE_NOTE
+        return out
 
     # ------------------------------------------------------------------ lab runs
 
@@ -783,6 +926,7 @@ def build_server(
         add an ungated baseline and the gate's binding share as information only (never submit
         a price-only twin). Portfolio: equal-weight, BTC, vol-targeted BTC and random-selection
         benchmarks from the first decision, alpha/beta to BTC, turnover, costs, gate state."""
+        check_plan_question(run_id, plan)
         if pf.is_portfolio_plan(plan):
             _, ph = _portfolio_or_error(plan, config)
             with open_ledger() as led:
@@ -802,9 +946,10 @@ def build_server(
         parsed, h = _plan_or_error(plan)
         with open_ledger() as led:
             check_run(led, run_id)
-        with run_lock(run_id), open_ledger() as led:
+        with run_lock(run_id), overlay_lock(parsed), open_ledger() as led:
             check_run(led, run_id)
             check_derivatives(led, run_id, parsed)
+            check_untuned(led, parsed, h)
             guard(led, run_id, h, backtest_cost(), "run_backtest")
             out = lab_call(
                 lambda: backtest_evidence(plan, run_id=run_id, cfg=config, ledger=led, loader=load)
@@ -826,6 +971,7 @@ def build_server(
         Portfolio: stale inputs 1/3/5 rebalances old, cost stress (fees, slippage, impact) and
         a descriptive timing-luck table of other rebalance weekdays (rebalance.offset is
         pinned at 0, so those variants cannot be resubmitted)."""
+        check_plan_question(run_id, plan)
         if pf.is_portfolio_plan(plan):
             pplan, ph = _portfolio_or_error(plan, config)
             with open_ledger() as led:
@@ -844,9 +990,10 @@ def build_server(
         parsed, h = _plan_or_error(plan)
         with open_ledger() as led:
             check_run(led, run_id)
-        with run_lock(run_id), open_ledger() as led:
+        with run_lock(run_id), overlay_lock(parsed), open_ledger() as led:
             check_run(led, run_id)
             check_derivatives(led, run_id, parsed)
+            check_untuned(led, parsed, h)
             guard(led, run_id, h, adversarial_cost(), "run_adversarial")
             out = lab_call(
                 lambda: adversarial_evidence(
@@ -868,6 +1015,7 @@ def build_server(
         installed and both agree. Portfolio: an independent accounting replay of the same
         weights, candles, costs and impact must match within 1e-8 (relative); it checks
         accounting only, not signal look-ahead."""
+        check_plan_question(run_id, plan)
         if pf.is_portfolio_plan(plan):
             _, ph = _portfolio_or_error(plan, config)
             with open_ledger() as led:
@@ -886,9 +1034,10 @@ def build_server(
         parsed, h = _plan_or_error(plan)
         with open_ledger() as led:
             check_run(led, run_id)
-        with run_lock(run_id), open_ledger() as led:
+        with run_lock(run_id), overlay_lock(parsed), open_ledger() as led:
             check_run(led, run_id)
             check_derivatives(led, run_id, parsed)
+            check_untuned(led, parsed, h)
             guard(led, run_id, h, 1, "run_crosscheck")
             out = lab_call(
                 lambda: crosscheck_evidence(
@@ -914,7 +1063,8 @@ def build_server(
         Limits: low < high and width >= 2 x neighbourhood_pct x |mid|; every trial is a
         ledger trial and raises the DSR bar; refused if n_trials exceeds the backtests left.
         Trials below min trades are never selected; derivatives trials whose price clause
-        fails are ledgered as failed."""
+        fails are ledgered as failed. Refused in risk-overlay runs (overlays are untuned)."""
+        check_plan_question(run_id, plan, tool_name="run_sweep")
         if pf.is_portfolio_plan(plan):
             pplan, ph = _portfolio_or_error(plan, config)
             if isinstance(n_trials, bool) or n_trials < 1:
@@ -1024,7 +1174,9 @@ def build_server(
         space={"ema_fast.period": {"low": 10, "high": 30}}, n_trials_per_fold=20)
         Limits: space must cover every value the behaviour family (same logic, or returns
         correlated >= [research] family_return_corr, any run) already tried; costs
-        folds x (n_trials_per_fold + 1) ledger trials, refused if over budget."""
+        folds x (n_trials_per_fold + 1) ledger trials, refused if over budget. Refused in
+        risk-overlay runs (overlays are untuned)."""
+        check_plan_question(run_id, plan, tool_name="walk_forward")
         if pf.is_portfolio_plan(plan):
             return portfolio_walk_forward_tool(run_id, plan, space, n_trials_per_fold)
         parsed, h = _plan_or_error(plan)
@@ -1198,7 +1350,8 @@ def build_server(
         head, first_bad_trial_id, error).
         Example: get_ledger(run_id="r-20261028-120000-a1b2c3", limit=20, verify_chain=True)
         Limits: read-only, free. Holdout trials are never listed. dsr_n counts distinct plans
-        across every research run; a new run does not reset it."""
+        across every research run (risk-overlay runs included); a new run does not reset it (a
+        risk-overlay run adds n_overlay, its own question's count)."""
         if isinstance(limit, bool) or not 0 <= limit <= MAX_LEDGER_PAGE:
             raise ToolError(f"limit must be 0-{MAX_LEDGER_PAGE}, got {limit!r}")
         with open_ledger() as led:
@@ -1228,6 +1381,9 @@ def build_server(
             }
             if verify_chain:  # tamper evidence for the journal's "every trial in the ledger"
                 out["chain"] = led.verify_chain(run_id)
+            if run_id in overlay_run_ids(led):  # edge output is unchanged (no extra keys)
+                out["n_overlay"] = overlay_trial_count(led)
+                out["n_overlay_basis"] = N_OVERLAY_BASIS
             return out
 
     @tool(_READ_ONLY)
@@ -1240,18 +1396,26 @@ def build_server(
         Params: run_id — from start_run; plan_hash — the plan_hash of the plan as submitted
         (from validate_plan or a run_* result).
         Example: get_report(run_id="r-20261028-120000-a1b2c3", plan_hash="3f9a...")
-        Limits: read-only, free; criteria are the ones frozen at start_run. Missing evidence
-        shows as missing. statistics (nominal N, an effective-N diagnostic beside its null,
-        MinBTL, MinTRL, CPCV paths of the sweep: all trials, an upper bound, and random
-        start-up trials) is information only, never pass/fail; dsr_min deflates with the
-        nominal N. Derivatives plans add the ungated baseline as information only
-        (not a criterion); portfolio plans add beat_equal_weight and alpha-to-BTC rows."""
+        Limits: read-only, free; criteria are the ones frozen at start_run (a risk-overlay run
+        shows only its overlay rows). Missing evidence shows as missing. statistics (nominal
+        N, an effective-N diagnostic beside its null, MinBTL, MinTRL, CPCV paths of the sweep:
+        all trials, an upper bound, and random start-up trials) is information only, never
+        pass/fail; dsr_min deflates with the nominal N. Derivatives plans add the ungated
+        baseline as information only (not a criterion); portfolio plans add beat_equal_weight
+        and alpha-to-BTC rows."""
         with open_ledger() as led:
             check_run(led, run_id)
             try:
+                if frozen_question(led, run_id) == "risk_overlay":
+                    return _overlay_report(led, run_id, plan_hash)
                 return dict(evaluate_plan(led, run_id, plan_hash, config, loader=load))
             except ValueError as exc:
                 raise ToolError(str(exc)) from None
+
+    def _overlay_report(led: Ledger, run_id: str, plan_hash: str) -> dict[str, Any]:
+        """A risk-overlay run's report: only the frozen overlay rows (PLAN.md Phase 15,
+        :func:`lab.research.overlay_criteria.evaluate_overlay_plan`), with N_overlay."""
+        return dict(evaluate_overlay_plan(led, run_id, plan_hash, config, loader=load))
 
     @tool(_READ_ONLY)
     def get_budget(run_id: str) -> dict[str, Any]:
@@ -1262,10 +1426,20 @@ def build_server(
         Params: run_id — from start_run.
         Example: get_budget(run_id="r-20261028-120000-a1b2c3")
         Limits: read-only, free. Budgets are enforced server-side: a call that could exceed
-        them is refused before anything runs or is recorded."""
+        them is refused before anything runs or is recorded. A risk-overlay run adds its
+        frozen question and N_overlay (distinct overlay logics across every overlay run)."""
         with open_ledger() as led:
             check_run(led, run_id)
-            return budget_status(led, run_id, config)
+            out = budget_status(led, run_id, config)
+            try:
+                question = frozen_question(led, run_id)
+            except ValueError as exc:
+                raise ToolError(str(exc)) from None
+            if question == "risk_overlay":  # edge output is unchanged (no extra keys)
+                out["question"] = question
+                out["n_overlay"] = overlay_trial_count(led)
+                out["n_overlay_basis"] = N_OVERLAY_BASIS
+            return out
 
     # ------------------------------------------------------------------ holdout
 
@@ -1286,6 +1460,7 @@ def build_server(
                 "holdout_check is disabled on this server (STRATEGY_LAB_DISABLE_HOLDOUT=1): "
                 "the orchestrator runs holdout checks itself. Report the candidate instead."
             )
+        check_plan_question(run_id, plan)
         parsed: Plan | None = None
         if pf.is_portfolio_plan(plan):
             _portfolio_or_error(plan, config)
@@ -1293,7 +1468,7 @@ def build_server(
             parsed, _ = _plan_or_error(plan)
         with open_ledger() as led:
             check_run(led, run_id)
-        with run_lock(run_id), open_ledger() as led:
+        with run_lock(run_id), overlay_lock(parsed), open_ledger() as led:
             check_run(led, run_id)
             if parsed is not None:
                 try:

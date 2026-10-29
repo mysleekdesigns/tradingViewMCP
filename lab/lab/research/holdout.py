@@ -41,6 +41,12 @@ ever reads. :func:`run_holdout_check` is the single place that touches it, and i
    "logic_hash"}`` is recorded, and the caller gets only pass/fail and the budget. Not even
    which rule failed is returned (that is directional feedback an agent could tune against).
 
+Research question (PLAN.md Phase 15): before anything else the plan must answer the run's frozen
+question (:func:`lab.research.runs.check_question`); a risk-overlay run's overlay plan goes to
+:func:`_overlay_holdout_check` (the same guards, judged on the frozen overlay rows, its own pass
+rule; still pass/fail only). Holdout death is shared by both questions: a logic, or a plan of
+its behaviour family, whose holdout was spent under either question is never checked again.
+
 Pass rule: net annualised Sharpe >= the run's ``wf_oos_sharpe_min``, max drawdown <=
 ``max_drawdown_max``, net total return > 0, and at least
 ``max(5, ceil(min_trades * holdout_bars / design_bars))`` trades (see
@@ -78,10 +84,24 @@ from lab.plan import parse_plan, plan_hash, plan_to_dict
 from lab.plan.portfolio import is_portfolio_plan
 from lab.plan.validator import PlanValidationError, format_errors
 from lab.report import num
+from lab.research.contract import OverlayCriteria
 from lab.research.criteria import PRE_HOLDOUT_EXCLUDED, evaluate_plan, frozen_criteria
 from lab.research.family import behaviour_family, family_holdout_conflict
 from lab.research.logic import logic_hash
-from lab.research.runs import check_derivatives_snapshot, check_lab_fingerprint, holdout_budget
+from lab.research.overlay import overlay_holdout_view
+from lab.research.overlay_criteria import (
+    OVERLAY_PRE_HOLDOUT_EXCLUDED,
+    check_overlay_untuned,
+    evaluate_overlay_plan,
+)
+from lab.research.runs import (
+    check_derivatives_snapshot,
+    check_lab_fingerprint,
+    check_question,
+    frozen_overlay_criteria,
+    frozen_question,
+    holdout_budget,
+)
 from lab.runner import (
     CandleLoader,
     DataUnavailableError,
@@ -99,6 +119,7 @@ __all__ = [
     "HOLDOUT_SOURCE",
     "HoldoutRefusedError",
     "holdout_min_trades",
+    "overlay_holdout_passed",
     "run_holdout_check",
 ]
 
@@ -238,6 +259,17 @@ def run_holdout_check(
     :class:`HoldoutRefusedError` when a guard refuses (nothing spent), and
     :class:`DataUnavailableError` when there is no holdout data (nothing spent).
     """
+    if ledger.research_run(run_id) is not None:
+        # the plan must answer the run's frozen question, before anything else is read
+        try:
+            question = frozen_question(ledger, run_id)
+            check_question(ledger, run_id, raw_plan)
+        except ValueError as exc:
+            raise HoldoutRefusedError(f"{exc}; no check was spent") from exc
+        if question == "risk_overlay":
+            return _overlay_holdout_check(
+                raw_plan, run_id=run_id, cfg=cfg, ledger=ledger, loader=loader
+            )
     if is_portfolio_plan(raw_plan):
         from lab.research.portfolio import run_portfolio_holdout_check  # lazy: heavy imports
 
@@ -379,3 +411,181 @@ def run_holdout_check(
         run_id, h, "holdout", json.dumps({"passed": passed, "logic_hash": lh}, sort_keys=True)
     )
     return {"passed": passed, "checks_used": used, "checks_left": max(0, budget - used)}
+
+
+# --------------------------------------------------------------------------- risk overlays
+
+
+def _overlay_holdout_check(
+    raw_plan: Mapping[str, Any] | str,
+    *,
+    run_id: str,
+    cfg: LabConfig,
+    ledger: Ledger,
+    loader: CandleLoader | None = None,
+) -> dict[str, Any]:
+    """The locked-holdout check of an overlay plan in a risk-overlay run (PLAN.md Phase 15).
+
+    Same guards as an edge plan, in the same order: the lab.toml fingerprint and derivatives
+    snapshot; one published parameter set per overlay logic across every overlay run
+    (:func:`lab.research.overlay_criteria.check_overlay_untuned`); holdout death keyed on
+    logic AND behaviour family across BOTH questions (a logic, or a plan of its behaviour
+    family, whose holdout was spent in any run, edge or overlay, is
+    never checked again; :meth:`Ledger.holdout_logic_checked`,
+    :func:`lab.research.family.family_holdout_conflict`); no failed cross-check; every
+    pre-holdout overlay row must pass (:func:`evaluate_overlay_plan`, including a matched
+    cross-check; not_testable is not a pass); holdout data (and derivatives coverage) must
+    exist; then one check is spent race-free (:meth:`Ledger.record_holdout_check`).
+
+    Pass rule (owner decision 2026-10-29), point estimates at base costs on the holdout bars,
+    features computed on design + holdout history (:func:`overlay_holdout_view`): buy-and-hold's
+    holdout max drawdown >= ``episode_depth_min`` (otherwise the holdout cannot confirm a
+    drawdown benefit: FAIL), average exposure >= ``min_avg_exposure``, CDaR ratio vs
+    buy-and-hold <= ``cdar_vs_buy_hold_max``, overlay CDaR < exposure-matched CDaR (when
+    ``beat_exposure_matched``), and Sharpe(overlay) - Sharpe(buy-and-hold) >=
+    -``sharpe_non_inferiority``. Returns ONLY pass/fail and the budget."""
+    plan = parse_plan(raw_plan)
+    h = plan_hash(plan)
+    lh = logic_hash(plan)
+    try:
+        check_lab_fingerprint(ledger, run_id, cfg)
+    except ValueError as exc:
+        raise HoldoutRefusedError(f"{exc}; no check was spent") from exc
+    if plan_derivative_columns(plan):
+        try:
+            check_derivatives_snapshot(ledger, run_id, cfg, plan)
+        except ValueError as exc:
+            raise HoldoutRefusedError(f"{exc}; no check was spent") from exc
+    try:
+        check_overlay_untuned(ledger, plan)  # one published parameter set per overlay logic
+    except ValueError as exc:
+        raise HoldoutRefusedError(f"{exc}; no check was spent") from exc
+    if ledger.holdout_logic_checked(lh) or _already_checked(ledger, run_id, h):
+        raise HoldoutRefusedError(
+            f"plan {h[:12]} (logic {lh[:12]}) was already holdout-checked; a hypothesis gets "
+            "one holdout check, ever, in any run and under either research question (if it "
+            "failed it is dead; renaming, re-tuning or asking it as the other question does not "
+            "make it a new hypothesis)"
+        )
+    load = loader or default_loader(cfg)
+    family = behaviour_family(
+        ledger, symbol=plan.symbol, plan_hash=h, cfg=cfg, plan=plan, loader=load
+    )
+    conflict = family_holdout_conflict(ledger, family)
+    if conflict is not None:
+        raise HoldoutRefusedError(
+            f"{conflict}; so plan {h[:12]} counts as that hypothesis, whose single holdout "
+            "check is spent (under either research question). No check was spent"
+        )
+    failed_in = _failed_crosscheck(ledger, h)
+    if failed_in is not None:
+        raise HoldoutRefusedError(
+            f"plan {h[:12]} failed the event-driven cross-check (run {failed_in}), so it can "
+            "never become a candidate; no holdout check was spent"
+        )
+    report = evaluate_overlay_plan(ledger, run_id, h, cfg, loader=load)
+    if not report["pre_holdout_passed"]:
+        blocking = [
+            f"{r['criterion']} ({r['status']})"
+            for r in report["rows"]
+            if r["status"] != "pass" and r["criterion"] not in OVERLAY_PRE_HOLDOUT_EXCLUDED
+        ]
+        cross = next(
+            (r for r in report["rows"] if r["criterion"] == "require_crosscheck_match"), None
+        )
+        extra = ""
+        if cross is not None and cross["status"] == "missing":
+            extra = f" The holdout needs a matched event-driven cross-check first: {cross['note']}."
+        raise HoldoutRefusedError(
+            f"plan {h[:12]} does not pass the pre-holdout overlay rows yet, so no holdout check "
+            f"was spent: {', '.join(blocking)}.{extra} See get_report for details."
+        )
+    series = derivatives_series(cfg, ledger, run_id) if plan_derivative_columns(plan) else None
+    candles, window = _load_full(plan, cfg, load, series)
+    budget = holdout_budget(ledger, run_id, cfg)
+    try:
+        used = ledger.record_holdout_check(
+            run_id,
+            h,
+            budget=budget,
+            logic_hash=lh,
+            family_logic_hashes=family.logic_hashes | set(family.uncertain),
+            family_plan_hashes=family.plan_hashes,
+        )
+    except (HoldoutBudgetExceededError, HoldoutAlreadyCheckedError) as exc:
+        raise HoldoutRefusedError(f"{exc}; no check was spent") from exc
+
+    # ---- the check has been spent; from here on only pass/fail leaves this function
+    crit = frozen_overlay_criteria(ledger, run_id)
+    base = {
+        "run_id": run_id,
+        "source": HOLDOUT_SOURCE,
+        "plan_hash": h,
+        "plan_json": json.dumps(plan_to_dict(plan), sort_keys=True),
+        "params_json": json.dumps({"holdout_check": used}),
+        "symbol": plan.symbol,
+        "interval": plan.interval,
+        "window_kind": "holdout",
+        "window_start": window.start,
+        "window_end": window.end,
+        "costs_json": costs_to_json(cfg.costs),
+    }
+    passed = False
+    try:
+        pair, view = overlay_holdout_view(plan, candles, window, cfg, crit)
+        metrics = compute_metrics(pair.overlay, plan.interval)
+    except ValueError as exc:
+        ledger.record(
+            TrialRecord(
+                **base,
+                status="error",
+                metrics_json="{}",
+                sharpe_per_bar=None,
+                n_trades=0,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        )
+    else:
+        returns = pair.overlay_returns
+        ledger.record(
+            TrialRecord(
+                **{**base, "window_start": pair.window.start},
+                status="ok",
+                metrics_json=metrics_to_json(metrics),
+                sharpe_per_bar=sharpe_per_bar(returns),
+                n_trades=len(pair.overlay.trades),
+                returns=returns,
+            )
+        )
+        passed = overlay_holdout_passed(view, crit)
+    ledger.record_evidence(
+        run_id, h, "holdout", json.dumps({"passed": passed, "logic_hash": lh}, sort_keys=True)
+    )
+    return {"passed": passed, "checks_used": used, "checks_left": max(0, budget - used)}
+
+
+def overlay_holdout_passed(view: Mapping[str, Any], crit: OverlayCriteria) -> bool:
+    """The overlay holdout pass rule on :func:`overlay_holdout_view`'s point estimates (see
+    :func:`_overlay_holdout_check`); any undefined number is a fail."""
+    bh_dd = num(_dig(view, "max_drawdown", "buy_hold"))
+    exposure = num(view.get("avg_exposure"))
+    ratio = num(view.get("cdar_ratio_vs_buy_hold"))
+    c_ov, c_m = num(_dig(view, "cdar", "overlay")), num(_dig(view, "cdar", "exposure_matched"))
+    s_ov, s_bh = num(_dig(view, "sharpe", "overlay")), num(_dig(view, "sharpe", "buy_hold"))
+    if bh_dd is None or bh_dd < crit.episode_depth_min:
+        return False  # no drawdown deep enough in the holdout: it cannot confirm a benefit
+    if exposure is None or exposure < crit.min_avg_exposure:
+        return False
+    if ratio is None or ratio > crit.cdar_vs_buy_hold_max:
+        return False
+    if crit.beat_exposure_matched and (c_ov is None or c_m is None or not c_ov < c_m):
+        return False
+    return s_ov is not None and s_bh is not None and s_ov - s_bh >= -crit.sharpe_non_inferiority
+
+
+def _dig(obj: Any, *path: str) -> Any:
+    for key in path:
+        if not isinstance(obj, Mapping):
+            return None
+        obj = obj.get(key)
+    return obj

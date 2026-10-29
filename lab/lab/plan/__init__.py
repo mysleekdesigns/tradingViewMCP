@@ -13,11 +13,18 @@ from lab.plan.expr import (
     evaluate_expression,
     prev,
 )
-from lab.plan.schema import plan_json_schema
+from lab.plan.schema import (
+    MAX_OVERLAY_FEATURES,
+    MAX_OVERLAY_PARAMS,
+    OVERLAY_KIND,
+    overlay_plan_json_schema,
+    plan_json_schema,
+)
 from lab.plan.validator import (
     PlanValidationError,
     checked_expressions,
     format_errors,
+    is_overlay_plan,
     parse_plan,
     plan_hash,
     plan_to_dict,
@@ -27,6 +34,9 @@ from lab.plan.validator import (
 )
 
 __all__ = [
+    "MAX_OVERLAY_FEATURES",
+    "MAX_OVERLAY_PARAMS",
+    "OVERLAY_KIND",
     "CheckedExpr",
     "ExprScope",
     "PlanValidationError",
@@ -38,6 +48,8 @@ __all__ = [
     "crosses_below",
     "evaluate_expression",
     "format_errors",
+    "is_overlay_plan",
+    "overlay_plan_json_schema",
     "parse_plan",
     "plan_hash",
     "plan_json_schema",

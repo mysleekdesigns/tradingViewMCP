@@ -57,6 +57,14 @@ def compile_plan(
     ``warmup_bars`` = max feature warm-up + the expressions' look-back (nested ``prev`` n,
     +1 per ``crosses_*``). Signals are False for the first ``warmup_bars`` rows and wherever
     an operand is NaN.
+
+    A risk overlay (``plan.kind == "overlay"``, PLAN.md Phase 15) compiles to
+    ``exits = flat_when`` (False where an operand is NaN) and ``entries = ~exits``, both forced
+    False for the first ``warmup_bars`` rows. After warm-up exactly one of them is True on
+    every bar, so the engine holds 100% from bar t+1's open unless ``flat_when`` is validly
+    True at bar t's close, and a NaN (a derivatives gap, an expanding rank before its minimum
+    history) keeps it invested: the overlay falls back to buy-and-hold, never to a hidden exit.
+    During warm-up it never enters, so it is flat until the first post-warm-up bar decides.
     """
     reg = resolve_registry(registry)
     validate_candles(candles)
@@ -73,8 +81,9 @@ def compile_plan(
         feature_warmup = max(feature_warmup, int(spec.warmup(params)))
     warmup = feature_warmup + max(entry_expr.lag, exit_expr.lag)
 
-    entries = evaluate_expression(entry_expr, cols, n)
     exits = evaluate_expression(exit_expr, cols, n)
+    # An overlay is invested unless flat_when is validly True: NaN -> exits False -> entries True.
+    entries = ~exits if plan.kind == "overlay" else evaluate_expression(entry_expr, cols, n)
     cut = min(warmup, n)
     entries[:cut] = False
     exits[:cut] = False

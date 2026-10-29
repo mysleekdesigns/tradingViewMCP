@@ -908,16 +908,23 @@ Traps this design must close:
   with their *published* parameters, untuned, and each declares its family links to earlier
   plans. The locked holdout (from 2025-10-01, unspent) and the forward paper test are the real
   tests.
-- **Multiple testing.** The significance level is divided by the number of distinct overlay
-  plans across every overlay run (Bonferroni), counted by logic like the DSR's N. A new run never
+- **Multiple testing.** The significance level is divided by N_overlay, the number of distinct
+  overlay logics across every overlay run (Bonferroni), and each logic may be tried with one
+  published parameter set only (the lab refuses re-parameterised copies). A new run never
   resets it.
 
 **Owner decisions** (confirmed 2026-10-29): the criteria values below as proposed; minimum
 average exposure 0.5; exposure 0 or 1 only (no half exposure, so no engine change); the slate of
-three literature overlays below.
+three literature overlays below. Added during the build (2026-10-29): budget 3 hypotheses /
+6 proposals / 600 backtests / 1 holdout check / $10; overlays are untuned (no `run_sweep` or
+`walk_forward` in overlay runs); bootstrap mean block 60 days; overlay trials count in the edge
+DSR's N but stay out of its V[SR] pools; a `min_episodes_improved` row (the overlay beats
+exposure-matched buy-and-hold inside a strict majority of the deep buy-and-hold episodes); the
+fold check's drawdown rows are "not testable" when the folds hold too few episodes; the holdout
+check uses point estimates and fails when buy-and-hold's holdout max drawdown is under 30%.
 
 ### Checklist
-- [ ] **(owner)** Question and criteria file:
+- [x] **(owner)** Question and criteria file: — `lab/lab/research/{contract,runs}.py`, `start_run(question=...)`; owner installed `lab/config/overlay_criteria.toml` (15 keys incl. `bootstrap_mean_block_days = 60` and `min_episodes_improved_share = 0.5`); edge report pinned by `lab/tests/test_report_golden.py` (fixture captured at 7680942, also passes against a pristine HEAD copy)
   - `start_run` takes `question = "edge" | "risk_overlay"` (default `"edge"`) and freezes it with the criteria sha256.
   - An overlay run reads `lab/config/overlay_criteria.toml`, which the owner installs from `agents/config/overlay_criteria.proposed.toml`. No file means no overlay research.
   - An overlay run's report has only overlay rows, and its wording never says "edge". An edge run's report is unchanged, which a test checks.
@@ -932,31 +939,31 @@ three literature overlays below.
     - `wf_rows_hold = true`: the rows also hold on the stitched walk-forward test folds.
     - `pbo_max = 0.2` on the overlay objective, if anything is swept.
     - holdout pass and cross-check match, as for edge plans.
-- [ ] **(owner)** Statistics in `lab/lab/stats/`:
+- [x] **(owner)** Statistics in `lab/lab/stats/`: — `stats/drawdown.py` (CUZ CDaR, episodes, constant-mix exposure-matched benchmark) and `stats/paired.py`; checked against `scipy.optimize.linprog`, brute force and vectorbt drawdowns
   - CDaR, drawdown episodes (peak to recovery) and the exposure-matched benchmark;
   - paired stationary-bootstrap tests for the CDaR difference and the Sharpe difference, reusing `stats/bootstrap.py` with an explicit seed;
   - the break-even cost multiple.
   - Each gets known-value tests on hand-built 5–20 bar paths, and a second-implementation check where a library has one.
-- [ ] Overlay plan kind (`{"kind": "overlay", ...}`):
+- [x] Overlay plan kind (`{"kind": "overlay", ...}`): — `Plan.kind`, validator/schema/compile overlay branch, new features `vol_rank` and `premium_mean_rank`; perturbation test in `tests/test_plan_overlay.py`; NaN in `flat_when` keeps the overlay invested
   - Base is buy-and-hold of one symbol. A risk rule decided on bar t's close sets the exposure for bar t+1's open to 1 or 0.
   - Unlike edge plans, derivatives features may drive the flat signal, since crash-risk filtering is their stated role.
   - Registry features only; ≤ 3 features and ≤ 3 tunable parameters.
   - It ships with the perturbation (no-look-ahead) test.
   - Exposure is 0 or 1 only (owner decision); half exposure would need an engine change and is out of scope.
-- [ ] **(owner)** `get_report`, `get_budget` and `holdout_check` for overlay runs:
+- [x] **(owner)** `get_report`, `get_budget` and `holdout_check` for overlay runs: — `research/overlay.py`, `research/overlay_criteria.py`; holdout uses point estimates and fails when buy-and-hold's holdout max drawdown is under 30%; one published parameter set per overlay logic is enforced server-side (rewrites with other params and logics tuned in edge runs are refused)
   - `holdout_check` stays pass/fail only, judged on the frozen overlay rows.
   - Holdout death is keyed on logic across both questions: a logic whose holdout was spent under either question is never checked again.
   - N_overlay is counted across every overlay run and shown in the report.
-- [ ] Pre-registration: the overlay journal template states the following before the first backtest:
+- [x] Pre-registration: the overlay journal template states the following before the first backtest: — `Journal.create_overlay` / `finish_overlay` in `agents/research/journal.py`; overlay checks in `agents/prompts/critic.md` and `.claude/agents/strategy-critic.md`
   - the question, criteria and budget;
   - the slate, each overlay with its source and published parameters;
   - each overlay's family links to earlier ledgered plans.
   - The `strategy-critic` prompt gains the overlay checks: the exposure-matched comparison, the episode count, and the seen-data declaration.
-- [ ] One pre-registered overlay run through the normal pipeline:
+- [x] One pre-registered overlay run through the normal pipeline: — run r-20261029-173704-59d618, journal `agents/journal/2026-10-29-btcusdt-btcusdt-risk-overlay-slate-phase-15.md`: **no overlay benefit** (sma200 CDaR 0.663 vs exposure-matched 0.543; premium and vol_rank gates almost never fire, CDaR ratio 1.00); critic: abandon all three; holdout unspent (0/1); N_overlay 3; unledgered review probes disclosed
   - a slate of at most 3 overlays with published parameters, e.g. flat while BTC closes below its 200-day moving average; flat while the 7-day mean premium index is in the top decile of its expanding history (BIS WP 1087); flat in a high realised-volatility regime;
   - `strategy-critic` review, and at most the budgeted holdout check;
   - written up in the journal whatever the outcome. The likely outcome is "no overlay benefit" once compared with exposure-matched buy-and-hold.
-- [ ] Quant review of the whole phase, then `/run-gate 15`
+- [x] Quant review of the whole phase, then `/run-gate 15` — 3 quant rounds (round 1: 1 Critical, 4 Warnings; round 2: 3 Warnings; all fixed or closed, one accepted residual: an edge sweep on a *rewritten* logic can pick an overlay's params, not live in the ledger); gate PASS: lab 2597 passed, agents 721 passed, ruff clean
 
 Any overlay that passes still needs 4–8 weeks of freqtrade `--dry-run` under the Phase 13 paper
 protocol before it is called a working risk overlay. That takes weeks, so it is not part of
@@ -967,6 +974,63 @@ shows the overlay rows: CDaR against buy-and-hold and against exposure-matched b
 Sharpe non-inferiority, break-even cost, episode count and N_overlay. The statistics pass
 hand-built known-value tests. An edge run's report is byte-identical to before. One
 pre-registered overlay run is in the journal.
+
+---
+
+## Phase 16 — Market Structure Overlay (chart)
+
+Why: price action traders read the chart as swing points, trend breaks and flip zones, and the
+chart cannot draw any of them today. A video that turned price action into rules and tested
+about 101k variants on NQ/ES futures found the 4h change of character (ChoCh) the strongest
+setup and old-resistance-turned-support ("flip zones", first retest) the strongest level idea
+("Price action strategies research", `agents/research/reports/`). Those claims are unverified
+and come from another asset class. This phase is a **visual tool only**: it makes no edge claim,
+adds no backtest, and does not touch `lab/`. It needs only Phase 14 and can run alongside Phase 15.
+It also lets the owner check by eye that the swing and ChoCh definitions match how price action
+traders draw them, before any lab feature reuses them.
+
+Traps this design must close:
+- **Repainting.** A swing pivot at bar `p` is only known after `right` more bars close. Every
+  output at bar `t` uses only bars `≤ t`. A swing level starts at its confirmation bar `p + right`
+  (a small dot may mark the pivot bar), and BOS/ChoCh markers sit on the bar whose close breaks the
+  level. Nothing is back-dated.
+- **The forming candle.** Events and pivots come from closed bars only. The forming bar (last REST
+  row, or a WS kline with `x: false`) never creates, moves or removes a marker or zone.
+- **Hidden definitions.** Each rule below is written out in full in `web/README.md`, ties included,
+  so a later lab feature can copy it exactly and be checked against the same fixture.
+
+Definitions (inputs in brackets, defaults set before building):
+- **Swing high/low**: fractal pivot. The high of bar `p` is strictly above the `left` bars before
+  it and at or above the `right` bars after it (mirrored for lows) [`left` 5, `right` 5].
+- **Structure**: `up` after a close above the last confirmed swing high, `down` after a close
+  below the last confirmed swing low, `none` until the first break. Closes, not wicks.
+- **BOS**: a close through the last confirmed swing in the direction of the current structure.
+  **ChoCh**: the first close through the last confirmed swing *against* it, which flips the
+  structure. Each swing level can be broken once.
+- **Flip zone**: a swing high broken by a close becomes a support zone (a swing low becomes a
+  resistance zone). The band runs from the pivot bar's wick to its body edge. A **first retest**
+  is the first later closed bar that trades into the zone. A close through the far side of the
+  zone invalidates it [max active zones 10].
+- Touch counts are not shown or scored (the source found that more touches did not make a level stronger).
+
+### Checklist
+- [ ] Pure compute `web/src/indicators/marketStructure.ts`: confirmed swings, structure state, BOS/ChoCh events and flip zones (created, first retest, invalidated) in one O(n) pass over closed bars, as typed output (points, events, zones); inputs `left`, `right`, `maxZones`
+- [ ] Indicator types and the registry extended for event and zone outputs beside `line` / `histogram` (`web/src/indicators/types.ts`, `registry.ts`); the existing indicators are unchanged, which their current tests show
+- [ ] Rendering: BOS/ChoCh and retest markers through `createSeriesMarkers` (merged with any backtest trade markers, not replacing them), swing levels and flip zones as a series primitive in the style of `volumeProfileLayer.ts`, drawn under the drawings, themed for light and dark, with per-part toggles (swings, BOS, ChoCh, zones) in the settings dialog
+- [ ] Live updates: incremental tail recompute on each closed bar matches a full recompute (test); the forming bar changes nothing (test); a 100k-bar history computes and renders without a visible stall
+- [ ] Tests: known values on a hand-built candle fixture where every pivot, BOS, ChoCh, zone, retest and invalidation is worked out by hand, including ties and an equal-high pair; a no-look-ahead perturbation test (changing bars after `t` leaves every output at or before `t` unchanged); a test that no marker's time is earlier than its confirmation bar
+- [ ] Definitions written out in `web/README.md` (rules, ties, defaults, and "visual only, no edge claim"), with the fixture marked as the parity source for any future lab feature
+- [ ] Code review and quant review (look-ahead focus), `npx tsc -b`, `npx vitest run`, `npm run lint`, then `/run-gate 16`; browser checks listed for the owner
+
+Not in this phase: alerts on ChoCh (the server would need its own port of the rules) and any lab
+work. Testing ChoCh as a strategy needs an owner lab phase (a causal swing feature in
+`lab/lab/registry/` and a structure-based stop with an R-multiple target in the engine), then a
+pre-registered H4 run under the unchanged edge criteria (report section 4).
+
+**Done when:** on BTCUSDT 4h the overlay draws confirmed swing points, BOS and ChoCh markers, and
+flip zones with first retests; markers never appear before their confirmation bar, including while
+a candle is forming; and the known-value, no-look-ahead, forming-bar and incremental-vs-full tests
+pass.
 
 ---
 
@@ -1021,5 +1085,6 @@ pre-registered overlay run is in the journal.
 | 13 | Research agents v2 (structured outputs, subagent caps, MCP description audit, reporting checklist, failure tags, pre-registered paper test) | Medium |
 | 14 | Chart upgrades (5.2 hit testing, conflation, screenshots with drawings, plugin packages, drawing-library evaluation, volume profile, anchored VWAP) | Medium |
 | 15 | Risk-overlay question (separate pre-registered criteria: CDaR vs exposure-matched buy-and-hold, Sharpe non-inferiority, break-even cost; overlay run; owner) | Large |
+| 16 | Market structure overlay (non-repainting swing points, BOS/ChoCh markers, flip zones with first retest; visual only, no lab changes) | Medium |
 
 **First usable version = end of Phase 3.**

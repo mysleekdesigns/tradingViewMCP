@@ -37,6 +37,14 @@ run and refuse it on every run-scoped tool (``get_report`` included). :func:`che
 also calls :func:`check_software`: a run that froze a software record and whose current software
 differs is refused with the changed entries named ("start a new run"); a run started before the
 record existed (no ``software`` key) is not checked.
+
+Research question (PLAN.md Phase 15): a run asks ``"edge"`` (the success criteria, frozen as
+``config["criteria"]``) or ``"risk_overlay"`` (the overlay rows, frozen as
+``config["overlay_criteria"]`` beside ``config["question"] = "risk_overlay"``, with no
+``"criteria"`` key and ``config_sha256`` = sha256 of the overlay_criteria.toml bytes). An edge
+run's config has NO ``"question"`` key (absence means edge), so edge configs, fingerprints and
+reports are byte-identical to before. :func:`check_question` refuses an overlay plan in an edge
+run and any other plan in an overlay run, before anything runs or is recorded.
 """
 
 from __future__ import annotations
@@ -49,7 +57,7 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import optuna
@@ -62,7 +70,16 @@ from lab.data.derivatives import manifest_sha256 as derivatives_manifest_sha256
 from lab.data.derivatives_columns import COLUMN_SOURCES, plan_derivative_columns
 from lab.data.universe_build import manifest_path, manifest_sha256
 from lab.ledger import Ledger
-from lab.research.contract import ResearchConfig, RunBudget
+from lab.research.contract import (
+    QUESTIONS,
+    OverlayCriteria,
+    OverlayResearchConfig,
+    Question,
+    ResearchConfig,
+    ResearchConfigError,
+    RunBudget,
+    overlay_criteria_from_table,
+)
 from lab.search.optuna_search import TPE_SAMPLER_SETTINGS
 
 
@@ -132,16 +149,19 @@ def software_values() -> dict[str, Any]:
 
 def start_research_run(
     ledger: Ledger,
-    research: ResearchConfig,
+    research: ResearchConfig | OverlayResearchConfig,
     *,
     label: str,
     cfg: LabConfig | None = None,
     now: datetime | None = None,
 ) -> str:
-    """Create a server-assigned run id and freeze ``research`` (criteria + budget) into the
-    ledger under it, plus ``config["lab"] = lab_fingerprint(cfg)`` and ``config["software"] =
-    software_values()`` when ``cfg`` is given (and the universe manifest / derivatives snapshot,
-    when they exist on disk). Returns the run id.
+    """Create a server-assigned run id and freeze ``research`` into the ledger under it:
+    criteria + budget for an edge run (:class:`ResearchConfig`, no ``"question"`` key), or
+    ``{"question": "risk_overlay", "overlay_criteria", "budget"}`` for an overlay run
+    (:class:`OverlayResearchConfig`, no ``"criteria"`` key); ``config_sha256`` is the sha256 of
+    the criteria file's bytes either way. Also ``config["lab"] = lab_fingerprint(cfg)`` and
+    ``config["software"] = software_values()`` when ``cfg`` is given (and the universe manifest /
+    derivatives snapshot, when they exist on disk). Returns the run id.
     Runs started without ``cfg`` fail :func:`check_lab_fingerprint`."""
     run_id = new_run_id(now)
     config = json.loads(research.to_json())
@@ -161,6 +181,101 @@ def start_research_run(
         config_sha256=research.sha256,
     )
     return run_id
+
+
+def _run_config(ledger: Ledger, run_id: str) -> dict[str, Any]:
+    run = ledger.research_run(run_id)
+    if run is None:
+        raise ValueError(f"research run {run_id!r} was never started; call start_run first")
+    config = run["config"]
+    if not isinstance(config, dict):
+        raise ValueError(
+            f"research run {run_id!r} has an unreadable frozen config; start a new run"
+        )
+    return config
+
+
+def _config_question(config: Mapping[str, Any], run_id: str) -> Question:
+    q = config.get("question", "edge")  # absence = edge (edge configs never carry the key)
+    if q not in QUESTIONS:
+        raise ValueError(
+            f"research run {run_id!r} froze question {q!r}, not one of {list(QUESTIONS)}; start "
+            "a new run"
+        )
+    if q == "risk_overlay" and "criteria" in config:
+        raise ValueError(
+            f"research run {run_id!r} froze both the edge criteria and the risk-overlay question; "
+            "a run asks one question, so start a new run"
+        )
+    return cast(Question, q)
+
+
+def frozen_question(ledger: Ledger, run_id: str) -> Question:
+    """The question ``run_id`` froze at start: ``"edge"`` (no ``"question"`` key) or
+    ``"risk_overlay"``. ``ValueError`` on an unknown run or an unknown frozen value."""
+    return _config_question(_run_config(ledger, run_id), run_id)
+
+
+def frozen_overlay_criteria(ledger: Ledger, run_id: str) -> OverlayCriteria:
+    """The overlay rows snapshotted when ``run_id`` started. ``ValueError`` if the run never
+    started, is not a risk-overlay run, or its snapshot does not fit :class:`OverlayCriteria`
+    (missing, unknown, mistyped or out-of-range keys: fail closed)."""
+    config = _run_config(ledger, run_id)
+    if _config_question(config, run_id) != "risk_overlay":
+        raise ValueError(
+            f"research run {run_id!r} is an edge run, not a risk-overlay run; it has no overlay "
+            "criteria"
+        )
+    try:
+        return overlay_criteria_from_table(
+            config.get("overlay_criteria"), what=f"research run {run_id!r}'s frozen config"
+        )
+    except ResearchConfigError as exc:
+        raise ValueError(f"{exc}; start a new run") from None
+
+
+def overlay_run_ids(ledger: Ledger) -> frozenset[str]:
+    """Every research run whose frozen question is ``"risk_overlay"`` (any run, any time)."""
+    return frozenset(
+        str(run["run_id"])
+        for run in ledger.research_runs()
+        if isinstance(run["config"], dict) and run["config"].get("question") == "risk_overlay"
+    )
+
+
+def _plan_kind(plan: Any) -> object:
+    """``kind`` of a Plan / PortfolioPlan, plan dict, or plan JSON string (duck-typed, so this
+    module needs no plan-validator import)."""
+    if isinstance(plan, str | bytes):
+        try:
+            plan = json.loads(plan)
+        except ValueError:
+            return None
+    if isinstance(plan, Mapping):
+        return plan.get("kind")
+    return getattr(plan, "kind", None)
+
+
+def check_question(ledger: Ledger, run_id: str, plan: Any) -> None:
+    """``ValueError`` unless ``plan`` answers ``run_id``'s frozen question: an overlay plan
+    (``"kind": "overlay"``) only in a risk-overlay run, and a single-symbol or portfolio plan
+    only in an edge run. Called before a plan is parsed, run or recorded."""
+    question = frozen_question(ledger, run_id)
+    is_overlay = _plan_kind(plan) == "overlay"
+    if question == "edge" and is_overlay:
+        raise ValueError(
+            f"research run {run_id!r} asks the edge question, and overlay plans "
+            '({"kind": "overlay"}) answer the risk-overlay question only; start a run with '
+            'start_run(label, question="risk_overlay") for them'
+        )
+    if question == "risk_overlay" and not is_overlay:
+        kind = _plan_kind(plan)
+        shown = "a single-symbol signal plan" if kind in (None, "signal") else f"kind {kind!r}"
+        raise ValueError(
+            f"research run {run_id!r} asks the risk-overlay question, so it takes overlay plans "
+            f'({{"kind": "overlay"}}) only, not {shown}; start an edge run (start_run(label)) '
+            "for other plans"
+        )
 
 
 def check_lab_fingerprint(ledger: Ledger, run_id: str, cfg: LabConfig) -> None:

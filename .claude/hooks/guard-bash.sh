@@ -63,9 +63,9 @@ fi
 if has 'lab\.lock' && has '(^|[;&|[:space:]])(rm|mv|unlink|truncate)[[:space:]]|>[[:space:]]*[^[:space:]]*lab\.lock'; then
   deny "The lab lock is removed by the owner only, outside Claude Code."
 fi
-if [ -f "$root/.claude/lab.lock" ] && has 'lab/lab/(engine|registry|stats)/|lab/config/success_criteria'; then
+if [ -f "$root/.claude/lab.lock" ] && has 'lab/lab/(engine|registry|stats|research|search)/|lab/config/(success|overlay)_criteria'; then
   if has '(^|[;&|[:space:]])(rm|mv|cp|sed[[:space:]]+-i|perl[[:space:]]+-[a-z]*i|truncate|tee|patch|git[[:space:]]+(checkout|restore|apply))[[:space:]]|>'; then
-    deny "The lab is locked (.claude/lab.lock): engine, registry, stats, and success criteria are read-only. Propose the change to the owner instead."
+    deny "The lab is locked (.claude/lab.lock): engine, registry, stats, research, search, and the success and overlay criteria are read-only. Propose the change to the owner instead."
   fi
 fi
 

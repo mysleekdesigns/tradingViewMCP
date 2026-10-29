@@ -26,11 +26,27 @@ only as gating clauses of a spot long-only entry:
 A gate fails CLOSED on a missing value: :mod:`lab.plan.expr` makes the whole ``long_entry``
 False at any bar where an operand is NaN, through ``not`` and ``or`` too, so
 ``close > ema_slow and not (fz > 2)`` cannot enter on a bar without funding data.
+
+Risk-overlay plans (``{"kind": "overlay", ...}``, PLAN.md Phase 15) are validated by the same
+entry points (:func:`validate_plan`, :func:`parse_plan`, :func:`checked_expressions`,
+:func:`with_params`), dispatched on ``kind``. An overlay is buy-and-hold of ONE symbol with one
+risk rule, ``flat_when``: true at bar t's close -> flat from bar t+1's open, otherwise 100%
+invested (exposure 0 or 1 only, so there is no ``risk`` key and no ``long_entry`` /
+``long_exit``). Registry features only, 1 to ``MAX_OVERLAY_FEATURES`` (3) features with at most
+``MAX_OVERLAY_PARAMS`` (3) params in total, defaults included; the unit (no price or volume
+level) rules apply as for edge plans. The derivatives gating rules 1-4 above do NOT apply:
+derivatives features may appear anywhere in ``flat_when``, since crash-risk filtering is their
+stated role. Here a missing value fails OPEN to the base: a bar where ``flat_when`` is NaN is
+not flat (:func:`lab.plan.compile.compile_plan`), so a derivatives gap means buy-and-hold, never
+a hidden exit. The parsed :class:`lab.types.Plan` has ``kind="overlay"``,
+``long_exit = flat_when``, ``long_entry = "not (flat_when)"`` and the default risk; edge plans
+and their canonical form (hence ``plan_hash``) are unchanged.
 """
 
 from __future__ import annotations
 
 import ast
+import copy
 import difflib
 import hashlib
 import json
@@ -48,7 +64,12 @@ from lab.plan.schema import (
     MAX_FEATURE_PARAMS,
     MAX_FEATURES,
     MAX_NAME_CHARS,
+    MAX_OVERLAY_FEATURES,
+    MAX_OVERLAY_PARAMS,
     MIN_FEATURES,
+    OVERLAY_KIND,
+    OVERLAY_REQUIRED_KEYS,
+    OVERLAY_TOP_LEVEL_KEYS,
     REQUIRED_KEYS,
     RESERVED_ALIASES,
     RISK_BOUNDS,
@@ -141,6 +162,16 @@ def _check_top_level(raw: Mapping[str, Any], errors: list[PlanError]) -> None:
             continue
         if not isinstance(key, str):
             errors.append(PlanError("$", f"keys must be strings, got {key!r}"))
+        elif key == "kind":
+            errors.append(
+                PlanError(
+                    "kind",
+                    f"`kind` {raw[key]!r} is not a single-symbol plan kind. Omit `kind` for an "
+                    'edge plan (long_entry / long_exit / risk), use "kind": "overlay" for a risk '
+                    'overlay (flat_when on buy-and-hold of one symbol) or "kind": "portfolio" '
+                    "for a portfolio plan",
+                )
+            )
         elif key in SHORT_KEYS:
             errors.append(
                 PlanError(
@@ -331,7 +362,13 @@ def _check_features(
     raw: Mapping[str, Any],
     registry: Mapping[str, FeatureSpec],
     errors: list[PlanError],
+    *,
+    max_features: int = MAX_FEATURES,
+    max_params: int = MAX_FEATURE_PARAMS,
+    limit_note: str = "",
 ) -> tuple[list[FeatureRef], ExprScope]:
+    """Feature refs and the expression scope. ``max_features`` / ``max_params`` default to the
+    edge-plan limits; overlays pass their own and a ``limit_note`` saying why."""
     refs: list[FeatureRef] = []
     single: set[str] = set(PRICE_INPUTS)
     multi: dict[str, tuple[str, ...]] = {}
@@ -352,12 +389,12 @@ def _check_features(
             )
         )
         return refs, ExprScope(frozenset(single), multi, frozenset(), scope_reg)
-    if not MIN_FEATURES <= len(feats) <= MAX_FEATURES:
+    if not MIN_FEATURES <= len(feats) <= max_features:
         errors.append(
             PlanError(
                 "features",
-                f"has {len(feats)} features; use {MIN_FEATURES} to {MAX_FEATURES} "
-                "(fewer features means fewer chances to overfit)"
+                f"has {len(feats)} features; use {MIN_FEATURES} to {max_features} "
+                f"(fewer features means fewer chances to overfit{limit_note})"
                 + ("; e.g. " + example if not feats else ". Drop the least important ones"),
             )
         )
@@ -458,13 +495,13 @@ def _check_features(
                 if dim is not None:
                     scales[f"{alias_s}.{out}"] = dim
     total = sum(param_counts.values())
-    if total > MAX_FEATURE_PARAMS:
+    if total > max_params:
         detail = ", ".join(f"{a}: {n}" for a, n in param_counts.items())
         errors.append(
             PlanError(
                 "features",
                 f"these features have {total} tunable params in total ({detail}), defaults "
-                f"included; the limit is {MAX_FEATURE_PARAMS}. Drop a feature or pick ones "
+                f"included; the limit is {max_params}{limit_note}. Drop a feature or pick ones "
                 "with fewer params",
             )
         )
@@ -763,6 +800,8 @@ def _validate(raw: Mapping[str, Any] | str, registry: Mapping[str, FeatureSpec])
     obj, errors = _parse_raw(raw)
     if obj is None:
         return _Validated(None, errors)
+    if obj.get("kind") == OVERLAY_KIND:
+        return _validate_overlay(obj, registry)
     _check_top_level(obj, errors)
     name = _check_name(obj, errors)
     description = _check_description(obj, errors)
@@ -812,6 +851,161 @@ def _validate(raw: Mapping[str, Any] | str, registry: Mapping[str, FeatureSpec])
     return _Validated(plan, [], entry, exit_)
 
 
+# --------------------------------------------------------------------------- overlay plans
+
+_OVERLAY_LIMIT_NOTE = "; overlays use published parameters, untuned"
+_OVERLAY_EXAMPLE = '"flat_when": "close < sma_slow"'
+_OVERLAY_REQUIRED_HINTS: Mapping[str, str] = {
+    "kind": 'Add "kind": "overlay"',
+    "name": 'Add a short name, e.g. "name": "sma200_trend_overlay"',
+    "symbol": 'Add the one symbol held, e.g. "symbol": "BTCUSDT"',
+    "interval": _REQUIRED_HINTS["interval"],
+    "features": 'Add features, e.g. "features": {"sma_slow": {"sma": {"period": 200}}}',
+    "flat_when": f"Add the risk rule (true -> flat from the next bar's open), e.g. "
+    f"{_OVERLAY_EXAMPLE}",
+}
+
+
+def _check_overlay_top_level(raw: Mapping[str, Any], errors: list[PlanError]) -> None:
+    for key in raw:
+        if key in OVERLAY_TOP_LEVEL_KEYS:
+            continue
+        if not isinstance(key, str):
+            errors.append(PlanError("$", f"keys must be strings, got {key!r}"))
+        elif key == "risk":
+            errors.append(
+                PlanError(
+                    "risk",
+                    "an overlay has no `risk` key: it holds 100% of equity in the symbol or is "
+                    "flat (exposure 0 or 1 only; half exposure or stops would need an engine "
+                    "change and are out of scope). Remove it",
+                )
+            )
+        elif key in ("long_entry", "long_exit"):
+            errors.append(
+                PlanError(
+                    key,
+                    f"an overlay has no `{key}`: write its one risk rule as `flat_when` (true at "
+                    "bar t's close -> flat from bar t+1's open, otherwise invested in "
+                    f"buy-and-hold), e.g. {_OVERLAY_EXAMPLE}. Remove `{key}`",
+                )
+            )
+        elif key in SHORT_KEYS:
+            errors.append(
+                PlanError(
+                    key,
+                    f"`{key}` is not supported: an overlay is long buy-and-hold or flat "
+                    "(Binance spot has no shorts). Remove it",
+                )
+            )
+        elif key in ("symbols", "universe"):
+            errors.append(
+                PlanError(
+                    key,
+                    "an overlay covers exactly one symbol: use one string, e.g. "
+                    '"symbol": "BTCUSDT", and submit one overlay per symbol',
+                )
+            )
+        else:
+            errors.append(
+                PlanError(
+                    key,
+                    f"unknown key `{key}`.{_did_you_mean(key, OVERLAY_TOP_LEVEL_KEYS)} Allowed "
+                    f"overlay keys: {', '.join(OVERLAY_TOP_LEVEL_KEYS)}",
+                )
+            )
+    for key in OVERLAY_REQUIRED_KEYS:
+        if key not in raw:
+            errors.append(
+                PlanError(key, f"missing required key `{key}`. {_OVERLAY_REQUIRED_HINTS[key]}")
+            )
+
+
+def _negated(expr: CheckedExpr) -> CheckedExpr:
+    """``not (expr)`` built from the already-checked tree (no re-parse, no length limit)."""
+    body = ast.UnaryOp(op=ast.Not(), operand=copy.deepcopy(expr.tree.body))
+    return CheckedExpr(
+        source=f"not ({expr.source})",
+        tree=ast.fix_missing_locations(ast.Expression(body=body)),
+        lag=expr.lag,
+        max_prev=expr.max_prev,
+        uses_cross=expr.uses_cross,
+        refs=expr.refs,
+    )
+
+
+def _validate_overlay(raw: Mapping[str, Any], registry: Mapping[str, FeatureSpec]) -> _Validated:
+    errors: list[PlanError] = []
+    _check_overlay_top_level(raw, errors)
+    name = _check_name(raw, errors)
+    description = _check_description(raw, errors)
+    symbol = ""
+    if isinstance(raw.get("symbol"), list | tuple):
+        errors.append(
+            PlanError(
+                "symbol",
+                "an overlay covers exactly one symbol: use one string, e.g. "
+                '"symbol": "BTCUSDT", and submit one overlay per symbol',
+            )
+        )
+    else:
+        symbol = _check_symbol(raw, errors)
+    interval = _check_interval(raw, errors)
+    refs, scope = _check_features(
+        raw,
+        registry,
+        errors,
+        max_features=MAX_OVERLAY_FEATURES,
+        max_params=MAX_OVERLAY_PARAMS,
+        limit_note=_OVERLAY_LIMIT_NOTE,
+    )
+    flat: CheckedExpr | None = None
+    if "flat_when" in raw:
+        flat, errs = check_expression(raw["flat_when"], scope, "flat_when")
+        errors.extend(errs)
+    if flat is not None:
+        used = {r.split(".", 1)[0] for r in flat.refs}
+        for ref in refs:
+            if ref.alias not in used:
+                errors.append(
+                    PlanError(
+                        f"features.{ref.alias}",
+                        f"feature `{ref.alias}` is defined but not used in flat_when; use it "
+                        "in the rule or remove it (unused features still count toward the "
+                        "param limit)",
+                    )
+                )
+    if errors:
+        return _Validated(None, errors)
+    assert flat is not None
+    entry = _negated(flat)
+    plan = Plan(
+        name=name,
+        symbol=symbol,
+        interval=interval,
+        features=tuple(refs),
+        long_entry=entry.source,
+        long_exit=flat.source,
+        risk=RiskSpec(),
+        description=description,
+        kind="overlay",
+    )
+    return _Validated(plan, [], entry, flat)
+
+
+def is_overlay_plan(raw: object) -> bool:
+    """True for a risk-overlay plan: a :class:`lab.types.Plan` with ``kind == "overlay"``, or a
+    mapping (or JSON object text) with ``"kind": "overlay"``. Never raises."""
+    if isinstance(raw, Plan):
+        return raw.kind == OVERLAY_KIND
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, RecursionError):
+            return False
+    return isinstance(raw, Mapping) and raw.get("kind") == OVERLAY_KIND
+
+
 def validate_plan(
     raw: Mapping[str, Any] | str, registry: Mapping[str, FeatureSpec] | None = None
 ) -> tuple[Plan | None, list[PlanError]]:
@@ -831,7 +1025,21 @@ def parse_plan(
 
 
 def plan_to_dict(plan: Plan) -> dict[str, Any]:
-    """Canonical JSON-able dict (params filled); ``parse_plan(plan_to_dict(p)) == p``."""
+    """Canonical JSON-able dict (params filled); ``parse_plan(plan_to_dict(p)) == p``.
+
+    Edge (``kind="signal"``) plans keep their original form with no ``kind`` key, so their
+    ``plan_hash`` is unchanged; an overlay is ``{"kind", "name", "description", "symbol",
+    "interval", "features", "flat_when"}``."""
+    if plan.kind == OVERLAY_KIND:
+        return {
+            "kind": OVERLAY_KIND,
+            "name": plan.name,
+            "description": plan.description,
+            "symbol": plan.symbol,
+            "interval": plan.interval,
+            "features": {f.alias: {f.feature: dict(f.params)} for f in plan.features},
+            "flat_when": plan.long_exit,
+        }
     return {
         "name": plan.name,
         "description": plan.description,
@@ -872,7 +1080,10 @@ def gate_base_expressions(
     signal on its own), built from the already-checked entry tree (no new parse, no length
     limit). Evaluate both with :func:`lab.plan.expr.evaluate_expression`: a bar where ``base``
     is defined is True in exactly one of them (NaN makes both False). None when the plan uses no
-    derivatives feature or has no derivatives-free clause."""
+    derivatives feature or has no derivatives-free clause, and always None for a risk overlay
+    (its ``flat_when`` may use derivatives features freely; there is no gate to strip)."""
+    if plan.kind == OVERLAY_KIND:
+        return None
     reg = resolve_registry(registry)
     drv = {
         ref.alias: ref.feature

@@ -7,7 +7,9 @@ registered here.
 
 Derivatives features (``lab.registry.derivatives``) read aligned ``drv_*`` columns that the
 data layer attaches to the candles; they are risk filters, accepted by the plan validator only
-as gating ``and`` clauses of a spot long-only entry.
+as gating ``and`` clauses of a spot long-only entry in edge (signal) plans, and anywhere in the
+``flat_when`` rule of a risk-overlay plan (PLAN.md Phase 15), since crash-risk filtering is
+their stated role.
 """
 
 from __future__ import annotations

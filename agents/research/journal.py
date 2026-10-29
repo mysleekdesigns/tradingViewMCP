@@ -49,15 +49,26 @@ __all__ = [
     "CHECKLIST_HEADING",
     "HOLDOUT_WORD",
     "NOT_RECORDED",
+    "OVERLAY_CRITERIA_KEYS",
+    "OVERLAY_PREREG_HEADING",
+    "OVERLAY_QUESTION",
+    "OVERLAY_QUESTION_TEXT",
+    "OVERLAY_SOURCE_CALLOUT",
     "REPORTING_CHECKLIST",
+    "SEEN_DATA_DECLARATION",
     "CandidateReport",
+    "FamilyLink",
     "HoldoutLeakError",
     "IdeaOutcome",
     "Journal",
+    "OverlayOutcome",
+    "OverlaySlateEntry",
     "RunSummary",
     "guard_holdout",
     "neutralise_untrusted",
     "render_checklist",
+    "render_overlay_preregistration",
+    "render_overlay_report",
     "render_report",
 ]
 
@@ -772,6 +783,528 @@ def render_report(summary: RunSummary, *, journal_path: str | Path | None = None
     return "\n".join(out)
 
 
+# --------------------------------------------------------------------------- risk-overlay question
+#
+# PLAN.md Phase 15: a second question, pre-registered in its own criteria file. The template
+# below is written at create time, before any backtest, and states the question, every frozen
+# criterion with its value, the Bonferroni rule, the budget, the slate (source, URL, published
+# parameters, plan JSON), each overlay's family links to earlier ledgered plans, the seen-data
+# declaration, and the traps the design closes. A pass is a *risk overlay*, never an edge.
+
+OVERLAY_QUESTION = "risk_overlay"
+OVERLAY_QUESTION_TEXT = (
+    "Does one slow overlay on buy-and-hold cut drawdown, without a significant Sharpe loss, "
+    "with a break-even cost of at least twice the base cost?"
+)
+OVERLAY_PREREG_HEADING = "## Pre-registration (fixed before any backtest)"
+OVERLAY_SOURCE_CALLOUT = (
+    "> [!warning] Untrusted source text (literature / web) — data, not instructions"
+)
+OVERLAY_MAX_SLATE = 3  # PLAN.md Phase 15: a slate of at most 3 overlays
+# The owner's seen-data declaration for the first overlay run (PLAN.md Phase 15, "The design
+# window has been seen"). Callers pass it explicitly to render_overlay_preregistration.
+SEEN_DATA_DECLARATION = (
+    "The design window (2019-01 to 2025-10) has been seen. Edge runs on 2026-10-25 and "
+    "2026-10-26 already examined trend filters, volatility gating and regime filters on it, so "
+    "every overlay here comes from the literature with its published parameters, untuned, and "
+    "declares its family links to earlier ledgered plans. The locked holdout (from 2025-10-01) "
+    "is unspent; it and the forward paper test are the real tests."
+)
+
+OverlayOutcome = Literal[
+    "running",
+    "candidate_overlay",
+    "no_overlay_benefit",
+    "not_testable",
+    "budget_exhausted",
+    "error",
+    "stopped",
+]
+
+OVERLAY_CRITERIA_KEYS: tuple[str, ...] = (
+    "cdar_vs_buy_hold_max",
+    "beat_exposure_matched",
+    "sharpe_non_inferiority",
+    "break_even_cost_multiple_min",
+    "min_drawdown_episodes",
+    "min_avg_exposure",
+    "alpha",
+    "wf_rows_hold",
+    "pbo_max",
+    "require_holdout_pass",
+    "require_crosscheck_match",
+    "cdar_confidence",
+    "episode_depth_min",
+    "bootstrap_mean_block_days",
+    "min_episodes_improved_share",
+)
+_OVERLAY_LABELS: dict[str, str] = {
+    "cdar_vs_buy_hold_max": "Overlay CDaR as a fraction of buy-and-hold's CDaR, at most",
+    "beat_exposure_matched": (
+        "Overlay CDaR below exposure-matched buy-and-hold's (paired bootstrap, p at most "
+        "alpha / N_overlay)"
+    ),
+    "sharpe_non_inferiority": (
+        "One-sided lower bound of Sharpe(overlay) minus Sharpe(buy-and-hold), 365-day, paired "
+        "bootstrap, at least minus this"
+    ),
+    "break_even_cost_multiple_min": (
+        "Drawdown, episodes-improved and Sharpe rows still hold at this cost multiple"
+    ),
+    "min_drawdown_episodes": (
+        "Buy-and-hold drawdown episodes deeper than the episode depth, at least (else not testable)"
+    ),
+    "min_avg_exposure": "Average exposure (an overlay, not a timing strategy), at least",
+    "alpha": "Significance level before the Bonferroni division",
+    "wf_rows_hold": (
+        "Rows also hold on stitched fixed-parameter test folds (a sub-window robustness check on "
+        "the same design bars, not out-of-sample)"
+    ),
+    "pbo_max": "Probability of backtest overfitting, at most (nothing swept: untuned by rule)",
+    "require_holdout_pass": "Passes the locked holdout check (pass/fail only)",
+    "require_crosscheck_match": "Matches the event-driven cross-check engine",
+    "cdar_confidence": "CDaR confidence level a (mean of the worst 1 - a share of bar drawdowns)",
+    "episode_depth_min": "Depth that makes a buy-and-hold drawdown an episode (strictly deeper)",
+    "bootstrap_mean_block_days": "Stationary-bootstrap mean block length (days)",
+    "min_episodes_improved_share": (
+        "Share of buy-and-hold's deep episodes in which the overlay's drawdown is below "
+        "exposure-matched buy-and-hold's, strictly more than"
+    ),
+}
+_BUDGET_LIMIT_KEYS = tuple(limit for _label, _used, limit in _BUDGET_ROWS)
+_RUN_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_JOURNAL_STEM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
+_URL = re.compile(r"^https?://\S+$")
+
+
+@dataclass(frozen=True)
+class FamilyLink:
+    """An earlier ledgered plan in the same family as a slate overlay. ``relation`` says how
+    it relates (e.g. "same 200-day trend filter, tested as an edge entry gate"); ``journal`` is
+    the Obsidian note stem of the run that tested it (``.md`` optional), or None."""
+
+    plan_hash: str
+    run_id: str
+    relation: str
+    journal: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.plan_hash, str) or not _PLAN_HASH.match(self.plan_hash):
+            raise ValueError(f"family link plan_hash {self.plan_hash!r} must match a plan hash")
+        if not isinstance(self.run_id, str) or not _RUN_ID.match(self.run_id):
+            raise ValueError(f"family link run_id {self.run_id!r} must match {_RUN_ID.pattern}")
+        if not isinstance(self.relation, str) or not self.relation.strip():
+            raise ValueError(f"family link to plan {self.plan_hash} needs a relation")
+        if self.journal is not None:
+            stem = self.journal.removesuffix(".md") if isinstance(self.journal, str) else ""
+            if not _JOURNAL_STEM.match(stem):
+                raise ValueError(
+                    f"family link journal {self.journal!r} must be a journal note stem "
+                    f"matching {_JOURNAL_STEM.pattern}"
+                )
+
+
+@dataclass(frozen=True)
+class OverlaySlateEntry:
+    """One pre-registered overlay. ``source`` is the citation text (untrusted: it is quoted
+    in a warning callout), ``source_url`` the http(s) URL, ``published_params`` the parameters
+    as published, ``plan`` the overlay plan JSON exactly as it will be submitted."""
+
+    name: str
+    source: str
+    source_url: str
+    published_params: Mapping[str, Any]
+    plan: Mapping[str, Any]
+    plan_hash: str
+    family_links: Sequence[FamilyLink] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("slate entry name must be a non-empty string")
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise ValueError(f"slate entry {self.name!r} needs its source")
+        if not isinstance(self.source_url, str) or not _URL.match(self.source_url.strip()):
+            raise ValueError(
+                f"slate entry {self.name!r} source_url {self.source_url!r} must be an http(s) URL"
+            )
+        if not isinstance(self.published_params, Mapping) or not self.published_params:
+            raise ValueError(f"slate entry {self.name!r} needs its published parameters")
+        if not isinstance(self.plan, Mapping) or self.plan.get("kind") != "overlay":
+            raise ValueError(f'slate entry {self.name!r} plan must be a {{"kind": "overlay"}} plan')
+        if not isinstance(self.plan_hash, str) or not _PLAN_HASH.match(self.plan_hash):
+            raise ValueError(
+                f"slate entry {self.name!r} plan_hash {self.plan_hash!r} must match "
+                f"{_PLAN_HASH.pattern}"
+            )
+        if isinstance(self.family_links, str | bytes) or not all(
+            isinstance(link, FamilyLink) for link in self.family_links
+        ):
+            raise ValueError(f"slate entry {self.name!r} family_links must be FamilyLink items")
+
+
+def _overlay_criteria(research: object) -> dict[str, Any]:
+    """The 15 frozen overlay criteria from a duck-typed config, in a fixed order. Fails
+    closed: a missing or unknown key is a ValueError naming it."""
+    crit = getattr(research, "criteria", None)
+    if crit is None:
+        raise ValueError("overlay research config has no criteria")
+    if isinstance(crit, Mapping):
+        values = dict(crit)
+    elif hasattr(crit, "__dataclass_fields__"):
+        values = asdict(crit)  # type: ignore[call-overload]
+    else:
+        values = {k: getattr(crit, k) for k in OVERLAY_CRITERIA_KEYS if hasattr(crit, k)}
+    missing = [k for k in OVERLAY_CRITERIA_KEYS if k not in values]
+    unknown = sorted(set(values) - set(OVERLAY_CRITERIA_KEYS))
+    if missing or unknown:
+        raise ValueError(
+            f"overlay criteria must have exactly the {len(OVERLAY_CRITERIA_KEYS)} keys; "
+            f"missing {missing}, unknown {unknown}"
+        )
+    return {k: values[k] for k in OVERLAY_CRITERIA_KEYS}
+
+
+def _overlay_budget(research: object) -> dict[str, Any]:
+    budget = getattr(research, "budget", None)
+    if budget is None:
+        raise ValueError("overlay research config has no budget")
+    data = dict(budget) if isinstance(budget, Mapping) else {}
+    for key in _BUDGET_LIMIT_KEYS:
+        if key not in data and hasattr(budget, key):
+            data[key] = getattr(budget, key)
+    missing = [k for k in _BUDGET_LIMIT_KEYS if k not in data]
+    if missing:
+        raise ValueError(f"overlay budget is missing {missing}")
+    return {k: data[k] for k in _BUDGET_LIMIT_KEYS}
+
+
+def _check_overlay_research(research: object) -> str:
+    question = getattr(research, "question", None)
+    if question != OVERLAY_QUESTION:
+        raise ValueError(
+            f"research.question must be {OVERLAY_QUESTION!r} for an overlay journal, "
+            f"got {question!r}"
+        )
+    sha = getattr(research, "sha256", None)
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
+        raise ValueError(f"research.sha256 must be a 64-hex sha256, got {sha!r}")
+    return sha
+
+
+def _number(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _param_value(value: object) -> str:
+    if isinstance(value, Mapping | list | tuple):
+        return _cell(json.dumps(value, sort_keys=True, ensure_ascii=True))
+    return _cell(value)
+
+
+def _plan_block(plan: Mapping[str, Any]) -> list[str]:
+    """The plan JSON in a fenced block. ``json.dumps`` escapes newlines and non-ASCII, and
+    every line starts with whitespace or a brace, so nothing inside can close the fence."""
+    text = json.dumps(plan, indent=2, sort_keys=True, ensure_ascii=True)
+    return ["```json", *text.splitlines(), "```"]
+
+
+def _slate_entry_lines(i: int, entry: OverlaySlateEntry) -> list[str]:
+    url = " ".join(entry.source_url.split()).replace("`", "%60")
+    out = [
+        f"#### {i}. {_cell(entry.name)} · plan `{entry.plan_hash}`",
+        "",
+        OVERLAY_SOURCE_CALLOUT,
+        f"> Source URL: `{url}`",
+        ">",
+    ]
+    out += [f"> {line}" if line else ">" for line in neutralise_untrusted(entry.source.strip())]
+    out += [
+        "",
+        "Published parameters (used as published, untuned):",
+        "",
+        "| parameter | published value |",
+        "|---|---|",
+    ]
+    out += [f"| {_cell(k)} | {_param_value(v)} |" for k, v in entry.published_params.items()]
+    out += ["", "Plan JSON, exactly as submitted:", "", *_plan_block(entry.plan), ""]
+    out += ["Family links to earlier ledgered plans:", ""]
+    if not entry.family_links:
+        out.append(
+            "- none declared: the designer states that no earlier ledgered plan is in this "
+            "overlay's family. The critic checks this against `get_ledger`."
+        )
+    for link in entry.family_links:
+        note = f" · [[{link.journal.removesuffix('.md')}]]" if link.journal else ""
+        out.append(
+            f"- plan `{link.plan_hash}` in [[run-{link.run_id}]]{note}: {_inline(link.relation)}"
+        )
+    out.append("")
+    return out
+
+
+def render_overlay_preregistration(
+    research: object,
+    slate: Sequence[OverlaySlateEntry],
+    *,
+    seen_data: str,
+    holdout_budget: int,
+) -> str:
+    """The overlay pre-registration section (Markdown, starting with
+    :data:`OVERLAY_PREREG_HEADING`), written before the first backtest.
+
+    ``research`` is duck-typed like ``lab.research.contract.OverlayResearchConfig``:
+    ``.question == "risk_overlay"``, ``.criteria`` with the 15 overlay keys, ``.budget`` with
+    the five ``RunBudget`` limits, ``.sha256``. ``holdout_budget`` is how many holdout checks
+    this run may spend (at most the frozen ``max_holdout_checks``). Raises ValueError on any
+    missing piece and :class:`HoldoutLeakError` if text would record a holdout result."""
+    sha = _check_overlay_research(research)
+    criteria = _overlay_criteria(research)
+    budget = _overlay_budget(research)
+    if isinstance(slate, str | bytes) or not slate:
+        raise ValueError("the overlay slate must list at least one OverlaySlateEntry")
+    if len(slate) > OVERLAY_MAX_SLATE:
+        raise ValueError(f"the overlay slate has {len(slate)} entries; at most {OVERLAY_MAX_SLATE}")
+    if not all(isinstance(e, OverlaySlateEntry) for e in slate):
+        raise ValueError("every slate entry must be an OverlaySlateEntry")
+    hashes = [e.plan_hash for e in slate]
+    if len(set(hashes)) != len(hashes):
+        raise ValueError(f"the overlay slate repeats a plan hash: {hashes}")
+    if not isinstance(seen_data, str) or not seen_data.strip():
+        raise ValueError("seen_data must state what the design window has already been used for")
+    max_checks = budget["max_holdout_checks"]
+    if (
+        not isinstance(holdout_budget, int)
+        or isinstance(holdout_budget, bool)
+        or not 0 <= holdout_budget <= max_checks
+    ):
+        raise ValueError(
+            f"holdout_budget must be an int between 0 and max_holdout_checks ({max_checks}), "
+            f"got {holdout_budget!r}"
+        )
+    for entry in slate:
+        guard_holdout(entry.source)
+        for link in entry.family_links:
+            guard_holdout(link.relation)
+    guard_holdout(seen_data)
+
+    alpha = criteria["alpha"]
+    per_test = f"{alpha / len(slate):g}" if _number(alpha) else NOT_RECORDED
+    lines = [
+        OVERLAY_PREREG_HEADING,
+        "",
+        "Everything in this section was written before the first backtest of this run and is "
+        "never edited afterwards.",
+        "",
+        "### Question",
+        "",
+        f"**{OVERLAY_QUESTION_TEXT}**",
+        "",
+        "A pass is reported as a *risk overlay*, never as an edge. The base is buy-and-hold of "
+        "one symbol; a rule decided on bar t's close sets the exposure for bar t+1's open to 1 "
+        "or 0. Overlays use their published parameters, untuned: `run_sweep` and "
+        "`walk_forward` are refused in overlay runs, and each overlay logic may be tried with "
+        "one published parameter set only, across every overlay run. Before anything is "
+        "recorded the lab refuses another parameter set or a renamed copy of a submitted "
+        "overlay logic, the same registry features with other parameters (or another interval) "
+        "as an earlier overlay submission, and a logic whose parameters were already tried "
+        "outside the overlay runs. A copy on other features is not refused; alike overlays "
+        "(design-window returns correlated at or above `family_return_corr`) make `pbo_max` "
+        "fail.",
+        "",
+        "### Criteria (frozen at start_run)",
+        "",
+        f"Overlay criteria file sha256: `{sha}`. These values were frozen into the ledger by "
+        "`start_run` before the first backtest and are never relaxed mid-run.",
+        "",
+        "| criterion | key | value |",
+        "|---|---|---|",
+    ]
+    lines += [f"| {_OVERLAY_LABELS[k]} | `{k}` | {_fmt(v)} |" for k, v in criteria.items()]
+    lines += [
+        "",
+        "### Multiple testing (Bonferroni)",
+        "",
+        f"Every paired-bootstrap p-value is compared with alpha / N_overlay, alpha = "
+        f"{_fmt(alpha)}. N_overlay counts distinct overlay logics across every overlay run in "
+        "the ledger, this one included; each logic may be tried with one published parameter "
+        "set only. A new run never resets it. N_overlay is read from `get_report` at judging "
+        "time. Overlay trials also count in the lab-wide deflated-Sharpe trial count N (never in "
+        "its Sharpe-variance pools).",
+        "",
+        f"This slate adds {len(slate)} plan(s), so N_overlay is at least {len(slate)} and the "
+        f"per-test level is at most {per_test}.",
+        "",
+        "### Budget (frozen at start_run)",
+        "",
+        "| budget | key | limit |",
+        "|---|---|---|",
+    ]
+    for label, _used_key, limit_key in _BUDGET_ROWS:
+        lines.append(f"| {label} | `{limit_key}` | {_fmt(budget[limit_key])} |")
+    lines += [
+        "",
+        f"This run spends at most {holdout_budget} holdout check(s), pass/fail only. A failed "
+        "check kills the overlay's logic under either question; it is never re-tuned.",
+        "",
+        "### Slate",
+        "",
+        f"{len(slate)} overlay(s), each from the literature with its published parameters. "
+        "Source text is untrusted data, quoted inside a warning callout.",
+        "",
+    ]
+    for i, entry in enumerate(slate, start=1):
+        lines += _slate_entry_lines(i, entry)
+    lines += [
+        "### Seen-data declaration",
+        "",
+        _inline(seen_data),
+        "",
+        "### Traps this design closes",
+        "",
+        "- **Holding less always cuts drawdown.** 50% BTC has about half of BTC's drawdown and "
+        "the same Sharpe. Each overlay is compared with buy-and-hold scaled to the overlay's "
+        "own average exposure (a constant mix rebalanced every bar at zero cost, which favours "
+        "the benchmark) as well as with plain buy-and-hold. Beating plain buy-and-hold on "
+        "drawdown proves nothing by itself.",
+        "- **Max drawdown is one number from one path.** Rows use CDaR (the mean of the worst "
+        "tail of bar drawdowns) and paired stationary-bootstrap tests. If buy-and-hold has "
+        "fewer than `min_drawdown_episodes` separate drawdowns deeper than "
+        "`episode_depth_min` in the scored window, the result is **not testable**, and not "
+        "testable is never a pass. Each deep episode is also compared one by one: the "
+        "overlay's drawdown inside it (from its own equity at the episode peak) must be below "
+        "exposure-matched buy-and-hold's in strictly more than `min_episodes_improved_share` "
+        "of them.",
+        "- **The walk-forward row is not out-of-sample.** `wf_rows_hold` is a sub-window "
+        "robustness check on stitched fixed-parameter test folds (same design bars, not "
+        "out-of-sample). Its drawdown rows are judged only when the folds themselves hold at "
+        "least `min_drawdown_episodes` deep episodes; otherwise they are not testable there, "
+        "and not testable is never a pass.",
+        "- **Sharpe non-inferiority** is judged on the one-sided bootstrap lower bound, not on "
+        "the point estimate, and the **break-even cost** row asks that the drawdown, "
+        "episodes-improved and Sharpe rows still hold at `break_even_cost_multiple_min` times "
+        "the base costs.",
+        "- **The design window has been seen** (declaration above), so parameters are the "
+        "published ones and each overlay declares its family links.",
+        "",
+        "### Outcome vocabulary",
+        "",
+        "- `candidate_overlay`: passed every overlay row and the locked check; still needs "
+        "4-8 weeks of `freqtrade --dry-run` before it is called a working risk overlay.",
+        "- `no_overlay_benefit`: no overlay passed every row (a correct, complete outcome).",
+        "- `not_testable`: too few drawdown episodes to judge; never a pass.",
+        "- `budget_exhausted`, `error`, `stopped`: partial; no conclusion either way.",
+        "",
+    ]
+    text = "\n".join(lines)
+    guard_holdout(text, per_line=True)
+    return text
+
+
+_OVERLAY_OUTCOME_TEXT: dict[str, str] = {
+    "candidate_overlay": (
+        "**Candidate risk overlay.** {n} overlay(s) passed every pre-registered overlay row on "
+        "the design window and the stitched fixed-parameter test folds (a sub-window "
+        "robustness check, not out-of-sample), the cross-check and the locked check. This is "
+        "a risk result, not a return result. It is not a working risk overlay "
+        "until 4-8 weeks of `freqtrade --dry-run` paper trading under the Phase 13 protocol "
+        "agree with it."
+    ),
+    "no_overlay_benefit": (
+        "**No overlay benefit found.** No overlay in this run passed every pre-registered "
+        "overlay row. This is a correct, complete outcome; the criteria and budget were not "
+        "relaxed."
+    ),
+    "not_testable": (
+        "**Not testable.** Buy-and-hold had too few separate drawdown episodes in the scored "
+        "window to judge the drawdown rows. Not testable is never a pass, and it is not "
+        "evidence of benefit either."
+    ),
+    "budget_exhausted": (
+        "**Budget exhausted — no overlay benefit found within this budget.** The budget and "
+        "criteria were not extended or relaxed."
+    ),
+    "error": (
+        "**Run ended with an error.** The results are partial and support no conclusion either way."
+    ),
+    "stopped": (
+        "**Run stopped before completion.** The results are partial and support no conclusion "
+        "either way."
+    ),
+}
+OVERLAY_DISCLAIMER = (
+    "Backtests are historical, not forward-looking. A risk overlay is a drawdown result "
+    "measured against exposure-matched buy-and-hold, not a return forecast."
+)
+
+
+def _overlay_rows_table(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Overlay rows; a ``not_testable`` status says plainly that it is never a pass."""
+    shown: list[Mapping[str, Any]] = []
+    for row in rows:
+        status = row.get("status")
+        if not isinstance(status, str):
+            raise ValueError(f"criteria row {row.get('criterion')!r} has no status")
+        if status == "not_testable":
+            row = {**row, "status": "not testable (never a pass)"}
+        shown.append(row)
+    return _criteria_table(shown)
+
+
+def render_overlay_report(
+    outcome: OverlayOutcome,
+    *,
+    run_id: str,
+    plan_rows: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    candidates: Sequence[str] = (),
+    n_overlay: int | None = None,
+    notes: Sequence[str] = (),
+) -> str:
+    """The overlay end-of-run report. ``plan_rows`` maps plan hash to its overlay criteria
+    rows (from ``evaluate_overlay_plan``: criterion, status, value, threshold, note); holdout
+    rows keep their status only. ``candidates`` are the plan hashes that passed."""
+    if outcome not in _OVERLAY_OUTCOME_TEXT:
+        raise ValueError(
+            f"overlay outcome must be one of {sorted(_OVERLAY_OUTCOME_TEXT)}, got {outcome!r}"
+        )
+    plan_rows = dict(plan_rows or {})
+    for h in [*plan_rows, *candidates]:
+        if not isinstance(h, str) or not _PLAN_HASH.match(h):
+            raise ValueError(f"plan hash {h!r} must match {_PLAN_HASH.pattern}")
+    if (outcome == "candidate_overlay") != bool(candidates):
+        raise ValueError("candidates are required for candidate_overlay and only for it")
+    out = [
+        REPORT_HEADING,
+        "",
+        f"Run [[run-{run_id}]] · question `{OVERLAY_QUESTION}`",
+        "",
+        "### Outcome",
+        "",
+        _OVERLAY_OUTCOME_TEXT[outcome].format(n=len(candidates)),
+        "",
+        "### N_overlay",
+        "",
+        (
+            f"N_overlay = {int(n_overlay)}: distinct overlay logics across every overlay run "
+            "(each logic may be tried with one published parameter set only); each p-value was "
+            "compared with alpha / N_overlay."
+            if isinstance(n_overlay, int) and not isinstance(n_overlay, bool)
+            else f"N_overlay {NOT_RECORDED}."
+        ),
+        "",
+        "### Overlay rows",
+        "",
+    ]
+    if not plan_rows:
+        out.append("No overlay was scored in this run.")
+    for h, rows in plan_rows.items():
+        tag = " (candidate risk overlay)" if h in candidates else ""
+        out += [f"#### plan `{h}`{tag}", "", *_overlay_rows_table(rows), ""]
+    out += ["", "### Notes", ""]
+    out += [f"- {_inline(n)}" for n in notes] or ["None recorded."]
+    out += ["", "### Disclaimer", "", OVERLAY_DISCLAIMER, ""]
+    return "\n".join(out)
+
+
 def _guard_summary(summary: RunSummary) -> None:
     """Free-form inputs are checked as whole texts; the rendered report line by line."""
     texts: list[str] = list(summary.notes)
@@ -842,6 +1375,75 @@ class Journal:
         )
         data = (frontmatter + body).encode("utf-8")
         guard_holdout(body, per_line=True)
+        journal_dir = Path(journal_dir)
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        n = 1
+        while True:
+            path = journal_dir / (f"{stem}.md" if n == 1 else f"{stem}-{n}.md")
+            try:
+                _create_exclusive(path, data)
+            except FileExistsError:
+                n += 1
+                continue
+            return cls(path, run_id)
+
+    @classmethod
+    def create_overlay(
+        cls,
+        *,
+        run_id: str,
+        symbols: Sequence[str],
+        interval: str,
+        research: object,
+        slate: Sequence[OverlaySlateEntry],
+        seen_data: str,
+        holdout_budget: int,
+        title: str,
+        idea_ids: Sequence[int] = (),
+        journal_dir: Path = JOURNAL_DIR,
+        today: date | None = None,
+    ) -> Journal:
+        """Create a risk-overlay journal (PLAN.md Phase 15) whose body opens with the
+        pre-registration (:func:`render_overlay_preregistration`), written before any backtest.
+        Frontmatter adds ``question: risk_overlay``; finish it with :meth:`finish_overlay`."""
+        if not run_id or not isinstance(run_id, str):
+            raise ValueError(f"run_id must be a non-empty string, got {run_id!r}")
+        if not symbols:
+            raise ValueError("symbols must not be empty")
+        guard_holdout(title)
+        prereg = render_overlay_preregistration(
+            research, slate, seen_data=seen_data, holdout_budget=holdout_budget
+        )
+        sha = _check_overlay_research(research)
+        ids = sorted({int(i) for i in idea_ids})
+        day = (today or datetime.now(UTC).date()).isoformat()
+        symbol_part = "-".join(_slug(s, 20) for s in symbols)
+        stem = f"{day}-{symbol_part}-{_slug(title)}"
+        frontmatter = (
+            "---\n"
+            f"run_id: {_yaml_str(run_id)}\n"
+            f"date: {day}\n"
+            f"question: {OVERLAY_QUESTION}\n"
+            + _block_list("symbols", list(symbols))
+            + f"interval: {_yaml_str(interval)}\n"
+            "outcome: running\n"
+            + _block_list("idea_ids", ids)
+            + f"criteria_sha256: {_yaml_str(sha)}\n"
+            + _block_list("plan_hashes", [e.plan_hash for e in slate])
+            + "tags:\n  - research\n  - phase-15\n  - risk-overlay\n"
+            "---\n"
+        )
+        body = (
+            f"# {_inline(title)}\n\n"
+            f"Run [[run-{run_id}]] · {', '.join(symbols)} {interval} · question "
+            f"`{OVERLAY_QUESTION}`\n\n"
+            "Holdout metrics are never written to this journal; only that a check was spent and "
+            "the resulting status.\n\n"
+            f"{prereg}\n"
+            f"{LOG_HEADING}\n\n"
+        )
+        guard_holdout(body, per_line=True)
+        data = (frontmatter + body).encode("utf-8")
         journal_dir = Path(journal_dir)
         journal_dir.mkdir(parents=True, exist_ok=True)
         n = 1
@@ -944,6 +1546,8 @@ class Journal:
             raise ValueError(f"summary run_id {summary.run_id!r} != journal {self._run_id!r}")
         if summary.outcome == "running":
             raise ValueError("cannot finish a run whose outcome is still 'running'")
+        if parse_frontmatter(self._read()).get("question") == OVERLAY_QUESTION:
+            raise ValueError("this is a risk-overlay journal; finish it with finish_overlay()")
         _guard_summary(summary)
         report = render_report(summary, journal_path=self._path)
         guard_holdout(report, per_line=True)
@@ -958,6 +1562,49 @@ class Journal:
         ids |= {i.idea_id for i in summary.ideas}
         ids |= {int(r.candidate["idea_id"]) for r in summary.candidates}
         block = _replace_key(block, "outcome", f"outcome: {summary.outcome}\n")
+        block = _replace_key(block, "idea_ids", _block_list("idea_ids", sorted(ids)))
+        if not rest.endswith("\n"):
+            rest += "\n"
+        _atomic_write(self._path, (block + rest + "\n" + report).encode("utf-8"))
+
+    def finish_overlay(
+        self,
+        outcome: OverlayOutcome,
+        *,
+        plan_rows: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+        candidates: Sequence[str] = (),
+        n_overlay: int | None = None,
+        notes: Sequence[str] = (),
+    ) -> None:
+        """Finish a risk-overlay journal: set ``outcome`` (overlay vocabulary) and
+        ``idea_ids``, then append :func:`render_overlay_report`. Holdout numbers are refused."""
+        if outcome == "running":
+            raise ValueError("cannot finish a run whose outcome is still 'running'")
+        text = self._read()
+        meta = parse_frontmatter(text)
+        if meta.get("question") != OVERLAY_QUESTION:
+            raise ValueError("not a risk-overlay journal; finish it with finish()")
+        if meta.get("outcome") != "running":
+            raise RuntimeError(f"journal {self._path.name} is already finished")
+        for note in notes:
+            guard_holdout(note)
+        for rows in (plan_rows or {}).values():
+            for row in rows:
+                if not re.search(_HOLDOUT, str(row.get("criterion", "")), re.IGNORECASE):
+                    guard_holdout(str(row.get("note") or ""))
+        report = render_overlay_report(
+            outcome,
+            run_id=self._run_id,
+            plan_rows=plan_rows,
+            candidates=candidates,
+            n_overlay=n_overlay,
+            notes=notes,
+        )
+        guard_holdout(report, per_line=True)
+        block, rest = _split_frontmatter(text)
+        ids = {int(i) for i in meta.get("idea_ids") or []}
+        ids |= {int(m) for m in _IDEA_LINK.findall(rest)}
+        block = _replace_key(block, "outcome", f"outcome: {outcome}\n")
         block = _replace_key(block, "idea_ids", _block_list("idea_ids", sorted(ids)))
         if not rest.endswith("\n"):
             rest += "\n"

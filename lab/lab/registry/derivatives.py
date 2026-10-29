@@ -1,6 +1,6 @@
 """Derivatives risk-filter features for the plan registry (PLAN.md Phase 12).
 
-Six features read USD-M futures archive series that the data layer has already aligned to the
+Seven features read USD-M futures archive series that the data layer has already aligned to the
 spot bar's *close* (``lab.data.derivatives_align``): a funding settlement, premium/mark/index
 kline or metrics row is visible only at bars whose close is at or after its own timestamp. The
 aligned values arrive as ``drv_*`` columns on the candles frame (names below), so every
@@ -27,7 +27,12 @@ from types import MappingProxyType
 import numpy as np
 import pandas as pd
 
-from lab.registry.features import MAX_PERIOD, make_spec
+from lab.registry.features import (
+    EXPANDING_RANK_MIN_HISTORY,
+    MAX_PERIOD,
+    expanding_pct_rank,
+    make_spec,
+)
 from lab.types import FeatureSpec, ParamSpec
 
 DRV_FUNDING_RATE = "drv_funding_rate"  # fundingRate.funding_rate aligned to bar close
@@ -55,6 +60,7 @@ DERIVATIVES_INPUTS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "basis_pct": (DRV_MARK_CLOSE, DRV_INDEX_CLOSE),
         "oi_change": (DRV_OI,),
         "long_short_ratio": (DRV_LS_RATIO,),
+        "premium_mean_rank": (DRV_PREMIUM_CLOSE,),
     }
 )
 
@@ -145,6 +151,13 @@ def _oi_change(candles: pd.DataFrame, params: Mapping[str, float]) -> pd.DataFra
     return _frame(candles, change)
 
 
+def _premium_mean_rank(candles: pd.DataFrame, params: Mapping[str, float]) -> pd.DataFrame:
+    p = int(params["period"])
+    premium = _drv(candles, DRV_PREMIUM_CLOSE)
+    mean = pd.Series(premium, dtype=np.float64).rolling(p, min_periods=p).mean().to_numpy()
+    return _frame(candles, expanding_pct_rank(mean))
+
+
 def _long_short_ratio(candles: pd.DataFrame, params: Mapping[str, float]) -> pd.DataFrame:
     return _frame(candles, _drv(candles, DRV_LS_RATIO))
 
@@ -224,6 +237,26 @@ LONG_SHORT_RATIO = make_spec(
     lambda _p: 0,
 )
 
+PREMIUM_MEAN_RANK = make_spec(
+    "premium_mean_rank",
+    "Expanding percentile rank in (0, 1] of the `period`-bar mean USD-M premium index (42 = 7 "
+    "days of 4h bars) in its history through bar t; above 0.9 is the top decile (BIS WP 1087), "
+    f"NaN on a gap and until {EXPANDING_RANK_MIN_HISTORY} means exist. An {FILTER_NOTE}.",
+    (
+        ParamSpec(
+            "period",
+            "int",
+            42,
+            1,
+            MAX_PERIOD,
+            "Trailing mean window in bars (42 = 7 days of 4h bars, 7 on 1d bars).",
+        ),
+    ),
+    _VALUE,
+    _premium_mean_rank,
+    lambda p: p["period"] + EXPANDING_RANK_MIN_HISTORY - 2,
+)
+
 DERIVATIVES_FEATURE_SPECS: tuple[FeatureSpec, ...] = (
     FUNDING_RATE,
     FUNDING_ZSCORE,
@@ -231,6 +264,7 @@ DERIVATIVES_FEATURE_SPECS: tuple[FeatureSpec, ...] = (
     BASIS_PCT,
     OI_CHANGE,
     LONG_SHORT_RATIO,
+    PREMIUM_MEAN_RANK,
 )
 
 __all__ = [
@@ -253,4 +287,5 @@ __all__ = [
     "LONG_SHORT_RATIO",
     "OI_CHANGE",
     "PREMIUM_INDEX",
+    "PREMIUM_MEAN_RANK",
 ]

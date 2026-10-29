@@ -32,6 +32,13 @@ from lab.types import FeatureCompute, FeatureSpec, ParamSpec
 
 MAX_PERIOD = 1_000  # longest look-back an agent may request; ~167 days of 4h bars
 
+# Expanding percentile ranks (``vol_rank``, ``premium_mean_rank``) are NaN until their input has
+# this many valid observations: a "top decile" read off fewer than 20 values is 1-2 points.
+# 20 is also small enough that a 7-day derivatives window plus this history fits in the lab's
+# 30-day [derivatives] warmup_days on 1d bars (7 + 20 - 1 = 26 bars) and on 4h bars
+# (42 + 20 - 1 = 61 bars, about 10 days).
+EXPANDING_RANK_MIN_HISTORY = 20
+
 # --------------------------------------------------------------------------- params
 
 
@@ -124,6 +131,23 @@ def seeded_ema(x: np.ndarray, period: int, alpha: float) -> np.ndarray:
     tail = np.array(x[seed_at:], dtype=np.float64, copy=True)
     tail[0] = x[start : seed_at + 1].mean()
     out[seed_at:] = pd.Series(tail).ewm(alpha=alpha, adjust=False).mean().to_numpy()
+    return out
+
+
+def expanding_pct_rank(x: np.ndarray, min_history: int = EXPANDING_RANK_MIN_HISTORY) -> np.ndarray:
+    """Percentile rank of ``x[t]`` in its own expanding history, in (0, 1].
+
+    ``rank[t] = #{j <= t valid : x[j] <= x[t]} / #{j <= t valid}`` (ties count as at or below,
+    so the latest value is included and the rank is never 0). NaN where ``x[t]`` is NaN and
+    until ``min_history`` valid values have been seen; NaN rows are left out of the history
+    (never filled). Reads rows at or before t only. "Expanding" means from the first row of the
+    frame passed in, so the value depends on where that history starts (as in the literature's
+    expanding-window deciles), never on rows after t.
+    """
+    series = pd.Series(np.asarray(x, dtype=np.float64), dtype=np.float64)
+    ranked = series.expanding(min_periods=min_history).rank(method="max", pct=True)
+    out = np.array(ranked.to_numpy(dtype=np.float64), dtype=np.float64, copy=True)
+    out[np.isnan(series.to_numpy())] = np.nan
     return out
 
 
@@ -225,6 +249,11 @@ def _realized_vol(candles: pd.DataFrame, params: Mapping[str, float]) -> pd.Data
     p = _int(params, "period")
     log_ret = np.diff(np.log(_col(candles, "close")), prepend=np.nan)
     return _frame(candles, _VALUE, _rolling(log_ret, p).std(ddof=1).to_numpy())
+
+
+def _vol_rank(candles: pd.DataFrame, params: Mapping[str, float]) -> pd.DataFrame:
+    vol = _realized_vol(candles, params)["value"].to_numpy(dtype=np.float64)
+    return _frame(candles, _VALUE, expanding_pct_rank(vol))
 
 
 def _zscore(candles: pd.DataFrame, params: Mapping[str, float]) -> pd.DataFrame:
@@ -365,6 +394,18 @@ REALIZED_VOL = make_spec(
     lambda p: p["period"],
 )
 
+VOL_RANK = make_spec(
+    "vol_rank",
+    "Expanding percentile rank in (0, 1] of realized_vol(`period`) within its own history "
+    "through bar t (0.9: only 10% of past bars were more volatile), NaN until "
+    f"{EXPANDING_RANK_MIN_HISTORY} values exist. A volatility-regime measure for risk "
+    "overlays, such as flat while vol_rank > 0.9.",
+    (_period_param(30, low=2),),
+    _VALUE,
+    _vol_rank,
+    lambda p: p["period"] + EXPANDING_RANK_MIN_HISTORY - 1,
+)
+
 ZSCORE = make_spec(
     "zscore",
     "How many population standard deviations close sits above (+) or below (-) its "
@@ -397,4 +438,5 @@ PRICE_FEATURES: tuple[FeatureSpec, ...] = (
     REALIZED_VOL,
     ZSCORE,
     VOLUME_SMA,
+    VOL_RANK,
 )

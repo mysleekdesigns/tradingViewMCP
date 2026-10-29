@@ -388,7 +388,10 @@ def gate_base_share(plan: Plan, history: pd.DataFrame, window: Window) -> dict[s
     ``window`` (where it is defined) on which the conjunction of ``long_entry``'s
     derivatives-FREE top-level ``and`` clauses (:func:`lab.plan.validator.gate_base_expressions`)
     is true, evaluated on ``history``; None for plans without derivatives gates, or whose price
-    clause is never defined in the window. Features only, no backtest."""
+    clause is never defined in the window, and for risk overlays (no gate: ``flat_when`` may use
+    derivatives features freely). Features only, no backtest."""
+    if plan.kind == "overlay":
+        return None
     exprs = gate_base_expressions(plan)
     if exprs is None:
         return None
@@ -419,7 +422,9 @@ def check_gate_base(
     least ``cfg.derivatives.gate_base_max_true_frac`` of them (``close > 0``, ``rsi < 101``,
     ``volume >= 0``: always true, so the gate alone would select). Returns ``{"price_clause",
     "price_clause_true_share", "bars"}``, or None for plans without derivatives gates (or whose
-    price clause is never defined in the window)."""
+    price clause is never defined in the window); a no-op (None) for risk overlays."""
+    if plan.kind == "overlay":
+        return None
     info = gate_base_share(plan, history, window)
     if info is None:
         return None
@@ -465,6 +470,8 @@ def gate_base_trial_check(
     limit = cfg.derivatives.gate_base_max_true_frac
 
     def check(plan: Plan) -> None:
+        if plan.kind == "overlay":  # no derivatives gate to check (PLAN.md Phase 15)
+            return
         info = gate_base_share(plan, history, window)
         if info is None:
             return
@@ -975,7 +982,10 @@ def ungated_plan(plan: Plan) -> Plan | None:
     feature removed (:func:`lab.plan.validator.gate_base_expressions`, the same price clause
     :func:`check_gate_base` judges), features no rule uses any more dropped, ``long_exit`` and
     risk unchanged. None when the plan has no derivatives feature or no derivatives-free entry
-    clause. Raises :class:`PlanValidationError` if the stripped plan does not validate."""
+    clause, and always None for a risk overlay (no gate to strip; its derivatives features ARE
+    the risk rule). Raises :class:`PlanValidationError` if the stripped plan does not validate."""
+    if plan.kind == "overlay":
+        return None
     exprs = gate_base_expressions(plan)
     if exprs is None:
         return None
@@ -989,8 +999,10 @@ def ungated_plan(plan: Plan) -> Plan | None:
 
 def _ungated_benchmark(prep: _Prepared, cfg: LabConfig, net: Metrics) -> dict[str, Any] | None:
     """The report's ``benchmarks.ungated`` block (:data:`UNGATED_NOTE`) for a single-symbol
-    plan with derivatives features, or None for price-only plans. Never touches the ledger."""
-    if prep.scoring is None:
+    plan with derivatives features, or None for price-only plans and for risk overlays (their
+    derivatives features ARE the risk rule; there is no gate to strip). Never touches the
+    ledger."""
+    if prep.scoring is None or prep.plan.kind == "overlay":
         return None
     gates = sorted(r.alias for r in prep.plan.features if r.feature in DERIVATIVES_FEATURES)
     try:

@@ -5,6 +5,12 @@
   ``lab/config/success_criteria.toml``. That file is owner-controlled (read-only to Claude
   while ``.claude/lab.lock`` exists) and is snapshotted into the ledger when a run starts, so
   the bar cannot move mid-run. A missing file is an error: research never runs without a bar.
+* :class:`OverlayResearchConfig` (PLAN.md Phase 15): the second research question,
+  ``"risk_overlay"`` (does one slow overlay on buy-and-hold cut drawdown without a significant
+  Sharpe loss?). Its rows and budget come from ``lab/config/overlay_criteria.toml``, which the
+  owner installs from ``agents/config/overlay_criteria.proposed.toml``; no file, no overlay
+  research. A pass is a risk overlay, never a return claim. The first question (``"edge"``) and
+  its ``success_criteria.toml`` are unchanged.
 * ``IDEAS_SCHEMA``: the idea-library SQLite schema (written by ``agents/``, read by the API).
 * :class:`RunState`: the JSON progress file the orchestrator writes for the Research page.
 """
@@ -22,6 +28,7 @@ from lab.config import LAB_ROOT
 
 REPO_ROOT = LAB_ROOT.parent
 SUCCESS_CRITERIA_PATH = LAB_ROOT / "config" / "success_criteria.toml"
+OVERLAY_CRITERIA_PATH = LAB_ROOT / "config" / "overlay_criteria.toml"
 AGENTS_DIR = REPO_ROOT / "agents"
 JOURNAL_DIR = AGENTS_DIR / "journal"  # committed Markdown, Obsidian-friendly
 AGENTS_DATA_DIR = AGENTS_DIR / "data"  # gitignored runtime data
@@ -38,6 +45,13 @@ RESEARCH_RUN_ID_PATTERN = r"^r-\d{8}-\d{6}-[0-9a-f]{6}$"
 
 class ResearchConfigError(RuntimeError):
     """The success-criteria file is missing or malformed. Research must not start."""
+
+
+# The research questions a run can ask, frozen at ``start_run``. An edge run's frozen config has
+# no "question" key (absence means "edge"), so edge runs started before Phase 15 and after it
+# freeze byte-identical configs.
+Question = Literal["edge", "risk_overlay"]
+QUESTIONS: tuple[str, ...] = ("edge", "risk_overlay")
 
 
 # ``[criteria] dsr_trial_count``: which trial count N the DSR row deflates with. Only "nominal"
@@ -121,9 +135,11 @@ class ResearchConfig:
         return json.dumps(data, sort_keys=True)
 
 
-def _section(raw: dict[str, Any], name: str, cls: type) -> Any:
+def _section(
+    raw: dict[str, Any], name: str, cls: type, *, what: str = "success criteria file"
+) -> Any:
     if name not in raw or not isinstance(raw[name], dict):
-        raise ResearchConfigError(f"success criteria file has no [{name}] table")
+        raise ResearchConfigError(f"{what} has no [{name}] table")
     table = raw[name]
     fields = cls.__dataclass_fields__
     # a field with a default (``dsr_trial_count``) is optional; every other key is required
@@ -186,6 +202,128 @@ def load_research_config(path: Path | str = SUCCESS_CRITERIA_PATH) -> ResearchCo
         budget=_section(raw, "budget", RunBudget),
         sha256=hashlib.sha256(data).hexdigest(),
         portfolio=portfolio,
+    )
+
+
+# --------------------------------------------------------------------------- risk-overlay question
+
+
+@dataclass(frozen=True)
+class OverlayCriteria:
+    """PLAN.md Phase 15 rows for the ``"risk_overlay"`` question, all required. A pass means
+    "a risk overlay worth paper trading", never a return claim."""
+
+    cdar_vs_buy_hold_max: float  # overlay CDaR at most this fraction of buy-and-hold's
+    beat_exposure_matched: bool  # CDaR below exposure-matched buy-and-hold, p <= alpha / N
+    sharpe_non_inferiority: float  # one-sided lower bound of the Sharpe gap >= -this
+    break_even_cost_multiple_min: float  # the CDaR and Sharpe rows still hold at this cost x
+    min_drawdown_episodes: int  # buy-and-hold episodes deeper than episode_depth_min
+    min_avg_exposure: float  # an overlay, not a timing strategy
+    alpha: float  # family significance level, divided by N_overlay (Bonferroni)
+    wf_rows_hold: bool  # the rows also hold on stitched fixed-param walk-forward test folds
+    pbo_max: float  # only if anything is swept (overlays are untuned by rule)
+    require_holdout_pass: bool
+    require_crosscheck_match: bool
+    cdar_confidence: float  # CDaR level a (0.95: the mean of the worst 5% of drawdowns)
+    episode_depth_min: float  # a drawdown episode counts when deeper than this (0.30)
+    bootstrap_mean_block_days: int  # stationary-bootstrap mean block, in days
+    # share of buy-and-hold's deep episodes in which the overlay's own drawdown (from its equity
+    # at the episode peak, over [peak, recovery]) is smaller than the exposure-matched one's;
+    # the row needs strictly more than this share (0.5: 3 episodes need 2, 4 need 3)
+    min_episodes_improved_share: float
+
+
+# (key, low, high, low_inclusive, high_inclusive): range checks beyond "a non-negative number"
+_OVERLAY_RANGES: tuple[tuple[str, float, float, bool, bool], ...] = (
+    ("cdar_vs_buy_hold_max", 0.0, 1.0, False, True),
+    ("sharpe_non_inferiority", 0.0, float("inf"), True, False),
+    ("break_even_cost_multiple_min", 1.0, float("inf"), True, False),
+    ("min_drawdown_episodes", 1.0, float("inf"), True, False),
+    ("min_avg_exposure", 0.0, 1.0, False, True),
+    ("alpha", 0.0, 1.0, False, False),
+    ("pbo_max", 0.0, 1.0, True, True),
+    ("cdar_confidence", 0.0, 1.0, False, False),
+    ("episode_depth_min", 0.0, 1.0, False, False),
+    ("bootstrap_mean_block_days", 1.0, float("inf"), True, False),
+    ("min_episodes_improved_share", 0.0, 1.0, True, False),
+)
+
+
+def _check_overlay_ranges(c: OverlayCriteria) -> OverlayCriteria:
+    for key, low, high, low_in, high_in in _OVERLAY_RANGES:
+        v = float(getattr(c, key))
+        above = v >= low if low_in else v > low
+        below = v <= high if high_in else v < high
+        if not (above and below):
+            lo = f"{low:g} {'<=' if low_in else '<'} "
+            hi = "" if high == float("inf") else f" {'<=' if high_in else '<'} {high:g}"
+            raise ResearchConfigError(
+                f"[overlay] {key} = {getattr(c, key)!r} is out of range (need {lo}{key}{hi})"
+            )
+    return c
+
+
+def overlay_criteria_from_table(table: Any, *, what: str = "overlay criteria") -> OverlayCriteria:
+    """Build :class:`OverlayCriteria` from a mapping (the TOML ``[overlay]`` table or a frozen
+    ledger snapshot). :class:`ResearchConfigError` on a missing, unknown, mistyped or
+    out-of-range key (fail closed)."""
+    criteria = _section({"overlay": table}, "overlay", OverlayCriteria, what=what)
+    return _check_overlay_ranges(criteria)
+
+
+@dataclass(frozen=True)
+class OverlayResearchConfig:
+    """The ``"risk_overlay"`` question's frozen rows + budget (``sha256`` of the file bytes)."""
+
+    criteria: OverlayCriteria
+    budget: RunBudget
+    sha256: str
+    question: str = "risk_overlay"
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "question": self.question,
+                "overlay_criteria": asdict(self.criteria),
+                "budget": asdict(self.budget),
+            },
+            sort_keys=True,
+        )
+
+
+OVERLAY_INSTALL_HINT = (
+    "cp agents/config/overlay_criteria.proposed.toml lab/config/overlay_criteria.toml"
+)
+
+
+def load_overlay_config(path: Path | str = OVERLAY_CRITERIA_PATH) -> OverlayResearchConfig:
+    """Parse the owner's overlay-criteria TOML (``[overlay]`` with every
+    :class:`OverlayCriteria` key, ``[budget]`` with every :class:`RunBudget` key, nothing
+    else). Raises :class:`ResearchConfigError` when the file is missing, is not TOML, has an
+    unknown table, or any key is absent, unknown, mistyped or out of range (fail closed)."""
+    p = Path(path)
+    what = "overlay criteria file"
+    if not p.is_file():
+        raise ResearchConfigError(
+            f"{p} not found, so there is no risk-overlay research. The owner installs it (in "
+            f"their own terminal): {OVERLAY_INSTALL_HINT}"
+        )
+    data = p.read_bytes()
+    try:
+        raw = tomllib.loads(data.decode())
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ResearchConfigError(f"{p} is not valid TOML: {exc}") from exc
+    unknown = sorted(set(raw) - {"overlay", "budget"})
+    if unknown:
+        raise ResearchConfigError(
+            f"{what} has unknown tables or keys {unknown}; only [overlay] and [budget] are read"
+        )
+    if not isinstance(raw.get("overlay"), dict):
+        raise ResearchConfigError(f"{what} has no [overlay] table")
+    return OverlayResearchConfig(
+        criteria=overlay_criteria_from_table(raw["overlay"], what=what),
+        budget=_section(raw, "budget", RunBudget, what=what),
+        sha256=hashlib.sha256(data).hexdigest(),
     )
 
 
