@@ -126,3 +126,10 @@ Not registered:
 Lesson: one indicator rule applied across coins is mostly a bet on each coin's trend. Where the coin trended up with clean swings (BTC, ETH), it beats random entry. Elsewhere (SOL, NEAR, AAVE, ONDO) it is noise that costs push negative. Adding coins chosen today adds hindsight, not evidence.
 
 Backtest results are historical simulations on Binance spot data, not forward-looking. The forward tests check implementation only.
+
+## Addendum: owner decision after the run
+
+- 2026-10-29 22:5x UTC. The owner asked to register SUIUSDT and ONDOUSDT with an owner-supplied claim of `--claimed-sharpe 0`. Both protocols record the claim as "owner-supplied". No new lab trials were run.
+  - [[2026-10-29-suiusdt-paper-hc-macd-rsi-sui-4h-exploratory]]: entries [0, 17], exposure [0, 0.49]. The honest false-fail estimate is 6.0%.
+  - [[2026-10-29-ondousdt-paper-hc-macd-rsi-ondo-4h-exploratory]]: entries [0, 26], exposure [0, 0.82]. The bands are built from 20 design trades and 3 design blocks, so they are wide. The honest false-fail estimate is **19.9%**, so an ONDO fail says little about the implementation.
+  - Both are implementation-only, with the locked split UNCHECKED, from 2026-10-30 to 2026-12-25. Seven coins are now forward-tested: BTC, ETH, SOL, NEAR, AAVE, SUI and ONDO.
