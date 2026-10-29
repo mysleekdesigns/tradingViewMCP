@@ -883,6 +883,93 @@ anchored VWAP render with passing tests.
 
 ---
 
+## Phase 15 — Risk-Overlay Question (owner, lab lock)
+
+Why: four research runs and about 4,200 plans asked one question, "is there an edge?", and every
+answer was "no edge found". The strategy report predicted this. A DSR bar near Sharpe 1.7 is above
+the best credible crypto results, and almost every surviving published result is a *risk* result
+(smaller drawdowns, crash avoidance), not a return result ("Crypto strategy edge research",
+Conclusion). This phase adds a second question, pre-registered in its own criteria file before
+any run: **does one slow overlay on buy-and-hold cut drawdown, without a significant Sharpe loss,
+with a break-even cost of at least twice the base cost?** A pass is reported as a *risk overlay*,
+never as an edge. The edge question, its criteria and its bar are unchanged.
+
+Traps this design must close:
+- **Holding less always cuts drawdown.** 50% BTC has about half of BTC's drawdown and the same
+  Sharpe. So the overlay is compared with buy-and-hold *scaled to the overlay's own average
+  exposure*, as well as with plain buy-and-hold. Beating plain buy-and-hold on drawdown proves
+  nothing by itself.
+- **Max drawdown is one number from one path.** The design window (2019-01 to 2025-10) holds only a
+  handful of large BTC drawdowns. Criteria use conditional drawdown at risk (CDaR, the mean of the
+  worst 5% of drawdowns) and paired stationary-bootstrap tests. When there are too few drawdown
+  episodes, the result is "not testable", not a pass.
+- **The design window has been seen.** Edge runs on 2026-10-25 and 2026-10-26 already looked at
+  trend filters, volatility gating and regime filters there. So overlays come from the literature
+  with their *published* parameters, untuned, and each declares its family links to earlier
+  plans. The locked holdout (from 2025-10-01, unspent) and the forward paper test are the real
+  tests.
+- **Multiple testing.** The significance level is divided by the number of distinct overlay
+  plans across every overlay run (Bonferroni), counted by logic like the DSR's N. A new run never
+  resets it.
+
+**Owner decisions** (confirmed 2026-10-29): the criteria values below as proposed; minimum
+average exposure 0.5; exposure 0 or 1 only (no half exposure, so no engine change); the slate of
+three literature overlays below.
+
+### Checklist
+- [ ] **(owner)** Question and criteria file:
+  - `start_run` takes `question = "edge" | "risk_overlay"` (default `"edge"`) and freezes it with the criteria sha256.
+  - An overlay run reads `lab/config/overlay_criteria.toml`, which the owner installs from `agents/config/overlay_criteria.proposed.toml`. No file means no overlay research.
+  - An overlay run's report has only overlay rows, and its wording never says "edge". An edge run's report is unchanged, which a test checks.
+  - Proposed rows:
+    - `cdar_vs_buy_hold_max = 0.75`: the overlay's CDaR95 is at most 75% of buy-and-hold's.
+    - `beat_exposure_matched = true`: the overlay's CDaR95 is below that of buy-and-hold scaled to the overlay's average exposure, paired-bootstrap p ≤ α / N_overlay.
+    - `sharpe_non_inferiority = 0.2`: the one-sided 95% lower bound of Sharpe(overlay) − Sharpe(buy-and-hold), from a paired stationary bootstrap annualised with 365 days, is at least −0.2.
+    - `break_even_cost_multiple_min = 2.0`: the drawdown and Sharpe rows still hold at twice the costs.
+    - `min_drawdown_episodes = 3`: buy-and-hold has at least 3 separate drawdowns deeper than 30% in the scored window; otherwise "not testable".
+    - `min_avg_exposure = 0.5`: an overlay, not a timing strategy.
+    - `alpha = 0.05`.
+    - `wf_rows_hold = true`: the rows also hold on the stitched walk-forward test folds.
+    - `pbo_max = 0.2` on the overlay objective, if anything is swept.
+    - holdout pass and cross-check match, as for edge plans.
+- [ ] **(owner)** Statistics in `lab/lab/stats/`:
+  - CDaR, drawdown episodes (peak to recovery) and the exposure-matched benchmark;
+  - paired stationary-bootstrap tests for the CDaR difference and the Sharpe difference, reusing `stats/bootstrap.py` with an explicit seed;
+  - the break-even cost multiple.
+  - Each gets known-value tests on hand-built 5–20 bar paths, and a second-implementation check where a library has one.
+- [ ] Overlay plan kind (`{"kind": "overlay", ...}`):
+  - Base is buy-and-hold of one symbol. A risk rule decided on bar t's close sets the exposure for bar t+1's open to 1 or 0.
+  - Unlike edge plans, derivatives features may drive the flat signal, since crash-risk filtering is their stated role.
+  - Registry features only; ≤ 3 features and ≤ 3 tunable parameters.
+  - It ships with the perturbation (no-look-ahead) test.
+  - Exposure is 0 or 1 only (owner decision); half exposure would need an engine change and is out of scope.
+- [ ] **(owner)** `get_report`, `get_budget` and `holdout_check` for overlay runs:
+  - `holdout_check` stays pass/fail only, judged on the frozen overlay rows.
+  - Holdout death is keyed on logic across both questions: a logic whose holdout was spent under either question is never checked again.
+  - N_overlay is counted across every overlay run and shown in the report.
+- [ ] Pre-registration: the overlay journal template states the following before the first backtest:
+  - the question, criteria and budget;
+  - the slate, each overlay with its source and published parameters;
+  - each overlay's family links to earlier ledgered plans.
+  - The `strategy-critic` prompt gains the overlay checks: the exposure-matched comparison, the episode count, and the seen-data declaration.
+- [ ] One pre-registered overlay run through the normal pipeline:
+  - a slate of at most 3 overlays with published parameters, e.g. flat while BTC closes below its 200-day moving average; flat while the 7-day mean premium index is in the top decile of its expanding history (BIS WP 1087); flat in a high realised-volatility regime;
+  - `strategy-critic` review, and at most the budgeted holdout check;
+  - written up in the journal whatever the outcome. The likely outcome is "no overlay benefit" once compared with exposure-matched buy-and-hold.
+- [ ] Quant review of the whole phase, then `/run-gate 15`
+
+Any overlay that passes still needs 4–8 weeks of freqtrade `--dry-run` under the Phase 13 paper
+protocol before it is called a working risk overlay. That takes weeks, so it is not part of
+**Done when**.
+
+**Done when:** an overlay run starts with its own frozen criteria file and question. `get_report`
+shows the overlay rows: CDaR against buy-and-hold and against exposure-matched buy-and-hold,
+Sharpe non-inferiority, break-even cost, episode count and N_overlay. The statistics pass
+hand-built known-value tests. An edge run's report is byte-identical to before. One
+pre-registered overlay run is in the journal.
+
+---
+
 ## Testing Strategy
 
 - **Unit (Vitest):** indicator math, data mappers (Binance kline → Candle).
@@ -933,5 +1020,6 @@ anchored VWAP render with passing tests.
 | 12 | Derivatives data as risk filters (futures archive → funding/premium/OI features, H3 run) | Medium |
 | 13 | Research agents v2 (structured outputs, subagent caps, MCP description audit, reporting checklist, failure tags, pre-registered paper test) | Medium |
 | 14 | Chart upgrades (5.2 hit testing, conflation, screenshots with drawings, plugin packages, drawing-library evaluation, volume profile, anchored VWAP) | Medium |
+| 15 | Risk-overlay question (separate pre-registered criteria: CDaR vs exposure-matched buy-and-hold, Sharpe non-inferiority, break-even cost; overlay run; owner) | Large |
 
 **First usable version = end of Phase 3.**
