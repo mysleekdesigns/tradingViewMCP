@@ -1,7 +1,13 @@
-import type { CandlestickData, LineData, UTCTimestamp } from 'lightweight-charts'
+import type {
+  CandlestickData,
+  CandlestickSeriesPartialOptions,
+  CreatePriceLineOptions,
+  LineData,
+  UTCTimestamp,
+} from 'lightweight-charts'
 import type { Candle, ChartType } from '../types'
 import { heikinAshi, heikinAshiFrom, type HeikinAshiBar } from './heikinAshi'
-import { colors, type ChartPalette } from './theme'
+import { colors, mainSeriesOptionsFor, realPriceLineOptions, type ChartPalette } from './theme'
 import { toCandlestickPoint } from './seriesSync'
 
 /** Which Lightweight Charts series definition draws each chart type. */
@@ -18,6 +24,14 @@ export function seriesKindFor(type: ChartType): MainSeriesKind {
     case 'area':
       return 'area'
   }
+}
+
+/**
+ * True when both types draw with the same series definition (candles, hollow and Heikin-Ashi are
+ * all `CandlestickSeries`), so a switch between them can keep the series and its primitives.
+ */
+export function sameSeriesKind(a: ChartType, b: ChartType): boolean {
+  return seriesKindFor(a) === seriesKindFor(b)
 }
 
 /** A point for the main series: OHLC for candle types, close-only for line/area. */
@@ -105,4 +119,57 @@ export function realPriceLine(
     color: last.close >= last.open ? palette.up : palette.down,
     visible: true,
   }
+}
+
+/** The parts of a candlestick main series an in-place type switch uses (an LWC series fits). */
+export interface CandleSeriesTarget<L> {
+  applyOptions(options: CandlestickSeriesPartialOptions): void
+  setData(points: CandlestickData[]): void
+  createPriceLine(options: CreatePriceLineOptions): L
+  removePriceLine(line: L): void
+}
+
+export interface InPlaceSwitch<L> {
+  /** Heikin-Ashi bars for tail updates (null for the other types or without candles). */
+  ha: HeikinAshiBar[] | null
+  /** The real-close price line the series now has (Heikin-Ashi only), or null. */
+  realLine: L | null
+  /**
+   * The real-close line was created by this switch. A fresh series creates it before the alert
+   * lines, so the caller re-attaches the alert lines to keep the same price-line order.
+   */
+  createdRealLine: boolean
+}
+
+/**
+ * Switch a candlestick-kind main series to another candlestick type (candles, hollow,
+ * Heikin-Ashi) without removing it, so its primitives, markers and price lines stay attached.
+ * Every candlestick type sets the same option keys (`mainSeriesOptionsFor`), so `applyOptions`
+ * leaves exactly the options a fresh `addSeries` for `type` would have; the data is re-set from
+ * `candles` (null = nothing applied yet), and the real-close line is created or removed in the
+ * same order as on a fresh series (before `setData`). The caller syncs the line's price.
+ */
+export function switchCandleTypeInPlace<L>(
+  series: CandleSeriesTarget<L>,
+  type: ChartType,
+  palette: ChartPalette,
+  candles: readonly Candle[] | null,
+  realLine: L | null,
+): InPlaceSwitch<L> {
+  series.applyOptions(mainSeriesOptionsFor(type, palette) as CandlestickSeriesPartialOptions)
+  let line = realLine
+  let createdRealLine = false
+  if (usesRealPriceLine(type)) {
+    if (line === null) {
+      line = series.createPriceLine(realPriceLineOptions)
+      createdRealLine = true
+    }
+  } else if (line !== null) {
+    series.removePriceLine(line)
+    line = null
+  }
+  if (candles === null) return { ha: null, realLine: line, createdRealLine }
+  const { points, ha } = mainSeriesData(type, candles)
+  series.setData(points as CandlestickData[])
+  return { ha, realLine: line, createdRealLine }
 }

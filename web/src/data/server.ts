@@ -17,6 +17,8 @@ import { parseVenueInfo, type VenueInfo } from './venue'
  */
 
 const MAX_LIMIT = 1000
+/** Venue ids the server accepts in the `/api/candles` `venue` param (server `VENUE_PARAM_RE`). */
+const VENUE_ID_RE = /^[a-z0-9-]{1,32}$/
 const DEFAULT_LIMIT = 500
 const DEFAULT_TIMEOUT_MS = 10_000
 /** `WebSocket.OPEN` (test doubles may lack the static). */
@@ -229,6 +231,17 @@ export class ServerProvider implements MarketDataProvider {
   private readonly timeoutMs: number
   /** Memoized symbol list; cleared when the fetch fails so the next call retries. */
   private symbolsPromise: Promise<SymbolInfo[]> | null = null
+  /**
+   * Memoized `/api/health` venue lookup, shared by `getVenue` and the candle URLs; cleared when
+   * it fails so the next caller retries.
+   */
+  private venuePromise: Promise<VenueInfo> | null = null
+  /**
+   * The server's venue id once the lookup succeeded. Sent as `venue` on closed-history pages
+   * (`endTime` set), which makes the server's `immutable` caching safe across a venue switch:
+   * another venue means another URL.
+   */
+  private venueId: string | null = null
 
   constructor(opts?: {
     baseUrl?: string
@@ -274,6 +287,7 @@ export class ServerProvider implements MarketDataProvider {
     params: URLSearchParams | null,
     what: string,
     callerSignal?: AbortSignal,
+    cache?: RequestCache,
   ): Promise<unknown> {
     const query = params ? `?${params.toString()}` : ''
     const url = `${this.baseUrl}${path}${query}`
@@ -285,7 +299,7 @@ export class ServerProvider implements MarketDataProvider {
 
     let res: Response
     try {
-      res = await this.fetchImpl(url, { signal })
+      res = await this.fetchImpl(url, cache === undefined ? { signal } : { signal, cache })
     } catch (err) {
       if (callerSignal?.aborted) {
         throw new MarketDataError('aborted', `Request for ${what} was cancelled`)
@@ -350,10 +364,25 @@ export class ServerProvider implements MarketDataProvider {
     const sym = symbol.trim().toUpperCase()
     const params = new URLSearchParams({ symbol: sym, interval, limit: String(clampLimit(limit)) })
     // Server API takes UNIX seconds, like the provider interface.
+    let venueUnknown = false
     if (endTime !== undefined && Number.isFinite(endTime)) {
       params.set('endTime', String(Math.floor(endTime)))
+      // A closed-history page may be cached as immutable only under a URL naming the venue.
+      if (this.venueId !== null) params.set('venue', this.venueId)
+      else venueUnknown = true
     }
-    const body = await this.requestJson('/api/candles', params, `${sym} candles`, opts?.signal)
+    // Without the venue the server answers no-cache; `no-cache` here also makes the browser
+    // revalidate a copy an older build cached as immutable under this venue-less URL.
+    const pending = this.requestJson(
+      '/api/candles',
+      params,
+      `${sym} candles`,
+      opts?.signal,
+      venueUnknown ? 'no-cache' : undefined,
+    )
+    // Never waits for the venue: this page goes out without it, later pages carry it.
+    if (venueUnknown) this.lookupVenue().catch(() => undefined)
+    const body = await pending
     const candles = parseArray(body, toCandle, `${sym} candles`)
     // The contract promises ascending unique times; enforce it since Lightweight Charts
     // throws on duplicates (later row wins).
@@ -386,15 +415,38 @@ export class ServerProvider implements MarketDataProvider {
     return withAbort(this.symbolsPromise, opts?.signal, 'symbols')
   }
 
-  /** The server's market-data venue, from `GET /api/health` → `venue`. */
-  async getVenue(opts?: { signal?: AbortSignal }): Promise<VenueInfo> {
-    const body = await this.requestJson('/api/health', null, 'server health', opts?.signal)
-    const venue =
-      body !== null && typeof body === 'object' && !Array.isArray(body)
-        ? parseVenueInfo((body as { venue?: unknown }).venue)
-        : null
-    if (venue === null) throw new MarketDataError('parse', 'Server health has no venue')
-    return venue
+  /**
+   * The server's market-data venue, from `GET /api/health` → `venue`. One shared request per
+   * instance (also used for the candle URLs' `venue` param); a failure is not cached, so the
+   * next call retries. Each caller's signal only rejects its own promise.
+   */
+  getVenue(opts?: { signal?: AbortSignal }): Promise<VenueInfo> {
+    if (opts?.signal?.aborted) {
+      return Promise.reject(
+        new MarketDataError('aborted', 'Request for server health was cancelled'),
+      )
+    }
+    return withAbort(this.lookupVenue(), opts?.signal, 'server health')
+  }
+
+  /** The memoized venue lookup; records `venueId` when the server reports a usable id. */
+  private lookupVenue(): Promise<VenueInfo> {
+    if (this.venuePromise === null) {
+      const p = this.requestJson('/api/health', null, 'server health').then((body) => {
+        const venue =
+          body !== null && typeof body === 'object' && !Array.isArray(body)
+            ? parseVenueInfo((body as { venue?: unknown }).venue)
+            : null
+        if (venue === null) throw new MarketDataError('parse', 'Server health has no venue')
+        if (VENUE_ID_RE.test(venue.id)) this.venueId = venue.id
+        return venue
+      })
+      this.venuePromise = p
+      p.catch(() => {
+        if (this.venuePromise === p) this.venuePromise = null
+      })
+    }
+    return this.venuePromise
   }
 
   async getTickers(symbols: readonly string[], opts?: { signal?: AbortSignal }): Promise<Ticker[]> {

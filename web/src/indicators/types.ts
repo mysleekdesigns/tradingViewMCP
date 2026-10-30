@@ -95,6 +95,17 @@ export interface IndicatorDef {
   /** `inputs` always holds every key in `this.inputs` (defaults filled in, clamped). */
   createStepper(inputs: IndicatorInputs, source: PriceSource): IndicatorStepper
   /**
+   * Finite memory, for the runner's history-prepend splice. `candles` = the old history with
+   * `count` older bars put in front. Returns the first index i >= count from which this
+   * indicator's values and stepper state over `candles` are those of a run over
+   * `candles.slice(count)` at bar i - count, bit for bit, or null when there is no such bar. A
+   * finite window returns the first bar-time re-sum (`firstResum` in primitives.ts) after it
+   * holds only old bars; a state that resets at a bar (session VWAP) returns that bar.
+   * Omitted: the indicator remembers its whole history (EMA, RSI, MACD seeds), so a prepend
+   * recomputes everything.
+   */
+  spliceFrom?(candles: readonly Candle[], count: number, inputs: IndicatorInputs): number | null
+  /**
    * Range indicators (fixed-range volume profile): one result over a time range, drawn by a
    * primitive instead of per-bar lines (`lines` is empty, the stepper returns {}). Reads only
    * bars inside the range, so bars after it never change the result. Null when the range is

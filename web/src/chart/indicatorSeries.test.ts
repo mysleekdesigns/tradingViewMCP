@@ -532,6 +532,36 @@ describe('IndicatorSeriesManager', () => {
     expect(chart.all()[0].count('setData')).toBe(1)
   })
 
+  it('history prepend splices each runner and shows exactly a full recompute', () => {
+    const types: IndicatorId[] = ['sma', 'bb', 'ema', 'vwap', 'volma', 'rsi', 'macd', 'stoch']
+    const configs = types.map((t) => cfg(t, `p-${t}`))
+    const base = makeCandles(400, 1_700_000_000 + 1_000 * 3600)
+    const { chart, manager } = setup(configs, base)
+    const older = makeCandles(1_000, base[0].time - 1_000 * 3600)
+    // The forming bar also ticked in the same update, as a page load can race a tick.
+    const lastBar = base[base.length - 1]
+    const next = [...older, ...base.slice(0, -1), { ...lastBar, close: lastBar.close + 2 }]
+    const plan = planSeriesSync(base, next)
+    expect(plan.kind).toBe('prepend')
+    for (const s of chart.all()) s.calls = []
+    manager.applyPlan(plan, next)
+    for (const config of configs) {
+      const d = def(config.type)
+      const expected = computeIndicator(d, next, config.inputs, config.source)
+      for (const line of d.lines) {
+        expect(manager.valuesAt(config.uid, next[700].time)[line.key]).toBe(
+          expected[line.key].find((p) => p.time === next[700].time)?.value,
+        )
+      }
+    }
+    // Every series got exactly one setData (no prepend API in LWC) carrying the full recompute.
+    for (const s of chart.all()) expect(s.count('setData')).toBe(1)
+    const smaSeries = chart.panesList[0].series[0]
+    const shown = shownPoints(smaSeries) as { time: number; value: number }[]
+    const sma = computeIndicator(def('sma'), next, { period: 20 }, 'close').sma
+    expect(shown.map((p) => [p.time, p.value])).toEqual(sma.map((p) => [p.time, p.value]))
+  })
+
   it('removing the only pane indicator removes its pane', () => {
     const ema = cfg('ema', 'e')
     const rsi = cfg('rsi', 'r')

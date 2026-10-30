@@ -160,15 +160,118 @@ export function samePrefixLength(a: readonly Candle[], b: readonly Candle[]): nu
   return i
 }
 
+/* ------------------------------------------------------------------------------------------ */
+/* Sorted merges: binary-search splices of ascending, unique-time arrays                        */
+/* ------------------------------------------------------------------------------------------ */
+
+/** First index of ascending `candles` whose time is >= `time` (`candles.length` if none). */
+export function lowerBoundTime(candles: readonly Candle[], time: number): number {
+  let lo = 0
+  let hi = candles.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (candles[mid].time < time) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+/** First index of ascending `candles` whose time is > `time` (`candles.length` if none). */
+export function upperBoundTime(candles: readonly Candle[], time: number): number {
+  let lo = 0
+  let hi = candles.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (candles[mid].time <= time) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+/** True when every time is strictly greater than the one before it (ascending, unique). */
+function strictlyAscending(candles: readonly Candle[]): boolean {
+  for (let i = 1; i < candles.length; i++)
+    if (!(candles[i].time > candles[i - 1].time)) return false
+  return true
+}
+
+/**
+ * `rows` itself when already ascending and unique (the normal case: exchange pages and the
+ * controller's arrays); otherwise an ascending, unique copy in which the last row with each
+ * time wins. O(n) check, the sort only for out-of-order input.
+ */
+function ascendingUnique(rows: readonly Candle[]): readonly Candle[] {
+  if (strictlyAscending(rows)) return rows
+  const byTime = new Map<number, Candle>()
+  for (const c of rows) byTime.set(c.time, c)
+  return [...byTime.values()].sort((a, b) => a.time - b.time)
+}
+
+/**
+ * Merge ascending, unique `fresh` into ascending, unique `existing` (`fresh` wins on equal
+ * times; with `keepUnchanged`, a fresh row whose fields equal the existing bar keeps the
+ * existing object). The bars before and after `fresh`'s time span are copied as they are; only
+ * the overlapping window (found by binary search) is merged element by element.
+ * O(n) pointer copy + O(m + log n).
+ */
+function spliceMerge(
+  existing: readonly Candle[],
+  fresh: readonly Candle[],
+  keepUnchanged: boolean,
+): Candle[] {
+  if (fresh.length === 0) return existing.slice()
+  const lo = lowerBoundTime(existing, fresh[0].time)
+  const hi = upperBoundTime(existing, fresh[fresh.length - 1].time)
+  const out = existing.slice(0, lo)
+  let i = lo
+  let j = 0
+  while (i < hi || j < fresh.length) {
+    if (j >= fresh.length || (i < hi && existing[i].time < fresh[j].time)) {
+      out.push(existing[i++])
+    } else if (i >= hi || fresh[j].time < existing[i].time) {
+      out.push(fresh[j++])
+    } else {
+      const e = existing[i++]
+      const f = fresh[j++]
+      out.push(keepUnchanged && sameFields(e, f) ? e : f)
+    }
+  }
+  for (let k = hi; k < existing.length; k++) out.push(existing[k])
+  return out
+}
+
 /**
  * Union by time, `fresh` wins on equal times, ascending, unique. Never mutates
- * inputs. Elements of `existing` not overridden keep identity.
+ * inputs. Elements of `existing` not overridden keep identity. Always a new array.
+ * Inputs may be unsorted or hold duplicate times (the later duplicate wins).
  */
 export function mergeCandles(existing: readonly Candle[], fresh: readonly Candle[]): Candle[] {
-  const byTime = new Map<number, Candle>()
-  for (const c of existing) byTime.set(c.time, c)
-  for (const c of fresh) byTime.set(c.time, c)
-  return [...byTime.values()].sort((a, b) => a.time - b.time)
+  return spliceMerge(ascendingUnique(existing), ascendingUnique(fresh), false)
+}
+
+/**
+ * `mergeCandles(existing, fresh)`, except that a fresh row whose values equal the existing bar
+ * at its time keeps the existing object (so a gap fill that only touched the tail lets the chart
+ * use `series.update()` instead of `setData()`). Always a new array. When `existing` is
+ * ascending and unique, records the exact identity prefix the result shares with it (lineage),
+ * so consumers skip their prefix scans.
+ */
+export function mergeCandlesKeepingUnchanged(
+  existing: readonly Candle[],
+  fresh: readonly Candle[],
+): Candle[] {
+  const base = ascendingUnique(existing)
+  const rows = ascendingUnique(fresh)
+  const out = spliceMerge(base, rows, true)
+  if (base === existing && existing.length > 0) {
+    // Exact prefix: the bars before the first fresh time are copied as they are; scan on from
+    // there (the merged window, plus the rest when every fresh row kept its existing bar).
+    const n = Math.min(out.length, existing.length)
+    let same = rows.length === 0 ? n : Math.min(n, lowerBoundTime(existing, rows[0].time))
+    while (same < n && out[same] === existing[same]) same++
+    recordLineage(out, existing, same)
+  }
+  return out
 }
 
 /**
@@ -176,12 +279,83 @@ export function mergeCandles(existing: readonly Candle[], fresh: readonly Candle
  * `existing[0]` are used (ascending, unique, later duplicate wins). Never mutates inputs;
  * every element of `existing` keeps identity. Returns `existing` itself (same reference)
  * when no row is older. With empty `existing`, returns the sorted, unique `older`.
+ * An ascending page (the normal case) is cut by binary search: no map, no sort.
  */
 export function prependOlder(existing: readonly Candle[], older: readonly Candle[]): Candle[] {
   const first = existing.length > 0 ? existing[0].time : Infinity
-  const byTime = new Map<number, Candle>()
-  for (const c of older) if (c.time < first) byTime.set(c.time, c)
-  if (byTime.size === 0) return existing as Candle[]
-  const head = [...byTime.values()].sort((a, b) => a.time - b.time)
-  return [...head, ...existing]
+  const page = ascendingUnique(older)
+  const cut = lowerBoundTime(page, first)
+  if (cut === 0) return existing as Candle[]
+  return page.slice(0, cut).concat(existing)
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Bar times: one barsKey and one time Set per bar set, shared by the chart's overlays          */
+/* ------------------------------------------------------------------------------------------ */
+
+const barsKeys = new WeakMap<readonly Candle[], { length: number; key: string }>()
+
+/**
+ * `count:firstTime:lastTime` ('' when empty). It changes when the bar count or either end
+ * changes (a bar close, a prepend, a new window) and stays the same on a live tick of the
+ * forming bar, so overlays keyed on it stay idle while a bar forms. Cached per array.
+ */
+export function barsKeyOf(bars: readonly Candle[]): string {
+  const cached = barsKeys.get(bars)
+  if (cached !== undefined && cached.length === bars.length) return cached.key
+  const key =
+    bars.length === 0 ? '' : `${bars.length}:${bars[0].time}:${bars[bars.length - 1].time}`
+  barsKeys.set(bars, { length: bars.length, key })
+  return key
+}
+
+/**
+ * The open times of one bar set, built on first use and then shared: the ascending `times`
+ * array (backtest marker snapping) and the `set` (filtering overlay points to plotted bars).
+ * Read-only.
+ */
+export class BarTimes {
+  readonly key: string
+  private readonly bars: readonly Candle[]
+  private timesCache: readonly number[] | null = null
+  private setCache: ReadonlySet<number> | null = null
+
+  constructor(bars: readonly Candle[]) {
+    this.bars = bars
+    this.key = barsKeyOf(bars)
+  }
+
+  /** Open times, ascending (the bars' order). */
+  get times(): readonly number[] {
+    if (this.timesCache === null) this.timesCache = this.bars.map((c) => c.time)
+    return this.timesCache
+  }
+
+  /** The same times as a Set. */
+  get set(): ReadonlySet<number> {
+    if (this.setCache === null) this.setCache = new Set(this.times)
+    return this.setCache
+  }
+}
+
+/**
+ * One `BarTimes` per bar set (per `barsKeyOf`), so the chart, the backtest overlay, the regime
+ * ribbon and the derivatives panes share one times array and one Set instead of each building
+ * its own on every bar close.
+ */
+export class BarTimesMemo {
+  private current: BarTimes | null = null
+
+  /**
+   * The shared times for `bars`: the same object while `barsKeyOf(bars)` is unchanged (a live
+   * tick on the forming bar), a new one when it changes. `refresh` forces a new one for the
+   * same key (a full data replacement, whose interior bars may differ).
+   */
+  get(bars: readonly Candle[], refresh = false): BarTimes {
+    const cur = this.current
+    if (!refresh && cur !== null && cur.key === barsKeyOf(bars)) return cur
+    const next = new BarTimes(bars)
+    this.current = next
+    return next
+  }
 }

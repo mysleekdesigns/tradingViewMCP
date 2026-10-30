@@ -1,6 +1,6 @@
 import type { Candle } from '../types'
 import { priceOf } from './sources'
-import type { IndicatorDef, IndicatorStepper, PriceSource } from './types'
+import type { IndicatorDef, IndicatorInputs, IndicatorStepper, PriceSource } from './types'
 
 /** 2100-01-01 00:00:00 UTC: upper bound for a time input. */
 const MAX_TIME = 4_102_444_800
@@ -16,6 +16,10 @@ interface AvwapState {
    * and move it as older pages load). Decided from the first bar only, so no look-ahead.
    */
   unloaded: boolean
+}
+
+function anchorOf(inputs: IndicatorInputs): number {
+  return Number.isFinite(inputs.anchor) ? inputs.anchor : 0
 }
 
 /** Volume a bar contributes: missing, non-finite or negative volume counts as 0. */
@@ -77,7 +81,19 @@ export const anchoredVwapDef: IndicatorDef = {
   lines: [{ key: 'avwap', label: 'AVWAP', kind: 'line', color: '#00bcd4', lineWidth: 2 }],
   guides: [],
   createStepper(inputs, source) {
-    const anchor = Number.isFinite(inputs.anchor) ? inputs.anchor : 0
-    return avwapStepper(anchor, source, { pv: 0, vol: 0, seen: false, unloaded: false })
+    return avwapStepper(anchorOf(inputs), source, { pv: 0, vol: 0, seen: false, unloaded: false })
+  },
+  // Bars before the anchor add nothing, so the sums are a pure function of the bars from the
+  // anchor on, provided both runs decide `unloaded` the same way from their first bar:
+  // - anchor not set: never a value in either run;
+  // - anchor at or after the old first bar: neither run is unloaded and every prepended bar is
+  //   older than the anchor, so both runs add the same bars from the same zero sums;
+  // - anchor older than the old first bar: the old run was unloaded (no values); the new run is
+  //   too while its first bar still opens after the anchor, else it gains values: recompute.
+  spliceFrom(candles, count, inputs) {
+    const anchor = anchorOf(inputs)
+    if (anchor <= 0) return count
+    if (anchor >= candles[count].time) return count
+    return candles[0].time > anchor ? count : null
   },
 }

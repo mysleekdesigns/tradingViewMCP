@@ -25,6 +25,7 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts'
 import '../components/Backtest.css'
+import { BarTimesMemo, barsKeyOf } from '../data/candleStore'
 import type { RegimePoint } from '../data/labTypes'
 import { isSecondsTimeframe, timeframeLabel, timeframeSeconds } from '../data/timeframes'
 import { getIndicatorDef } from '../indicators/registry'
@@ -32,7 +33,14 @@ import { chartAcceptsEscape, chartOwnsKeyTarget } from '../state/chartTools'
 import { chartKey } from '../state/shortcuts'
 import type { IndicatorConfig } from '../state/indicators'
 import type { Candle, ChartType, Timeframe } from '../types'
-import { mainSeriesData, mainSeriesTail, realPriceLine, usesRealPriceLine } from './chartTypes.ts'
+import {
+  mainSeriesData,
+  mainSeriesTail,
+  realPriceLine,
+  seriesKindFor,
+  switchCandleTypeInPlace,
+  usesRealPriceLine,
+} from './chartTypes.ts'
 import type { HeikinAshiBar } from './heikinAshi.ts'
 import { IndicatorLegendRows, PaneLegends } from './IndicatorLegend'
 import {
@@ -109,7 +117,7 @@ import {
   type AutoOlder,
 } from './seriesSync'
 import { BarLineage, planSamePrefix } from './structureBars'
-import { toVolumeData, volumeColorsOf } from './volume'
+import { recolorVolume, toVolumeData, volumeColorsOf, type VolumeColors } from './volume'
 import { AlertLinesManager } from './drawings/alertLines'
 import { ChartCoordinateAdapter } from './drawings/chartAdapter'
 import { DrawingController, plottedBarTime, type PointerInput } from './drawings/controller'
@@ -216,7 +224,10 @@ interface ChartProps {
   interval: Timeframe
   /** Data source shown in the legend, e.g. "Binance · local server". */
   source: string
-  /** How the main series draws. Switching replaces the main series; volume stays. */
+  /**
+   * How the main series draws. Switching to another series kind (line, area) replaces the main
+   * series; candles, hollow and Heikin-Ashi switch in place on the same series. Volume stays.
+   */
   chartType: ChartType
   /**
    * Fired when the visible range comes within LEFT_EDGE_THRESHOLD_BARS of the oldest loaded bar.
@@ -401,6 +412,8 @@ export function Chart({
   const chartRef = useRef<IChartApi | null>(null)
   const mainSeriesRef = useRef<MainSeries | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
+  /** Up/down colours of the volume data last set in full (null = none set yet). */
+  const volumeShownRef = useRef<Readonly<VolumeColors> | null>(null)
   const watermarkRef = useRef<ITextWatermarkPluginApi<Time> | null>(null)
   const a11yRef = useRef<ChartAccessibility | null>(null)
   /** Heikin-Ashi mode: price line at the real last close (the series' own label is hidden). */
@@ -419,7 +432,10 @@ export function Chart({
   const syncRefreshRef = useRef<(() => void) | null>(null)
   /** HA bars for `appliedRef` (Heikin-Ashi mode only), reused for tail updates. */
   const haRef = useRef<HeikinAshiBar[] | null>(null)
+  /** The chart type the main series currently draws. */
   const chartTypeRef = useRef<ChartType>(chartType)
+  /** The latest `chartType` prop, for the series-creation effect (keyed on the series kind). */
+  const requestedTypeRef = useRef<ChartType>(chartType)
   const onNearLeftEdgeRef = useRef(onNearLeftEdge)
   /** Pages the chart requested by itself since the user last moved the view (nextAutoOlder). */
   const autoOlderRef = useRef<AutoOlder | null>(null)
@@ -460,6 +476,11 @@ export function Chart({
   )
   /** Which bars each applied tick kept, so the overlay layers skip their identity scan. */
   const [lineage] = useState(() => new BarLineage())
+  /**
+   * One times array and one Set per plotted bar set (per `barsKeyOf`), shared by the backtest
+   * overlay, the regime ribbon and the derivatives panes; built on first use.
+   */
+  const [barTimes] = useState(() => new BarTimesMemo())
   /** Market structure (swings, BOS / ChoCh, flip zones) from closed bars, on the main series. */
   const [structureLayer] = useState(
     () =>
@@ -651,6 +672,7 @@ export function Chart({
       chart.remove()
       mainSeriesRef.current = null
       volumeSeriesRef.current = null
+      volumeShownRef.current = null
       watermarkRef.current = null
       realLineRef.current = null
       appliedRef.current = null
@@ -660,21 +682,27 @@ export function Chart({
     }
   }, [indicatorManager, coords, backtestOverlay, derivativesPanes, drawingController])
 
-  // (Re)create the main series for the chart type. On mount the data effect below fills it;
-  // on a type switch the candles already shown are re-applied here. Volume is untouched.
+  // (Re)create the main series when the series kind changes (candlestick / line / area). On
+  // mount the data effect below fills it; on a kind switch the candles already shown are
+  // re-applied here. Volume is untouched. A switch within the candlestick kind (candles, hollow,
+  // Heikin-Ashi) keeps the series and its primitives (the effect after this one).
+  const seriesKind = seriesKindFor(chartType)
+  useEffect(() => {
+    requestedTypeRef.current = chartType
+  }, [chartType])
   useEffect(() => {
     const chart = chartRef.current
     if (!chart) return
-    chartTypeRef.current = chartType
-    const series = addMainSeries(chart, chartType, paletteRef.current)
+    const type = requestedTypeRef.current
+    chartTypeRef.current = type
+    const series = addMainSeries(chart, type, paletteRef.current)
     // Right above volume (order 0), below indicator overlays, as on TradingView.
     series.setSeriesOrder(1)
     mainSeriesRef.current = series
-    if (usesRealPriceLine(chartType))
-      realLineRef.current = series.createPriceLine(realPriceLineOptions)
+    if (usesRealPriceLine(type)) realLineRef.current = series.createPriceLine(realPriceLineOptions)
     const applied = appliedRef.current
     if (applied) {
-      const { points, ha } = mainSeriesData(chartType, applied)
+      const { points, ha } = mainSeriesData(type, applied)
       series.setData(points)
       haRef.current = ha
       syncRealPriceLine(realLineRef.current, applied, paletteRef.current)
@@ -714,7 +742,7 @@ export function Chart({
       haRef.current = null
     }
   }, [
-    chartType,
+    seriesKind,
     coords,
     drawingController,
     alertLinesManager,
@@ -724,6 +752,28 @@ export function Chart({
     profileLayer,
     structureLayer,
   ])
+
+  // Candles ↔ hollow ↔ Heikin-Ashi: the same CandlestickSeries, recoloured with `applyOptions`
+  // and re-filled with `setData`, so the drawings, alert lines, markers and the overlay layers
+  // stay attached. A kind change was handled by the effect above (it set chartTypeRef).
+  useEffect(() => {
+    const series = mainSeriesRef.current
+    if (!series || chartTypeRef.current === chartType) return
+    chartTypeRef.current = chartType
+    const applied = appliedRef.current
+    const result = switchCandleTypeInPlace(
+      series as ISeriesApi<'Candlestick'>,
+      chartType,
+      paletteRef.current,
+      applied,
+      realLineRef.current,
+    )
+    realLineRef.current = result.realLine
+    haRef.current = result.ha
+    // A fresh series gets its real-close line before the alert lines: keep that order.
+    if (result.createdRealLine) alertLinesManager.attach(series)
+    if (applied) syncRealPriceLine(realLineRef.current, applied, paletteRef.current)
+  }, [chartType, alertLinesManager])
 
   // Faint "BTCUSDT, 1h" behind the candles, as on TradingView.
   useEffect(() => {
@@ -806,7 +856,9 @@ export function Chart({
         const range = plan.kind === 'prepend' ? timeScale.getVisibleLogicalRange() : null
         const { points, ha } = mainSeriesData(type, candles)
         mainSeries.setData(points)
-        volumeSeries.setData(toVolumeData(candles, volumePaletteOf(paletteRef.current)))
+        const volumeColors = volumePaletteOf(paletteRef.current)
+        volumeSeries.setData(toVolumeData(candles, volumeColors))
+        volumeShownRef.current = volumeColors
         haRef.current = ha
         indicatorManager.applyPlan(plan, candles)
         if (plan.kind === 'prepend' && range) {
@@ -838,14 +890,18 @@ export function Chart({
     appliedRef.current = candles
     // O(1): the index keeps a reference; drawings re-project on LWC's next redraw.
     coords.index.setBars(candles)
-    // Cheap per tick; re-filters markers/equity only when the bar set changed.
-    backtestOverlay.setBars(candles)
+    // Cheap per tick; re-filters markers/equity only when the bar set changed. The times are
+    // shared with the regime and derivatives effects below (one Set per bar set); a full
+    // replacement ('set') makes the memo build a new one even when its barsKey matches, which
+    // those effects read. The overlay itself keeps its current times then: setBars returns
+    // early on an unchanged barsKey.
+    backtestOverlay.setBars(candles, barTimes.get(candles, plan.kind === 'set'))
     // A follower cleared because it lacked the hovered bar gets no re-fire from LWC when the bar
     // arrives, so re-show the followed time here (a no-op unless this chart follows another).
     // Deferred past this commit's other effects (regime, derivatives setData): the crosshair
     // must stay cleared through every setData while conflation is on (clearCrosshairForSetData).
     if (plan.kind !== 'none') queueMicrotask(() => syncRefreshRef.current?.())
-  }, [candles, indicatorManager, coords, backtestOverlay, lineage])
+  }, [candles, indicatorManager, coords, backtestOverlay, lineage, barTimes])
 
   // Volume profiles follow the configs and the plotted bars (recomputed only when the bars in a
   // profile's range change). Declared after the data effect, so appliedRef is current.
@@ -869,8 +925,9 @@ export function Chart({
     sessionLayer.sync(indicators, appliedRef.current, closedThrough, timeframeSeconds(interval))
   }, [indicators, candles, closedThrough, interval, sessionLayer])
 
-  // Theme / candle colours / time zone. Everything is recoloured in place (applyOptions, one
-  // volume setData), so the chart, its series, drawings, indicators and the view all survive.
+  // Theme / candle colours / time zone. Everything is recoloured in place (applyOptions; one
+  // volume setData, only when the up/down volume colours change), so the chart, its series,
+  // drawings, indicators and the view all survive.
   // Runs after the creation and data effects, so on mount it only re-applies the same values.
   useEffect(() => {
     paletteRef.current = palette
@@ -883,7 +940,14 @@ export function Chart({
     if (series) applyMainSeriesOptions(series, chartTypeRef.current, palette)
     const applied = appliedRef.current
     if (applied) {
-      volumeSeriesRef.current?.setData(toVolumeData(applied, volumePaletteOf(palette)))
+      const volumeSeries = volumeSeriesRef.current
+      if (volumeSeries)
+        volumeShownRef.current = recolorVolume(
+          volumeSeries,
+          applied,
+          volumeShownRef.current,
+          volumePaletteOf(palette),
+        )
       syncRealPriceLine(realLineRef.current, applied, palette)
     }
     drawingsPrimitiveRef.current?.setHandleColors(handleColorsFor(palette))
@@ -1162,16 +1226,12 @@ export function Chart({
   // Ribbon points, filtered to the plotted bars (a point at a time the main series lacks would
   // add a bar to the time scale). Re-applied when the labels or the bar set change; live ticks
   // on the forming bar keep the key, so they cost nothing.
-  const barsKey =
-    candles.length === 0
-      ? ''
-      : `${candles.length}:${candles[0].time}:${candles[candles.length - 1].time}`
+  const barsKey = barsKeyOf(candles)
   useEffect(() => {
     const ribbon = ribbonRef.current
     if (!ribbon || regime === null) return
-    const plotted = new Set((appliedRef.current ?? []).map((c) => c.time))
-    ribbon.setPoints(regime, plotted)
-  }, [regime, hasRegime, barsKey])
+    ribbon.setPoints(regime, barTimes.get(appliedRef.current ?? []).set)
+  }, [regime, hasRegime, barsKey, barTimes])
 
   // Funding / open-interest panes, on plotted bars only. Re-applied when the values or the bar
   // set change (live ticks keep `barsKey`). New panes go after the indicator panes: the equity
@@ -1182,12 +1242,12 @@ export function Chart({
       derivativesPanes.setData(null)
       return
     }
-    const plotted = new Set((appliedRef.current ?? []).map((c) => c.time))
+    const plotted = barTimes.get(appliedRef.current ?? []).set
     const creating = derivativesPanes.wouldCreate()
     if (creating) backtestOverlay.suspendPane()
     derivativesPanes.setData(derivatives, plotted)
     if (creating) backtestOverlay.resumePane()
-  }, [derivatives, barsKey, derivativesPanes, backtestOverlay])
+  }, [derivatives, barsKey, derivativesPanes, backtestOverlay, barTimes])
 
   // One-shot scroll/zoom to a time range (e.g. the backtest window or one trade).
   const focusKey = focusRange?.key ?? null

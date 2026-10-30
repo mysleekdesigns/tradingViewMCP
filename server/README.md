@@ -86,7 +86,7 @@ where `ErrorKind` is one of the web `MarketDataErrorKind` values:
 - `GET /api/health` →
   `200 { "ok": true, "db": true, "upstreamSockets": number, "venue": { "id": "binance" | "binance-us", "name": string } }`
   (the web app labels the chart and the Strategy Tester data note from `venue`)
-- `GET /api/candles?symbol=BTCUSDT&interval=1h&limit=500[&endTime=<sec>]` → `Candle[]`
+- `GET /api/candles?symbol=BTCUSDT&interval=1h&limit=500[&endTime=<sec>][&venue=<id>]` → `Candle[]`
   - Same semantics as `MarketDataProvider.getCandles`: ascending, unique times, at most `limit`
     (1..1000, default 500) bars whose open time is `<= endTime` (default: now). The last row may
     still be forming. Exchange gaps are skipped (older bars are backfilled to fill the page), so
@@ -98,6 +98,39 @@ where `ErrorKind` is one of the web `MarketDataErrorKind` values:
     are recorded in `candle_ranges`, so gaps and pre-listing ranges are never refetched.
   - If only the fresh tail fails upstream (`rate-limited`, `banned`, `network`), the cached closed
     bars are returned without the forming bar instead of an error.
+  - **Forming bar from the live stream (Phase 19).** When every closed bar of the window is
+    already stored and the only fresh bar is the one forming now, and the server holds that
+    symbol/interval's upstream kline socket (a browser is attached, or one left less than ~5 s
+    ago), the forming bar is taken from the socket's last push instead of a REST call, so a
+    warm-cache request makes **zero** upstream calls. Conditions: stream `live`, a kline pushed
+    on the current socket (a push from a dropped socket is never used) at most 5 s ago
+    (`LIVE_KLINE_MAX_AGE_MS`), not final (`x: false`), and its open time equal to the bar forming
+    now by the local clock. Otherwise (no stream, reconnecting, stale or quiet stream, a
+    just-closed bar inside the 5 s settle grace, or closed bars not yet stored) the request
+    falls back to the REST fetch as before. The pushed bar is served, never stored; it is
+    fetched from REST and stored once it has closed and settled.
+  - **Upstream log.** Every upstream klines call logs one `info` line
+    `msg: "upstream klines"` with `symbol`, `interval`, `startTime`, `endTimeMs`, `limit` and
+    `reason` (`missing` closed bars, `fresh` forming/unsettled tail, `missing+fresh` both in one
+    call, `backfill` older bars before a gap or history start). A warm-cache load with a live
+    stream logs none (at `debug` level: `forming bar from live stream`, or
+    `forming bar not from live stream` with the reason it fell back).
+  - **Caching headers.** Every 200 carries a weak `ETag` (`W/"<venue id>:<sha1 of the JSON
+    body>"`), and a request whose `If-None-Match` matches it (weak comparison, or `*`) gets
+    `304` with no body. The venue id is part of the tag, so after a `TV_MARKET_VENUE` switch a
+    revalidation never gets a `304` onto the old venue's bytes, even for an identical body.
+    A page with `endTime` set whose bars all came from the store (closed, settled, confirmed
+    upstream) **and** whose `venue` query param equals the server's venue id (the one
+    `/api/health` reports) gets `Cache-Control: public, max-age=31536000, immutable`: the URL
+    names the venue, so the same URL always has the same answer, and after a venue switch the
+    web app asks for different URLs instead of reusing the old venue's cached pages. Every other
+    page (no `endTime`, an `endTime` that reaches the forming or unsettled bar, or a `venue` that
+    is missing, malformed, or another venue's) gets `Cache-Control: no-cache`, so the browser
+    revalidates every time. `venue` is never an error: a missing or mismatched value only loses
+    `immutable`, so clients that do not send it keep working. Errors carry neither header. The
+    web app (`ServerProvider`) learns the venue id from one shared `/api/health` call and sends
+    `&venue=<id>` on every `endTime` page; until it knows the id it sends the page without it,
+    with `cache: 'no-cache'` so the browser revalidates any copy an older build cached.
 - `GET /api/symbols` → `SymbolInfo[]` (all statuses; non-spot leveraged tokens dropped).
   Cached in SQLite (`kv_cache`), TTL 1 h; a failed refresh serves the stale copy if one exists.
 - `GET /api/tickers?symbols=BTCUSDT,ETHUSDT` → `Ticker[]` (unknown symbols omitted; empty list →
@@ -112,6 +145,16 @@ where `ErrorKind` is one of the web `MarketDataErrorKind` values:
   `DELETE /api/drawings/:id` → `204` (404 if absent).
 - ids: `^[A-Za-z0-9_-]{1,64}$`, otherwise 400. The app uses id `default` for its single
   watchlist and layout.
+
+### Compression
+
+`@fastify/compress` (Phase 19) compresses every HTTP response of 1 KB or more with brotli
+(quality 4) or gzip, chosen from `Accept-Encoding` (brotli preferred); `Vary: Accept-Encoding`
+is set. Clients that send no `Accept-Encoding` (or `identity`) get the body as is. A
+1000-candle page (~108 KB of JSON, BTC-like synthetic prices) measured ~23 KB with either
+encoding; brotli quality 4 took ~0.6 ms per page (quality 11 saves another ~5 KB but takes
+~85 ms, too slow per request). Request bodies are never decompressed. WebSocket upgrades are hijacked before the
+compression hook, so `/ws/*` frames are unchanged (no per-message deflate).
 
 ### WebSocket fan-out
 

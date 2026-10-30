@@ -1,3 +1,5 @@
+import { constants as zlibConstants } from 'node:zlib'
+import compress from '@fastify/compress'
 import websocket from '@fastify/websocket'
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
 import { DEFAULT_ALERT_COOLDOWN_SEC } from './alerts/evaluate.ts'
@@ -53,6 +55,20 @@ export type RouteOptions = Required<Omit<AppDeps, 'db'>> & {
   hub: Hub
 }
 
+/**
+ * Response compression (Phase 19): brotli preferred, then gzip; bodies under 1 KB go out as is.
+ * Brotli quality 4 keeps a 1000-candle page (~105 KB JSON) well under a millisecond to encode
+ * while still beating gzip. Request bodies are never decompressed (no client sends them
+ * compressed). WebSocket upgrades are hijacked before onSend, so frames are unaffected.
+ */
+export const COMPRESS_OPTIONS = {
+  global: true,
+  encodings: ['br', 'gzip'],
+  threshold: 1024,
+  globalDecompression: false,
+  brotliOptions: { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 4 } },
+} as const satisfies Parameters<typeof compress>[1]
+
 export const DEFAULT_REST_BASE = VENUES[DEFAULT_VENUE_ID].restBase
 export const DEFAULT_WS_BASE = VENUES[DEFAULT_VENUE_ID].wsBase
 
@@ -92,7 +108,8 @@ export async function buildApp(
   const stats: AppStats = { upstreamSockets: 0 }
   const WebSocketImpl = deps.WebSocketImpl ?? globalThis.WebSocket
   const wsBase = deps.wsBase ?? DEFAULT_WS_BASE
-  const hub = createHub({ WebSocketImpl, wsBase, stats })
+  const now = deps.now ?? Date.now
+  const hub = createHub({ WebSocketImpl, wsBase, stats, now })
   app.addHook('onClose', async () => {
     hub.close()
   })
@@ -100,7 +117,7 @@ export async function buildApp(
     db: deps.db,
     fetch: deps.fetch ?? globalThis.fetch.bind(globalThis),
     WebSocketImpl,
-    now: deps.now ?? Date.now,
+    now,
     restBase: deps.restBase ?? DEFAULT_REST_BASE,
     wsBase,
     alertNotifier: deps.alertNotifier ?? {},
@@ -112,6 +129,8 @@ export async function buildApp(
   }
 
   await app.register(websocket)
+  // Before any route, so its onSend hook is attached to every route.
+  await app.register(compress, COMPRESS_OPTIONS)
 
   // DNS-rebinding guard: a page on evil.example whose name later resolves to 127.0.0.1 still
   // sends `Host: evil.example`. Runs before routing for every request, REST and WS upgrades.

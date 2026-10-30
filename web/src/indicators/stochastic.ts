@@ -1,8 +1,16 @@
 import type { Candle } from '../types'
-import { RollingWindow, Sma } from './primitives'
+import { RollingWindow, Sma, firstResum } from './primitives'
 import type { IndicatorDef, IndicatorInputs, IndicatorStepper, IndicatorValues } from './types'
 
 const LENGTH = { min: 1, max: 500, step: 1, integer: true } as const
+
+function lengthsOf(inputs: IndicatorInputs) {
+  return {
+    kLength: Math.max(1, Math.round(inputs.kLength ?? 14)),
+    kSmooth: Math.max(1, Math.round(inputs.kSmooth ?? 1)),
+    dSmooth: Math.max(1, Math.round(inputs.dSmooth ?? 3)),
+  }
+}
 
 /**
  * Stochastic oscillator (TradingView `ta.stoch` + SMA smoothing):
@@ -33,9 +41,9 @@ class StochStepper implements IndicatorStepper {
     const hh = this.highs.max()
     const ll = this.lows.min()
     const raw = hh === ll ? 50 : (100 * (candle.close - ll)) / (hh - ll)
-    const k = this.k.next(raw)
+    const k = this.k.next(raw, candle.time)
     if (k === undefined) return {}
-    const d = this.d.next(k)
+    const d = this.d.next(k, candle.time)
     return d === undefined ? { k } : { k, d }
   }
 
@@ -67,14 +75,24 @@ export const stochDef: IndicatorDef = {
   range: { min: 0, max: 100 },
   // No source parameter: Stochastic always reads high, low, and close.
   createStepper(inputs: IndicatorInputs): IndicatorStepper {
-    const kLength = Math.max(1, Math.round(inputs.kLength ?? 14))
-    const kSmooth = Math.max(1, Math.round(inputs.kSmooth ?? 1))
-    const dSmooth = Math.max(1, Math.round(inputs.dSmooth ?? 3))
+    const { kLength, kSmooth, dSmooth } = lengthsOf(inputs)
+    // The high/low windows only need max/min (exact monotonic deques), no running sums.
     return new StochStepper(
-      new RollingWindow(kLength),
-      new RollingWindow(kLength),
+      new RollingWindow(kLength, { track: 'none' }),
+      new RollingWindow(kLength, { track: 'none' }),
       new Sma(kSmooth),
       new Sma(dSmooth),
     )
+  },
+  // raw at bar i reads the kLength-bar high/low windows (buffers and exact deques: the same in
+  // both runs from bar count + kLength - 1). %K: once its window holds only those raws and it
+  // had a push before in the old run, its first bar-time re-sum syncs it (bar iK). %D likewise
+  // once its window holds only %K values from iK on. From there every state is the same.
+  spliceFrom(candles, count, inputs) {
+    const { kLength, kSmooth, dSmooth } = lengthsOf(inputs)
+    const rawFrom = count + kLength - 1
+    const iK = firstResum(candles, Math.max(rawFrom + kSmooth - 1, count + kLength), kSmooth)
+    if (iK === null) return null
+    return firstResum(candles, Math.max(iK + dSmooth - 1, count + kLength + kSmooth - 1), dSmooth)
   },
 }

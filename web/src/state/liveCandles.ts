@@ -1,4 +1,10 @@
-import { applyLiveCandle, mergeCandles, prependOlder } from '../data/candleStore'
+import {
+  applyLiveCandle,
+  lowerBoundTime,
+  mergeCandlesKeepingUnchanged,
+  prependOlder,
+  upperBoundTime,
+} from '../data/candleStore'
 import { plottableCandles } from '../data/plottable'
 import { MarketDataError } from '../data/provider'
 import type { CandleSource } from '../data/timeframeProvider'
@@ -147,67 +153,18 @@ export function describeError(
 }
 
 /**
- * Reuse the previous object for every bar whose values did not change, so a gap fill that
- * only touched the tail lets the chart use `series.update()` instead of `setData()`.
- */
-function keepUnchangedIdentity(prev: readonly Candle[], next: Candle[]): Candle[] {
-  const byTime = new Map<number, Candle>()
-  for (const c of prev) byTime.set(c.time, c)
-  for (let i = 0; i < next.length; i++) {
-    const n = next[i]
-    const p = byTime.get(n.time)
-    if (
-      p !== undefined &&
-      p !== n &&
-      p.open === n.open &&
-      p.high === n.high &&
-      p.low === n.low &&
-      p.close === n.close &&
-      p.volume === n.volume
-    ) {
-      next[i] = p
-    }
-  }
-  return next
-}
-
-/**
  * True when a fresh window starting at `start` joins `existing` without a possible hole:
  * it starts at or before the first bar, or at a bar that is already there.
  */
 function overlapsStart(existing: readonly Candle[], start: number): boolean {
   if (start <= existing[0].time) return true
-  return existing.some((c) => c.time === start)
+  return hasTime(existing, start)
 }
 
 /** True when ascending `candles` has a bar opening at `time` (binary search). */
 function hasTime(candles: readonly Candle[], time: number): boolean {
   const i = lowerBoundTime(candles, time)
   return i < candles.length && candles[i].time === time
-}
-
-/** First index of ascending `candles` whose time is >= `time` (`candles.length` if none). */
-function lowerBoundTime(candles: readonly Candle[], time: number): number {
-  let lo = 0
-  let hi = candles.length
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (candles[mid].time < time) lo = mid + 1
-    else hi = mid
-  }
-  return lo
-}
-
-/** First index of ascending `candles` whose time is > `time` (`candles.length` if none). */
-function upperBoundTime(candles: readonly Candle[], time: number): number {
-  let lo = 0
-  let hi = candles.length
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (candles[mid].time <= time) lo = mid + 1
-    else hi = mid
-  }
-  return lo
 }
 
 /**
@@ -862,9 +819,7 @@ export class LiveCandlesController {
         load.candles.length > 0 &&
         (!overlapsStart(load.candles, fresh[0].time) ||
           (capCovered && this.holeCap !== null && fresh[0].time > this.holeCap))
-      candles = disjoint
-        ? fresh
-        : keepUnchangedIdentity(load.candles, mergeCandles(load.candles, fresh))
+      candles = disjoint ? fresh : mergeCandlesKeepingUnchanged(load.candles, fresh)
       replaced = disjoint
     }
     // A different window: an older page computed for the old one is stale, and the new

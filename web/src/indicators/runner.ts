@@ -16,6 +16,17 @@ export type RunResult =
   /** Only points for replayed bars: the caller calls series.update(point) per point, in order. */
   | { kind: 'update'; output: IndicatorOutput }
 
+export interface PrependResult {
+  /**
+   * 'splice': only the new head (plus the indicator's lookback) was computed and the stored
+   * output for the older history kept; 'reset': a full recompute (infinite memory, or the
+   * runner's state did not line up with the candles).
+   */
+  kind: 'splice' | 'reset'
+  /** Full output over the new candles (the caller uses series.setData per line). */
+  output: IndicatorOutput
+}
+
 /** Index of the first point with `time >= t` (points are ascending by time). */
 function lowerBound(points: readonly IndicatorPoint[], t: number): number {
   let lo = 0
@@ -47,6 +58,8 @@ export class IndicatorRunner {
   private cpTime: number | null = null
   /** Number of candles at the last call. */
   private length = 0
+  /** Time of the first candle at the last call. */
+  private firstTime: number | null = null
 
   constructor(def: IndicatorDef, inputs: IndicatorInputs, source: PriceSource) {
     this.def = def
@@ -107,6 +120,53 @@ export class IndicatorRunner {
     return { kind: 'update', output: tail }
   }
 
+  /**
+   * `count` older bars were put in front of the history: candles[count..] are the bars of the
+   * last call, except that the last of them may have ticked and newer bars may follow (a
+   * seriesSync 'prepend' plan). When the indicator declares a finite memory (`spliceFrom`), or
+   * has no lines, only candles[0..from) are stepped and the stored output from bar `from` on is
+   * kept, then the tail replays from the shifted checkpoint as in `update`: O(count + lookback)
+   * stepping instead of O(n). Otherwise, or when anything does not line up, a full reset.
+   */
+  prepend(candles: readonly Candle[], count: number): PrependResult {
+    const reset = (): PrependResult => ({ kind: 'reset', output: this.reset(candles) })
+    const n = candles.length
+    const prevLen = this.length
+    const c = this.cpIndex
+    if (this.checkpoint === null || !Number.isInteger(count) || count <= 0) return reset()
+    if (c < 0 || count + prevLen > n) return reset()
+    if (candles[count].time !== this.firstTime || !(candles[count - 1].time < this.firstTime))
+      return reset()
+    if (candles[count + c].time !== this.cpTime) return reset()
+
+    const from =
+      this.def.lines.length === 0
+        ? count
+        : (this.def.spliceFrom?.(candles, count, this.inputs) ?? null)
+    // The kept part must reach the checkpoint, so the checkpoint's state is the new run's too.
+    if (from === null || !Number.isInteger(from) || from < count || from > count + c) return reset()
+
+    const head = emptyOutput(this.def)
+    stepInto(
+      this.def,
+      this.def.createStepper(this.inputs, this.source),
+      candles.slice(0, from),
+      head,
+    )
+    const fromTime = candles[from].time
+    for (const line of this.def.lines) {
+      const points = this.out[line.key]
+      const kept = points.slice(lowerBound(points, fromTime))
+      this.out[line.key] = head[line.key].concat(kept)
+    }
+    this.cpIndex = c + count
+    this.length = prevLen + count
+    this.firstTime = candles[0].time
+    // Replays the old last bar (it may have ticked) and any appended bars from the checkpoint.
+    this.update(candles, count + prevLen - 1)
+    return { kind: 'splice', output: this.out }
+  }
+
   /** Current full output (kept patched after updates). */
   get output(): IndicatorOutput {
     return this.out
@@ -136,6 +196,7 @@ export class IndicatorRunner {
   ): void {
     const n = candles.length
     this.length = n
+    this.firstTime = n > 0 ? candles[0].time : null
     if (n === 0) {
       this.checkpoint = null
       this.cpIndex = -1

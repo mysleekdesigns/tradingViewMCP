@@ -11,3 +11,4 @@
 - [Phase 13 agents/ledger](project_agents_phase13.md) — SDK/CLI facts, confirmed designs; round-4: all round-3 warnings fixed; open: prepare misses DataUnavailableError
 - [Phase 9 wave 2](project_web_phase9_wave2.md) — multi-chart/seconds/replay/paper/regime; round-3 gate+slow-retry+repair verified; LWC sync crosshair re-fire; conflation setData crash mechanism; minor open
 - [Phase 19 wave 1](project_web_phase19_wave1.md) — lineage registry, liveStore selectors, Coinbase coalescing, ticker watch confirmed sound; minor open (2x legendRows, listener isolation)
+- [Phase 19 wave 3](project_web_phase19_wave3.md) — shared live cache, splice merges, point sync, in-place type switch, server live bar/ETag confirmed; open: cross-panel paging, immutable vs venue

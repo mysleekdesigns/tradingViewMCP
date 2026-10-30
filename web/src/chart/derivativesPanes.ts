@@ -21,6 +21,7 @@ import {
   type WhitespaceData,
 } from 'lightweight-charts'
 import type { DerivativesPoint } from '../data/labTypes'
+import { syncPoints } from './regimeRibbon'
 import { withHexAlpha, type ChartPalette } from './theme'
 
 /** What the chart draws: one point per closed bar sent to the lab (value null = no data). */
@@ -234,6 +235,8 @@ export interface DerivativesPriceLine {
 /** The parts of an LWC series the panes use. */
 export interface DerivativesSeries<D> {
   setData(data: D[]): void
+  /** Replace the last point (same time) or append a newer one. */
+  update(point: D): void
   getPane(): {
     paneIndex(): number
     getStretchFactor(): number
@@ -269,10 +272,16 @@ export function derivativesChartAdapter(chart: IChartApi): DerivativesChart {
   }
 }
 
+type FundingPoint = HistogramData<UTCTimestamp> | Whitespace
+type OpenInterestPoint = LineData<UTCTimestamp> | Whitespace
+
 interface Built {
   funding: DerivativesHistogram
   zero: DerivativesPriceLine
   openInterest: DerivativesLine
+  /** What each series shows (null before its first setData). */
+  fundingShown: readonly FundingPoint[] | null
+  openInterestShown: readonly OpenInterestPoint[] | null
 }
 
 /**
@@ -326,7 +335,11 @@ export class DerivativesPanes {
     this.emit()
   }
 
-  /** Null removes both panes. `plotted` = the chart's bar times (points elsewhere are dropped). */
+  /**
+   * Null removes both panes. `plotted` = the chart's bar times (points elsewhere are dropped;
+   * the chart passes its shared `BarTimes.set`). A series whose points only changed at the tail
+   * (a bar close) gets `update()`; an unchanged one gets no call.
+   */
   setData(data: DerivativesOverlay | null, plotted?: ReadonlySet<number>): void {
     this.data = data
     this.plotted = plotted
@@ -346,7 +359,12 @@ export class DerivativesPanes {
     this.colors = colors
     const built = this.built
     if (built === null || this.data === null) return
-    built.funding.setData(fundingHistogramData(this.data.funding, colors, this.plotted))
+    // Every funding bar is recoloured: one setData.
+    built.fundingShown = syncPoints(
+      built.funding,
+      null,
+      fundingHistogramData(this.data.funding, colors, this.plotted),
+    )
     built.zero.applyOptions({ color: colors.zero })
     built.openInterest.applyOptions(openInterestColorOptions(colors))
   }
@@ -410,7 +428,7 @@ export class DerivativesPanes {
         { ...openInterestSeriesOptions, ...openInterestColorOptions(this.colors) },
         chart.paneCount(),
       )
-      built = { funding, zero, openInterest }
+      built = { funding, zero, openInterest, fundingShown: null, openInterestShown: null }
       this.built = built
       funding.getPane().setStretchFactor(this.stretch?.funding ?? DERIVATIVES_PANE_STRETCH)
       openInterest
@@ -418,8 +436,16 @@ export class DerivativesPanes {
         .setStretchFactor(this.stretch?.openInterest ?? DERIVATIVES_PANE_STRETCH)
       this.emit()
     }
-    built.funding.setData(fundingHistogramData(data.funding, this.colors, this.plotted))
-    built.openInterest.setData(openInterestLineData(data.openInterest, this.plotted))
+    built.fundingShown = syncPoints(
+      built.funding,
+      built.fundingShown,
+      fundingHistogramData(data.funding, this.colors, this.plotted),
+    )
+    built.openInterestShown = syncPoints(
+      built.openInterest,
+      built.openInterestShown,
+      openInterestLineData(data.openInterest, this.plotted),
+    )
   }
 
   private removeSeries(): void {

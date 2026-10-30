@@ -167,6 +167,143 @@ describe('ServerProvider.getCandles', () => {
   })
 })
 
+describe('ServerProvider venue param on closed-history pages', () => {
+  const HEALTH = {
+    ok: true,
+    db: true,
+    upstreamSockets: 0,
+    venue: { id: 'binance', name: 'Binance' },
+  }
+  const isHealth = (url: string) => url.split('?')[0].endsWith('/api/health')
+  const candleUrls = (f: ReturnType<typeof fakeFetch>) =>
+    f.mock.calls.map((c) => String(c[0])).filter((u) => u.includes('/api/candles'))
+  const healthCalls = (f: ReturnType<typeof fakeFetch>) =>
+    f.mock.calls.filter((c) => isHealth(String(c[0]))).length
+  const query = (url: string) => new URLSearchParams(url.split('?')[1])
+  const flush = async () => {
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+  }
+
+  it('once the venue is known, endTime pages carry it; live pages do not', async () => {
+    const f = fakeFetch(async (url) => (isHealth(url) ? json(HEALTH) : json([CANDLE_A])))
+    const p = new ServerProvider({ fetchImpl: f })
+    await p.getVenue()
+    await expect(p.getCandles('BTCUSDT', '1h', 500, 1_700_000_000)).resolves.toEqual([CANDLE_A])
+    await p.getCandles('BTCUSDT', '1h')
+    const [closed, live] = candleUrls(f)
+    expect(query(closed).get('venue')).toBe('binance')
+    expect(query(closed).get('endTime')).toBe('1700000000')
+    expect(query(live).has('venue')).toBe(false)
+    // Known venue: the request init is unchanged (only the signal).
+    for (const call of f.mock.calls.filter((c) => String(c[0]).includes('/api/candles'))) {
+      expect(Object.keys(call[1] ?? {})).toEqual(['signal'])
+    }
+    expect(healthCalls(f)).toBe(1)
+  })
+
+  it('the first endTime page goes out at once without the venue; later pages carry it', async () => {
+    const f = fakeFetch(async (url) => (isHealth(url) ? json(HEALTH) : json([CANDLE_B])))
+    const p = new ServerProvider({ fetchImpl: f })
+    await expect(p.getCandles('BTCUSDT', '1h', 10, 1_700_003_600)).resolves.toEqual([CANDLE_B])
+    // The candle request is sent first, not held back by the health call.
+    expect(String(f.mock.calls[0][0])).toContain('/api/candles')
+    const first = f.mock.calls[0]
+    expect(query(String(first[0])).has('venue')).toBe(false)
+    expect(first[1]?.cache).toBe('no-cache') // revalidate any venue-less cached copy
+    await flush()
+    await p.getCandles('BTCUSDT', '1h', 10, 1_700_000_000)
+    await p.getCandles('ETHUSDT', '4h', 10, 1_700_000_000)
+    const [, second, third] = candleUrls(f)
+    expect(query(second).get('venue')).toBe('binance')
+    expect(query(third).get('venue')).toBe('binance')
+    expect(healthCalls(f)).toBe(1) // one shared health request
+    await expect(p.getVenue()).resolves.toEqual(HEALTH.venue)
+    expect(healthCalls(f)).toBe(1)
+  })
+
+  it('a live page alone does not trigger the health call', async () => {
+    const f = fakeFetch(async () => json([CANDLE_A]))
+    await new ServerProvider({ fetchImpl: f }).getCandles('BTCUSDT', '1h')
+    expect(healthCalls(f)).toBe(0)
+    expect(f).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['HTTP 500', () => json({ error: 'http', message: 'down' }, 500)],
+    ['no venue (older server)', () => json({ ok: true, db: true, upstreamSockets: 0 })],
+    [
+      'network error',
+      () => {
+        throw new TypeError('Failed to fetch')
+      },
+    ],
+  ])('a failed health call (%s) omits the venue and retries later', async (_name, failure) => {
+    let healthOk = false
+    const f = fakeFetch(async (url) => {
+      if (!isHealth(url)) return json([CANDLE_A])
+      return healthOk ? json(HEALTH) : failure()
+    })
+    const p = new ServerProvider({ fetchImpl: f })
+    await expect(p.getCandles('BTCUSDT', '1h', 10, 1_700_000_000)).resolves.toEqual([CANDLE_A])
+    await flush()
+    await expect(p.getCandles('BTCUSDT', '1h', 10, 1_699_996_400)).resolves.toEqual([CANDLE_A])
+    await flush()
+    const urls = candleUrls(f)
+    expect(urls.map((u) => query(u).has('venue'))).toEqual([false, false])
+    expect(healthCalls(f)).toBe(2) // the failure was not memoised
+    // The server comes back: the next page's lookup succeeds and the page after carries it.
+    healthOk = true
+    await p.getCandles('BTCUSDT', '1h', 10, 1_699_992_800)
+    await flush()
+    await p.getCandles('BTCUSDT', '1h', 10, 1_699_989_200)
+    expect(query(candleUrls(f)[3]).get('venue')).toBe('binance')
+    expect(healthCalls(f)).toBe(3)
+  })
+
+  it('a malformed venue id is never sent', async () => {
+    const f = fakeFetch(async (url) =>
+      isHealth(url)
+        ? json({ ...HEALTH, venue: { id: 'Bin ance/x', name: 'Odd' } })
+        : json([CANDLE_A]),
+    )
+    const p = new ServerProvider({ fetchImpl: f })
+    await expect(p.getVenue()).resolves.toEqual({ id: 'Bin ance/x', name: 'Odd' })
+    await p.getCandles('BTCUSDT', '1h', 10, 1_700_000_000)
+    expect(query(candleUrls(f)[0]).has('venue')).toBe(false)
+    expect(healthCalls(f)).toBe(1)
+  })
+
+  it('concurrent getVenue calls share one request; a caller abort rejects only that caller', async () => {
+    let release: (r: Response) => void = () => {}
+    const f = fakeFetch(
+      (url) =>
+        new Promise<Response>((resolve) => {
+          if (isHealth(url)) release = resolve
+        }),
+    )
+    const p = new ServerProvider({ fetchImpl: f })
+    const ctrl = new AbortController()
+    const a = p.getVenue({ signal: ctrl.signal })
+    const b = p.getVenue()
+    ctrl.abort()
+    await expectKind(a, 'aborted')
+    release(json(HEALTH))
+    await expect(b).resolves.toEqual(HEALTH.venue)
+    expect(healthCalls(f)).toBe(1)
+  })
+
+  it('getVenue with an already-aborted signal makes no request', async () => {
+    const f = fakeFetch(async () => json(HEALTH))
+    const ctrl = new AbortController()
+    ctrl.abort()
+    await expectKind(
+      new ServerProvider({ fetchImpl: f }).getVenue({ signal: ctrl.signal }),
+      'aborted',
+    )
+    expect(f).not.toHaveBeenCalled()
+  })
+})
+
 describe('ServerProvider error mapping', () => {
   it.each<[number, MarketDataErrorKind, number | undefined]>([
     [400, 'bad-symbol', undefined],

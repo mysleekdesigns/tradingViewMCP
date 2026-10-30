@@ -1123,7 +1123,11 @@ Rules for this phase: measure before and after every wave with the protocol in r
 Profiler highlight-updates; allocation sampling; server upstream-call log; `vite build` chunk sizes).
 A wave is not done on "looks faster"; it is done when the trace shows the change. Every indicator or
 layer rewrite keeps its known-value, no-look-ahead and incremental-vs-full tests green. No behaviour
-change is allowed in this phase: same pixels, same numbers, same markers.
+change is allowed in this phase: same pixels, same numbers, same markers. Owner decisions (2026-10-30):
+indicator values may differ in the last floating-point bits where an O(1) running sum replaces a
+window re-sum (a legend last-digit rounding tie can flip on ~1-2% of SMA20 bars); panels on the
+same market share one live controller, so a history load or refresh in one panel also applies to
+the others.
 
 ### Checklist
 
@@ -1143,8 +1147,8 @@ Wave 2 — per-frame path (crosshair, scroll, zoom, drawing drag)
 - [ ] Legend rows memoised on `[indicatorSnapshot.version, hoveredTime, lastBarTime]` and partitioned once; dash arrays hoisted once per draw and strokes batched by colour in the three layers
 
 Wave 3 — history load, bar close, network
-- [ ] Rolling-window indicator primitives (`indicators/primitives.ts`) use a ring buffer with running sum and sum-of-squares (periodic re-sum for drift); 'prepend' computes only the new head and splices; perturbation and known-value tests unchanged; a 1000-bar prepend on a 150k history no longer resets every runner
-- [ ] Prepend/gap merge by binary-search splice of two sorted arrays (no Map + sort); one plotted-times `Set` and one `barsKey` shared by `Chart.tsx`, `backtestOverlay` and `derivativesPanes`; `series.update()` for the newest point when only the tail grew; volume `setData` gated on up/down colour actually changing; same-kind chart-type switches use `applyOptions` + `setData` without removing the series
+- [x] Rolling-window indicator primitives (`indicators/primitives.ts`) use a ring buffer with running sum and sum-of-squares (periodic re-sum for drift); 'prepend' computes only the new head and splices; perturbation and known-value tests unchanged; a 1000-bar prepend on a 150k history no longer resets every runner
+- [x] Prepend/gap merge by binary-search splice of two sorted arrays (no Map + sort); one plotted-times `Set` and one `barsKey` shared by `Chart.tsx`, `backtestOverlay` and `derivativesPanes`; `series.update()` for the newest point when only the tail grew; volume `setData` gated on up/down colour actually changing; same-kind chart-type switches use `applyOptions` + `setData` without removing the series
 - [ ] Server: candles route serves the forming bar from the hub's last kline so a warm-cache `/api/candles` makes zero upstream calls (verified in the server log); `@fastify/compress` (brotli/gzip); `Cache-Control: immutable` + ETag on closed-history pages (`endTime` set)
 - [ ] Ref-counted live-candle controller cache keyed on provider/symbol/interval so two panels on the same market share one socket and one REST load; Coinbase REST pages fetched in parallel within the 125 ms throttle budget
 

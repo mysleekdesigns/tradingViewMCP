@@ -2,7 +2,7 @@
 // listener (browser client), reconnecting with jittered exponential backoff and stale
 // detection. See server/README.md "WebSocket fan-out".
 
-import { isInterval, type Interval, type Ticker } from '../types.ts'
+import { isInterval, type Candle, type Interval, type Ticker } from '../types.ts'
 import { parseKlineMessage, parseMiniTickerMessage, type KlineUpdate } from './streamParse.ts'
 
 export type StreamStatus = 'live' | 'reconnecting'
@@ -39,6 +39,17 @@ export interface HubOptions {
    * state) this long so a quick re-acquire reuses it. Default 5 s; 0 tears down at once.
    */
   releaseGraceMs?: number
+  /** Millisecond clock stamped on each kline push (`LastKline.receivedAtMs`). Default `Date.now`. */
+  now?: () => number
+}
+
+/** The newest kline push of a held kline stream, as received on its current socket. */
+export interface LastKline {
+  candle: Candle
+  /** Binance `k.x`: true once the bar is final. */
+  closed: boolean
+  /** Local receive time (ms, the hub's clock). */
+  receivedAtMs: number
 }
 
 export interface Hub {
@@ -46,6 +57,13 @@ export interface Hub {
   acquire(key: StreamKey, listener: HubListener): () => void
   /** Current status of a held key, or undefined if no upstream is held for it. */
   status(key: StreamKey): StreamStatus | undefined
+  /**
+   * The newest kline received on the key's current upstream socket, or undefined when the key
+   * is not held, not `live`, has no open socket, or has had no kline push since that socket
+   * connected (a kline from an earlier, dropped socket is never returned). Kept during the
+   * release grace period. A copy: callers may keep or change it.
+   */
+  lastKline(key: StreamKey): LastKline | undefined
   /** Number of keys currently held (including keys in their release grace period). */
   readonly size: number
   /** Close every upstream socket and clear all timers. Further acquires are no-ops. */
@@ -107,6 +125,8 @@ interface Entry {
   probeTimer: ReturnType<typeof setTimeout> | undefined
   /** Pending teardown after the last listener released; cleared by a re-acquire. */
   graceTimer: ReturnType<typeof setTimeout> | undefined
+  /** Newest kline push on the current socket (kline keys only); null after (re)connect or drop. */
+  last: LastKline | null
 }
 
 export function createHub(opts: HubOptions): Hub {
@@ -116,6 +136,7 @@ export function createHub(opts: HubOptions): Hub {
   let probeId = 0
   const rand = opts.random ?? Math.random
   const graceMs = Math.max(0, opts.releaseGraceMs ?? DEFAULT_RELEASE_GRACE_MS)
+  const now = opts.now ?? Date.now
   const entries = new Map<StreamKey, Entry>()
   let closed = false
 
@@ -200,6 +221,7 @@ export function createHub(opts: HubOptions): Hub {
   const drop = (entry: Entry, sock: WebSocket): void => {
     if (closed || entries.get(entry.key) !== entry || entry.ws !== sock) return
     entry.ws = null
+    entry.last = null
     discard(sock)
     clearTimers(entry)
     entry.failures += 1
@@ -215,7 +237,10 @@ export function createHub(opts: HubOptions): Hub {
       if (tickers.length > 0) deliver(entry, { type: 'tickers', tickers })
     } else {
       const k = parseKlineMessage(data, { symbol: p.symbol, interval: p.interval })
-      if (k !== null) deliver(entry, { type: 'kline', candle: k.candle, closed: k.closed })
+      if (k !== null) {
+        entry.last = { candle: { ...k.candle }, closed: k.closed, receivedAtMs: now() }
+        deliver(entry, { type: 'kline', candle: k.candle, closed: k.closed })
+      }
     }
   }
 
@@ -232,6 +257,7 @@ export function createHub(opts: HubOptions): Hub {
     }
     entry.ws = sock
     entry.receivedOnSocket = false
+    entry.last = null
     syncStats()
     // The stream is subscribed by URL, so an open socket is live even before the first push
     // (a quiet or halted pair can go minutes without a push).
@@ -267,6 +293,7 @@ export function createHub(opts: HubOptions): Hub {
       entry.ws = null
       discard(sock)
     }
+    entry.last = null
     entry.listeners.clear()
     if (entries.get(entry.key) === entry) entries.delete(entry.key)
   }
@@ -298,6 +325,7 @@ export function createHub(opts: HubOptions): Hub {
           staleTimer: undefined,
           probeTimer: undefined,
           graceTimer: undefined,
+          last: null,
         }
         entries.set(key, entry)
       }
@@ -336,6 +364,16 @@ export function createHub(opts: HubOptions): Hub {
     },
     status(key) {
       return entries.get(key)?.status
+    },
+    lastKline(key) {
+      const e = entries.get(key)
+      if (e === undefined || e.ws === null || e.status !== 'live' || e.last === null)
+        return undefined
+      return {
+        candle: { ...e.last.candle },
+        closed: e.last.closed,
+        receivedAtMs: e.last.receivedAtMs,
+      }
     },
     get size() {
       return entries.size

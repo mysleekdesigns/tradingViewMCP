@@ -395,21 +395,32 @@ export class CoinbaseProvider implements MarketDataProvider {
     this.now = opts?.now ?? (() => Date.now())
   }
 
-  /** Wait for this instance's next request slot (spacing every REST call, any caller). */
+  /**
+   * Wait for this instance's next request slot (spacing every REST call, any caller). A wait
+   * aborted before its slot comes gives the slot back when no later slot was taken (and no 429
+   * pause extended it), so a cancelled page never delays the next request.
+   */
   private async throttle(signal: AbortSignal | undefined, what: string): Promise<void> {
     const now = this.now()
     const at = Math.max(now, this.nextRequestAt)
-    this.nextRequestAt = at + this.minRequestIntervalMs
+    const next = at + this.minRequestIntervalMs
+    this.nextRequestAt = next
     const wait = at - now
     if (wait <= 0) return
-    await withAbort(new Promise<void>((r) => setTimeout(r, wait)), signal, what)
+    try {
+      await withAbort(new Promise<void>((r) => setTimeout(r, wait)), signal, what)
+    } catch (err) {
+      if (this.nextRequestAt === next) this.nextRequestAt = at
+      throw err
+    }
   }
 
   /**
    * Throttled GET `path?params` -> parsed JSON. Errors: caller abort -> aborted,
    * timeout/transport -> network, 429 -> rate-limited (+Retry-After, also pauses the throttle),
    * 418 -> banned, 451 -> region-blocked, 404 on a product path -> bad-symbol, other non-2xx ->
-   * http, unparseable body -> parse.
+   * http, unparseable body -> parse. `onSent` runs when the throttle slot comes, just before
+   * the request is sent.
    */
   private async requestJson(
     path: string,
@@ -417,8 +428,10 @@ export class CoinbaseProvider implements MarketDataProvider {
     what: string,
     callerSignal?: AbortSignal,
     productScoped = false,
+    onSent?: () => void,
   ): Promise<unknown> {
     await this.throttle(callerSignal, what)
+    onSent?.()
     const query = params ? `?${params.toString()}` : ''
     const url = `${this.baseUrl}${path}${query}`
     const timeout = AbortSignal.timeout(this.timeoutMs)
@@ -510,8 +523,8 @@ export class CoinbaseProvider implements MarketDataProvider {
 
   /**
    * The last `limit` bars whose open time is <= `endTime` (UNIX s; default now), like
-   * Binance's endTime. Fetches the aligned component window in pages of <= 300 rows,
-   * sequentially through the throttle.
+   * Binance's endTime. Fetches the aligned component window in pages of <= 300 rows, in
+   * parallel within the throttle (one request start per slot; see fetchPages).
    *
    * Empty windows: Coinbase omits buckets without trades, so on an illiquid pair a window can
    * come back empty while older history exists. Then this keeps stepping further back (one
@@ -564,10 +577,16 @@ export class CoinbaseProvider implements MarketDataProvider {
     const spec = INTERVAL_SPEC[req.interval]
     const g = spec.granularity
     const compEnd = Math.min(lastBucket + spec.bucket - g, Math.floor(req.nowS / g) * g)
-    const rows: Candle[] = []
+    const pages: [number, number][] = []
     for (let start = firstBucket; start <= compEnd; start += MAX_ROWS_PER_REQUEST * g) {
-      const pageEnd = Math.min(start + (MAX_ROWS_PER_REQUEST - 1) * g, compEnd)
-      for (const r of await this.fetchRows(req, g, start, pageEnd)) rows.push(r)
+      pages.push([start, Math.min(start + (MAX_ROWS_PER_REQUEST - 1) * g, compEnd)])
+    }
+    const rows: Candle[] = []
+    if (pages.length === 1) {
+      for (const r of await this.fetchRows(req, g, pages[0][0], pages[0][1])) rows.push(r)
+    } else if (pages.length > 1) {
+      // Page order, as the sequential loop pushed them (dedupe below keeps the later row).
+      for (const page of await this.fetchPages(req, g, pages)) for (const r of page) rows.push(r)
     }
     // Newest first per page: sort ascending, dedupe (Lightweight Charts throws on duplicates),
     // and keep only the requested window.
@@ -576,12 +595,63 @@ export class CoinbaseProvider implements MarketDataProvider {
     return spec.bucket === g ? components : aggregateCandles(components, req.interval, firstBucket)
   }
 
+  /**
+   * Rows of several candle pages whose bounds are known in advance, in page order. Page i+1
+   * asks the throttle for its slot as soon as page i is sent rather than when it returns, so
+   * request starts stay `minRequestIntervalMs` apart (the Coinbase public limit) while the
+   * responses overlap: about (pages - 1) * 125 ms + one round trip instead of pages * (round
+   * trip + 125 ms). Errors match the sequential loop: once a page fails no further page
+   * starts, the pages after it are aborted, and the error of the earliest failing page is
+   * thrown (an earlier page still in flight is awaited first, its error wins). A caller abort
+   * aborts every page. Pages already sent when a 429 arrives are not recalled; the 429 still
+   * pauses the throttle for every later request.
+   */
+  private async fetchPages(
+    req: CandleRequest,
+    g: number,
+    pages: readonly (readonly [number, number])[],
+  ): Promise<Candle[][]> {
+    const aborts = pages.map(() => new AbortController())
+    let failedAt = Infinity
+    const fail = (i: number) => {
+      if (i >= failedAt) return
+      failedAt = i
+      for (let j = i + 1; j < aborts.length; j++) aborts[j].abort()
+    }
+    const inflight: Promise<Candle[]>[] = []
+    for (let i = 0; i < pages.length && failedAt === Infinity; i++) {
+      const own = aborts[i].signal
+      const signal = req.signal ? AbortSignal.any([req.signal, own]) : own
+      let markSent = () => {}
+      const sent = new Promise<void>((resolve) => {
+        markSent = resolve
+      })
+      const page = this.fetchRows(req, g, pages[i][0], pages[i][1], signal, markSent)
+      inflight.push(page)
+      const settled = page.then(
+        () => undefined,
+        () => fail(i),
+      )
+      // Next page once this one is on the wire (or has failed before being sent).
+      await Promise.race([sent, settled])
+    }
+    const results = await Promise.allSettled(inflight)
+    const out: Candle[][] = []
+    for (const r of results) {
+      if (r.status === 'rejected') throw r.reason
+      out.push(r.value)
+    }
+    return out
+  }
+
   /** One candles request: rows of granularity `g` from `start` to `pageEnd` (aligned). */
   private async fetchRows(
     req: CandleRequest,
     g: number,
     start: number,
     pageEnd: number,
+    signal: AbortSignal | undefined = req.signal,
+    onSent?: () => void,
   ): Promise<Candle[]> {
     const params = new URLSearchParams({
       granularity: String(g),
@@ -594,8 +664,9 @@ export class CoinbaseProvider implements MarketDataProvider {
         `/products/${encodeURIComponent(req.pid)}/candles`,
         params,
         `${req.sym} candles`,
-        req.signal,
+        signal,
         true,
+        onSent,
       )
     } catch (err) {
       if (err instanceof MarketDataError && err.kind === 'bad-symbol') {

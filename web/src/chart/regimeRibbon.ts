@@ -165,6 +165,75 @@ export function regimeRequestBars(
   return { times: closed.map((c) => c.time), closes: closed.map((c) => c.close) }
 }
 
+/* ------------------------------------------------------------------------------------------ */
+/* Point series sync: update() for a grown tail, setData() otherwise                             */
+/* ------------------------------------------------------------------------------------------ */
+
+/** A series that takes a whole data array or one tail point (an LWC series satisfies it). */
+export interface PointSeries<P> {
+  setData(data: P[]): void
+  update(point: P): void
+}
+
+/** A histogram / line / whitespace point as the overlays build them. */
+type OverlayPoint = { time: number } & object
+
+/** Most trailing points pushed with `update()`; a longer change is one `setData()`. */
+export const MAX_TAIL_UPDATES = 2
+
+/** How to move a series from the points it shows (`prev`) to `next`. */
+export type PointSyncPlan = { kind: 'none' } | { kind: 'update'; from: number } | { kind: 'set' }
+
+function samePoint(a: OverlayPoint, b: OverlayPoint): boolean {
+  const x = a as { time: number; value?: unknown; color?: unknown }
+  const y = b as { time: number; value?: unknown; color?: unknown }
+  return x.time === y.time && x.value === y.value && x.color === y.color
+}
+
+/**
+ * 'none' when `next` equals what the series shows; 'update' from index `from` when only the
+ * tail changed (at most the last shown point is rewritten at its own time, and at most
+ * MAX_TAIL_UPDATES points are pushed, each newer than the one before); 'set' otherwise,
+ * including the first data of a series (`prev` null or empty) and any shrink. Points compare
+ * by time, value and colour (the fields the overlays build).
+ */
+export function planPointSync(
+  prev: readonly OverlayPoint[] | null,
+  next: readonly OverlayPoint[],
+): PointSyncPlan {
+  if (prev === null || prev.length === 0 || next.length < prev.length) return { kind: 'set' }
+  let from = 0
+  while (from < prev.length && samePoint(prev[from], next[from])) from++
+  if (from === prev.length && next.length === prev.length) return { kind: 'none' }
+  // Only the last shown point may change, and only in place (same time): update() at an older
+  // time than the series' last point cannot insert, and a newer one would append instead.
+  if (from < prev.length - 1) return { kind: 'set' }
+  if (from === prev.length - 1 && next[from].time !== prev[from].time) return { kind: 'set' }
+  if (next.length - from > MAX_TAIL_UPDATES) return { kind: 'set' }
+  for (let i = Math.max(from, 1); i < next.length; i++) {
+    if (!(next[i].time > next[i - 1].time)) return { kind: 'set' }
+  }
+  return { kind: 'update', from }
+}
+
+/**
+ * Move `series` from `prev` (what it shows, null when unknown) to `next` with the cheapest
+ * calls that leave it showing exactly `next`. Returns `next` (what it shows now).
+ */
+export function syncPoints<P extends OverlayPoint>(
+  series: PointSeries<P>,
+  prev: readonly P[] | null,
+  next: P[],
+): readonly P[] {
+  const plan = planPointSync(prev, next)
+  if (plan.kind === 'set') series.setData(next)
+  else if (plan.kind === 'update')
+    for (let i = plan.from; i < next.length; i++) series.update(next[i])
+  return next
+}
+
+type RibbonPoint = HistogramData<UTCTimestamp> | WhitespaceData<UTCTimestamp>
+
 /** The ribbon series on pane 0. `remove` is idempotent; nothing else works after it. */
 export class RegimeRibbon {
   private chart: IChartApi | null
@@ -172,6 +241,8 @@ export class RegimeRibbon {
   private colors: RegimeColors
   private points: readonly RegimePoint[] = []
   private plotted: ReadonlySet<number> | undefined
+  /** What the series shows (null before the first setData). */
+  private shown: readonly RibbonPoint[] | null = null
 
   constructor(chart: IChartApi, colors: RegimeColors) {
     this.chart = chart
@@ -180,7 +251,11 @@ export class RegimeRibbon {
     this.series.priceScale().applyOptions({ scaleMargins: regimeRibbonScaleMargins })
   }
 
-  /** Null clears the strip (e.g. the lab is offline or the overlay is loading). */
+  /**
+   * Null clears the strip (e.g. the lab is offline or the overlay is loading). `plotted` = the
+   * chart's bar times (the chart's shared `BarTimes.set`). When only the newest point changed or
+   * was added (a bar close), the series gets `update()`; unchanged points cost no call.
+   */
   setPoints(points: readonly RegimePoint[] | null, plotted?: ReadonlySet<number>): void {
     this.points = points ?? []
     this.plotted = plotted
@@ -196,7 +271,8 @@ export class RegimeRibbon {
       return
     }
     this.colors = colors
-    this.render()
+    // Every coloured point changes: one setData.
+    this.render(true)
   }
 
   remove(): void {
@@ -204,9 +280,14 @@ export class RegimeRibbon {
     this.chart = null
     this.series = null
     this.points = []
+    this.shown = null
   }
 
-  private render(): void {
-    this.series?.setData(regimeRibbonData(this.points, this.colors, this.plotted))
+  /** `full` = always one setData (a recolour); otherwise the cheapest sync (`syncPoints`). */
+  private render(full = false): void {
+    const series = this.series
+    if (series === null) return
+    const next = regimeRibbonData(this.points, this.colors, this.plotted)
+    this.shown = syncPoints<RibbonPoint>(series, full ? null : this.shown, next)
   }
 }

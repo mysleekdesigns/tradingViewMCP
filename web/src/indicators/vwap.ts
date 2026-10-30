@@ -48,4 +48,13 @@ export const vwapDef: IndicatorDef = {
   createStepper() {
     return vwapStepper({ day: null, pv: 0, vol: 0 })
   },
+  // The state resets at the first old bar that opens a new UTC day (in the old run it either
+  // reset there too, or it was the old run's first bar, which always resets): from that bar on
+  // both runs add the same bars to the same zero sums, bit for bit. None in the old bars: null.
+  spliceFrom(candles, count) {
+    for (let i = Math.max(1, count); i < candles.length; i++) {
+      if (Math.floor(candles[i].time / DAY) !== Math.floor(candles[i - 1].time / DAY)) return i
+    }
+    return null
+  },
 }

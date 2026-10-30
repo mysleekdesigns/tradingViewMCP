@@ -668,7 +668,13 @@ export class IndicatorSeriesManager {
         if (format && entry.def.placement === 'pane') {
           for (const { series } of entry.slots) series.applyOptions({ priceFormat: format })
         }
-        this.setAll(entry, entry.runner.reset(candles))
+        // Older history: finite-memory indicators compute only the new head and splice it onto
+        // the output they already hold (LWC has no prepend, so setData stays).
+        const output =
+          plan.kind === 'prepend'
+            ? entry.runner.prepend(candles, plan.count).output
+            : entry.runner.reset(candles)
+        this.setAll(entry, output)
       }
     } else if (plan.kind === 'update') {
       for (const entry of this.entries.values()) {

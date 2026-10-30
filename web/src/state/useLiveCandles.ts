@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { CandleSource } from '../data/timeframeProvider'
 import type { Timeframe } from '../types'
-import { initialSnapshot, LiveCandlesController, type LiveCandlesSnapshot } from './liveCandles'
+import { initialSnapshot, type LiveCandlesSnapshot } from './liveCandles'
+import { liveCandlesCache, type LiveCandlesLease } from './liveCandlesCache'
 
 interface Params {
   provider: CandleSource
@@ -14,7 +15,7 @@ interface Params {
 
 interface Entry {
   params: Params
-  controller: LiveCandlesController
+  lease: LiveCandlesLease
   snapshot: LiveCandlesSnapshot
 }
 
@@ -40,12 +41,18 @@ function sameParams(a: Params, b: Params): boolean {
 }
 
 /**
- * Live candles for one symbol/interval. A change of provider, symbol, interval, limit, or
- * source stops the old controller (closing its socket and aborting its requests) and starts
- * a new one. StrictMode's double effect run creates and stops one extra controller; a
- * stopped controller never emits, so its snapshots cannot leak into state.
+ * Live candles for one symbol/interval, from the shared controller cache (`liveCandlesCache`):
+ * hook instances with equal provider, symbol, interval, limit, source and maxBars share one
+ * controller, so one socket and one REST load. A change of any of them releases the old lease
+ * (the last release stops that controller, closing its socket and aborting its requests, one
+ * macrotask later) and acquires the new one. StrictMode's mount/unmount/mount re-acquires the
+ * same controller within that grace. A released lease never delivers snapshots and its
+ * reload/loadOlder are no-ops, so a previous pair's data cannot leak into state.
  *
- * The returned object is stable: the same object while the snapshot and the controller are
+ * Shared controller: `reload` and `loadOlder` act on the market, so every panel showing the
+ * same market sees the refresh or the prepended older page.
+ *
+ * The returned object is stable: the same object while the snapshot and the lease are
  * unchanged, so consumers can compare it by identity (ChartPanel reports it up only on change).
  */
 export function useLiveCandles(
@@ -62,11 +69,10 @@ export function useLiveCandles(
 
   useEffect(() => {
     const params = { provider, symbol, interval, limit, source, maxBars }
-    const controller = new LiveCandlesController(params, (snapshot) =>
-      setEntry({ params, controller, snapshot }),
+    const lease = liveCandlesCache.acquire(params, (snapshot, l) =>
+      setEntry({ params, lease: l, snapshot }),
     )
-    controller.start()
-    return () => controller.stop()
+    return () => lease.release()
   }, [provider, symbol, interval, limit, source, maxBars])
 
   // Until the new controller's first snapshot lands, never show the previous pair's data.
@@ -75,11 +81,11 @@ export function useLiveCandles(
     sameParams(entry.params, { provider, symbol, interval, limit, source, maxBars })
       ? entry
       : null
-  const controller = current?.controller ?? null
-  const reload = useCallback(() => controller?.reload(), [controller])
+  const lease = current?.lease ?? null
+  const reload = useCallback(() => lease?.reload(), [lease])
   const loadOlder = useCallback(
-    (beyondLimit?: boolean) => controller?.loadOlder(beyondLimit === true),
-    [controller],
+    (beyondLimit?: boolean) => lease?.loadOlder(beyondLimit === true),
+    [lease],
   )
   const snapshot = current?.snapshot ?? initialSnapshot
   return useMemo(() => ({ ...snapshot, reload, loadOlder }), [snapshot, reload, loadOlder])

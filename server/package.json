@@ -16,6 +16,7 @@
     "format:check": "prettier --check ."
   },
   "dependencies": {
+    "@fastify/compress": "^9.3.0",
     "@fastify/websocket": "^11.3.4",
     "better-sqlite3": "^13.0.3",
     "fastify": "^5.12.7"

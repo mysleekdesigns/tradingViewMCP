@@ -1,12 +1,16 @@
 import type { Candle } from '../types'
-import { RollingWindow } from './primitives'
+import { RollingWindow, firstResum } from './primitives'
 import { priceOf } from './sources'
-import type { IndicatorDef, IndicatorStepper, PriceSource } from './types'
+import type { IndicatorDef, IndicatorInputs, IndicatorStepper, PriceSource } from './types'
+
+function periodOf(inputs: IndicatorInputs): number {
+  return Math.max(1, Math.round(inputs.period))
+}
 
 function bbStepper(win: RollingWindow, mult: number, source: PriceSource): IndicatorStepper {
   return {
     next(c: Candle) {
-      win.push(priceOf(c, source))
+      win.push(priceOf(c, source), c.time)
       if (!win.full) return {}
       const basis = win.mean()
       const dev = mult * win.stdev()
@@ -40,7 +44,12 @@ export const bollingerDef: IndicatorDef = {
   ],
   guides: [],
   createStepper(inputs, source) {
-    const period = Math.max(1, Math.round(inputs.period))
-    return bbStepper(new RollingWindow(period), inputs.mult, source)
+    return bbStepper(new RollingWindow(periodOf(inputs)), inputs.mult, source)
+  },
+  // Bar i reads bars i - period + 1 .. i. Once the window holds only old bars and has had an
+  // old bar before it in both runs, the first bar-time re-sum puts both in the same state.
+  spliceFrom(candles, count, inputs) {
+    const period = periodOf(inputs)
+    return firstResum(candles, Math.max(count + period - 1, count + 1), period)
   },
 }

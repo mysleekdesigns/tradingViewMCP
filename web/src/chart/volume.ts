@@ -28,6 +28,27 @@ export function volumeColorsOf(p: VolumePaletteSource): Readonly<VolumeColors> {
   return colors
 }
 
+/** The parts of the volume series a recolour uses (an LWC histogram series fits). */
+export interface VolumeSeriesTarget {
+  setData(data: HistogramData[]): void
+}
+
+/**
+ * Recolour the volume series for `next` only when its up/down colours differ from the colours
+ * it shows (`shown`, null = unknown): a theme or time-zone change that keeps the candle colours
+ * costs no re-map and no `setData`. Returns the colours the series shows afterwards.
+ */
+export function recolorVolume(
+  series: VolumeSeriesTarget,
+  candles: readonly Candle[],
+  shown: Readonly<VolumeColors> | null,
+  next: Readonly<VolumeColors>,
+): Readonly<VolumeColors> {
+  if (shown !== null && shown.up === next.up && shown.down === next.down) return shown
+  series.setData(toVolumeData(candles, next))
+  return next
+}
+
 /**
  * Map candles to histogram points. A bar is "up" when close >= open (a doji counts as up,
  * matching the candlestick series colouring).

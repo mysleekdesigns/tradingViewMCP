@@ -14,6 +14,7 @@ import {
   type SeriesMarker,
   type UTCTimestamp,
 } from 'lightweight-charts'
+import { BarTimes, barsKeyOf } from '../data/candleStore'
 import type { BacktestReport, EquityPoint, ExitReason, LabTrade } from '../data/labTypes'
 import type { Candle } from '../types'
 
@@ -346,7 +347,7 @@ export function equityLineOptions(line: EquityLine): LineSeriesPartialOptions {
 /**
  * Owns the backtest drawing on one chart. The chart effects drive it:
  * attachChart/detachChart with the chart, attachSeries/detachSeries with the main series
- * (re-created on a chart-type switch), setBars after candles change, setData per report, and
+ * (re-created when a chart-type switch changes the series kind), setBars after candles change, setData per report, and
  * suspendPane/resumePane around indicator pane changes so the equity pane stays the last pane
  * and never shares a pane with an indicator. `alive` false = the chart is already removed.
  */
@@ -355,10 +356,11 @@ export class BacktestOverlay<S> {
   private series: S | null = null
   private markers: MarkersHandle | null = null
   private data: BacktestChartData | null = null
-  private bars: ReadonlySet<number> | null = null
-  /** The same bar times, ascending (for snapping markers to plotted bars). */
-  private barTimes: readonly number[] = []
-  private barsKey = ''
+  /**
+   * The plotted bar times (Set for filtering equity points, ascending array for snapping
+   * markers), null before the first non-empty bar set. Shared with the chart, built on first use.
+   */
+  private times: BarTimes | null = null
   private markerSig = ''
   private readonly lines = new Map<EquityLineId, OverlayLineSeries>()
   private shown: { line: EquityLine; points: EquityPoint[] }[] = []
@@ -436,16 +438,15 @@ export class BacktestOverlay<S> {
     this.applyEquity()
   }
 
-  /** The chart's candles changed. Cheap unless the first/last bar or the bar count changed. */
-  setBars(candles: readonly Candle[]): void {
-    const key =
-      candles.length === 0
-        ? ''
-        : `${candles.length}:${candles[0].time}:${candles[candles.length - 1].time}`
-    if (key === this.barsKey) return
-    this.barsKey = key
-    this.barTimes = candles.map((c) => c.time)
-    this.bars = new Set(this.barTimes)
+  /**
+   * The chart's candles changed. Cheap unless the first/last bar or the bar count changed
+   * (`barsKeyOf`). `times` = the chart's shared `BarTimes` for `candles` (its times array and
+   * Set are built once and shared with the other overlays); built here when omitted.
+   */
+  setBars(candles: readonly Candle[], times?: BarTimes): void {
+    const key = times?.key ?? barsKeyOf(candles)
+    if (key === (this.times?.key ?? '')) return
+    this.times = times ?? new BarTimes(candles)
     const before = this.shown.map((s) => s.points.length).join(',')
     this.recompute()
     this.applyMarkers()
@@ -497,11 +498,12 @@ export class BacktestOverlay<S> {
 
   private recompute(): void {
     const data = this.data
-    const bars = this.bars
-    if (!data || !bars) {
+    const times = this.times
+    if (!data || !times) {
       this.shown = []
       return
     }
+    const bars = times.set
     this.shown = data.equity.map((line) => ({ line, points: filterToBars(line.points, bars) }))
   }
 
@@ -509,7 +511,7 @@ export class BacktestOverlay<S> {
     const series = this.series
     if (series === null) return
     const data = this.data
-    const markers = data && this.bars ? snapMarkersToBars(data.markers, this.barTimes) : []
+    const markers = data && this.times ? snapMarkersToBars(data.markers, this.times.times) : []
     const sig =
       markers.length === 0
         ? '0'

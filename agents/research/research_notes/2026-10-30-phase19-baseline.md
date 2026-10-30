@@ -109,3 +109,24 @@ second); a price touched only mid-window by a non-final trade no longer reaches 
     ~1e-9 px; only a coordinate within ~5e-10 of a half-pixel tie could move one device pixel.
   - hline/hray price-axis label text is still formatted per `updateAllViews` (drag/tick frames,
     not per paint).
+
+## After Wave 3 (terminal)
+
+| Case (150k bars) | Before | After |
+|---|---|---|
+| SMA(500) window | 112 ms | 4.4 ms |
+| Bollinger(500) window | 322 ms | 5.1 ms |
+| 1000-bar prepend, SMA/BB (finite-window indicators) | 9-18 ms (full reset) | 0.3-0.8 ms (splice, bit-identical to a reset) |
+| 1000-bar gap fill (merge + identity keep) | 20.5 ms | 0.6-1.7 ms |
+| 1000-bar `prependOlder` | 1.0-1.6 ms | 0.12-0.15 ms |
+
+- EMA, RSI and MACD still reset on a prepend (their seeds depend on all history); a reset is
+  ~10-20 ms on 150k bars with the O(1) primitives.
+- Running sums: values may differ from the old re-sum in the last bits (owner accepted; a legend
+  last-digit tie can flip on ~1-2% of SMA20 bars). A mean-error guard keeps every SMA / Volume MA /
+  Stochastic / Bollinger mean within ~1e-10 of the mean after spikes and crashes.
+- Server (offline run, real buildApp + fake upstream): cold request logs one
+  `upstream klines` line (`missing+fresh`); the warm request with a live hub logs none and is
+  served br-compressed. Closed pages carry `&venue=<id>` and get `immutable` + a venue-tagged ETag.
+- Coinbase multi-page loads: requests start 125 ms apart and overlap; completion ~2L + (pages-1)
+  x 125 ms instead of ~pages x (L + 125 ms).

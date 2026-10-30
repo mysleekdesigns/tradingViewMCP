@@ -211,6 +211,15 @@ class FakeChart implements DerivativesChart {
       setData: (d: unknown[]) => {
         this.data.set(id, d)
       },
+      // LWC semantics: replace the last point at its time, append a newer one.
+      update: (p: { time: number }) => {
+        const d = [...((this.data.get(id) ?? []) as { time: number }[])]
+        const last = d[d.length - 1]
+        if (last !== undefined && p.time < last.time) throw new Error('update: older time')
+        if (last !== undefined && p.time === last.time) d[d.length - 1] = p
+        else d.push(p)
+        this.data.set(id, d)
+      },
       getPane,
     }
   }

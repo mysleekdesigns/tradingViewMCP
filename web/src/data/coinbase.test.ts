@@ -674,3 +674,386 @@ describe('CoinbaseProvider.getTickers', () => {
     expect(calls).not.toHaveBeenCalled()
   })
 })
+
+describe('CoinbaseProvider parallel candle paging (Phase 19)', () => {
+  type Iv = Parameters<CoinbaseProvider['getCandles']>[1]
+  const IVS: readonly Iv[] = ['1m', '5m', '15m', '1h', '4h', '1d', '1w']
+  /** Copy of the private INTERVAL_SPEC (granularity fetched, bucket length). */
+  const SPEC: Readonly<Record<Iv, { g: number; bucket: number }>> = {
+    '1m': { g: 60, bucket: 60 },
+    '5m': { g: 300, bucket: 300 },
+    '15m': { g: 900, bucket: 900 },
+    '1h': { g: H, bucket: H },
+    '4h': { g: H, bucket: 4 * H },
+    '1d': { g: D, bucket: D },
+    '1w': { g: D, bucket: 7 * D },
+  }
+  const BASE = 'https://api.exchange.coinbase.com'
+  const NOW_MS = NOW * 1000
+
+  /** Deterministic 32-bit hash for synthetic gaps and latencies. */
+  const hash = (n: number) => {
+    let x = (n ^ 0x9e3779b9) >>> 0
+    x = Math.imul(x ^ (x >>> 16), 0x85ebca6b) >>> 0
+    x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35) >>> 0
+    return (x ^ (x >>> 16)) >>> 0
+  }
+
+  type Mode = 'dense' | 'sparse' | 'stale'
+  /**
+   * Candle rows for a request, newest first. 'sparse' omits ~1 in 5 buckets; 'stale' has no
+   * rows newer than 40 days before NOW (forces the step-back path). Every page also returns
+   * a row one slot before its start with page-specific values, so assembling pages in a
+   * different order than the sequential loop would change which duplicate wins.
+   */
+  const serveRows = (u: URL, mode: Mode): unknown[] => {
+    const g = Number(u.searchParams.get('granularity'))
+    const start = Date.parse(u.searchParams.get('start') ?? '') / 1000
+    const end = Date.parse(u.searchParams.get('end') ?? '') / 1000
+    const has = (t: number) =>
+      mode === 'dense' ||
+      (mode === 'sparse' && hash(t) % 5 !== 0) ||
+      (mode === 'stale' && t <= NOW - 40 * D)
+    const rows: unknown[] = []
+    if (has(start - g)) rows.push([start - g, 1, 9, 2, 3, 1000 + (start % 997)])
+    for (let t = start; t <= end; t += g) if (has(t)) rows.unshift(row(t))
+    return rows
+  }
+
+  /** The pre-Phase-19 sequential getCandles (fetchBars + stepBack), copied as the oracle. */
+  function sequentialOracle(
+    serve: (u: URL) => unknown[],
+    interval: Iv,
+    limit: number,
+    endTime: number | undefined,
+    nowS: number,
+  ): { bars: Candle[]; urls: string[] } {
+    const urls: string[] = []
+    const pid = 'BTC-USD'
+    const fetchRows = (g: number, start: number, pageEnd: number): Candle[] => {
+      const params = new URLSearchParams({
+        granularity: String(g),
+        start: iso(start),
+        end: iso(pageEndParam(pageEnd, g, nowS)),
+      })
+      const u = new URL(`${BASE}/products/${encodeURIComponent(pid)}/candles?${params.toString()}`)
+      urls.push(u.toString())
+      return serve(u).map(parseCoinbaseCandle)
+    }
+    const dedupe = (sorted: Candle[]) => {
+      const out: Candle[] = []
+      for (const c of sorted) {
+        if (out.length > 0 && out[out.length - 1].time === c.time) out[out.length - 1] = c
+        else out.push(c)
+      }
+      return out
+    }
+    const fetchBars = (firstBucket: number, lastBucket: number): Candle[] => {
+      const spec = SPEC[interval]
+      const g = spec.g
+      const compEnd = Math.min(lastBucket + spec.bucket - g, Math.floor(nowS / g) * g)
+      const rows: Candle[] = []
+      for (let start = firstBucket; start <= compEnd; start += 300 * g) {
+        const pageEnd = Math.min(start + 299 * g, compEnd)
+        for (const r of fetchRows(g, start, pageEnd)) rows.push(r)
+      }
+      rows.sort((a, b) => a.time - b.time)
+      const components = dedupe(rows).filter((c) => c.time >= firstBucket && c.time <= compEnd)
+      return spec.bucket === g ? components : aggregateCandles(components, interval, firstBucket)
+    }
+    const stepBack = (before: number): Candle[] => {
+      const spec = SPEC[interval]
+      const g = spec.g
+      const perPage = Math.max(1, Math.floor((300 * g) / spec.bucket))
+      let cursor = before
+      let floor = g < D ? Math.floor(cursor / D) * D : -Infinity
+      for (let n = 0; n < 12 && cursor > COINBASE_EARLIEST_S; n++) {
+        if (cursor > floor) {
+          const first = Math.max(floor, cursor - perPage * spec.bucket)
+          const bars = fetchBars(first, cursor - spec.bucket)
+          if (bars.length > 0) return bars
+          cursor = first
+          continue
+        }
+        const probeStart = cursor - 300 * D
+        const probeEnd = cursor - D
+        const days = fetchRows(D, probeStart, probeEnd).filter(
+          (d) => d.time >= probeStart && d.time <= probeEnd,
+        )
+        if (days.length === 0) {
+          cursor = probeStart
+          floor = probeStart
+          continue
+        }
+        const newest = days.reduce((t, d) => Math.max(t, d.time), -Infinity)
+        cursor = newest + D
+        floor = newest
+      }
+      return []
+    }
+    const lim = Math.min(1000, Math.max(1, Math.floor(limit)))
+    const end = endTime === undefined ? nowS : Math.min(Math.floor(endTime), nowS)
+    const lastBucket = bucketStart(end, interval)
+    const firstBucket = lastBucket - (lim - 1) * SPEC[interval].bucket
+    const bars = fetchBars(firstBucket, lastBucket)
+    if (bars.length > 0) return { bars: bars.slice(-lim), urls }
+    return { bars: stepBack(firstBucket).slice(-lim), urls }
+  }
+
+  interface Sent {
+    url: URL
+    at: number
+    signal: AbortSignal | undefined
+  }
+
+  /**
+   * A fetch with per-request latency on fake timers. `respond` builds the Response (default:
+   * serveRows in `mode`); a request aborted before its response rejects like fetch does.
+   */
+  function timedFetch(
+    latency: (u: URL, n: number) => number,
+    mode: Mode = 'dense',
+    respond?: (u: URL, n: number) => Response | null,
+  ) {
+    const sent: Sent[] = []
+    const fn = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(String(input))
+      const signal = init?.signal ?? undefined
+      const n = sent.filter((s) => s.url.pathname.endsWith('/candles')).length + 1
+      sent.push({ url, at: Date.now(), signal })
+      return new Promise<Response>((resolve, reject) => {
+        const id = setTimeout(
+          () => {
+            if (url.pathname === '/products') return resolve(json(PRODUCTS))
+            resolve(respond?.(url, n) ?? json(serveRows(url, mode)))
+          },
+          latency(url, n),
+        )
+        signal?.addEventListener('abort', () => {
+          clearTimeout(id)
+          reject(new DOMException('The operation was aborted.', 'AbortError'))
+        })
+      })
+    }
+    const candleSent = () => sent.filter((s) => s.url.pathname.endsWith('/candles'))
+    return { fn: fn as typeof fetch, sent, candleSent }
+  }
+
+  /** Settle a promise into a value or the error, so a rejection is never unhandled. */
+  const outcome = <V>(p: Promise<V>) =>
+    p.then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    )
+
+  it('assembles exactly the candles (and requests) of the sequential implementation', async () => {
+    vi.useFakeTimers()
+    const limits = [1, 7, 300, 301, 500, 1000]
+    const ends = [undefined, NOW - 37 * D + 1234, NOW - 400 * D + 5]
+    const modes: Mode[] = ['dense', 'sparse', 'stale']
+    let cases = 0
+    let multiPage = 0
+    for (const interval of IVS) {
+      for (const limit of limits) {
+        for (const endTime of ends) {
+          for (const mode of modes) {
+            vi.setSystemTime(NOW_MS)
+            const oracle = sequentialOracle(
+              (u) => serveRows(u, mode),
+              interval,
+              limit,
+              endTime,
+              NOW,
+            )
+            const fetch = timedFetch(
+              (u) => 20 + (hash(u.toString().length * 31 + cases) % 380),
+              mode,
+            )
+            const p = new CoinbaseProvider({ fetchFn: fetch.fn, minRequestIntervalMs: 125 })
+            const done = outcome(p.getCandles('BTCUSD', interval, limit, endTime))
+            await vi.runAllTimersAsync()
+            const res = await done
+            const label = `${interval} limit=${limit} end=${String(endTime)} ${mode}`
+            expect(res.ok, label).toBe(true)
+            if (res.ok) expect(res.value, label).toEqual(oracle.bars)
+            expect(
+              fetch.candleSent().map((s) => s.url.toString()),
+              label,
+            ).toEqual(oracle.urls)
+            // Every request start (catalog included) is >= 125 ms after the previous one.
+            for (let i = 1; i < fetch.sent.length; i++) {
+              expect(fetch.sent[i].at - fetch.sent[i - 1].at, label).toBeGreaterThanOrEqual(125)
+            }
+            cases++
+            if (oracle.urls.length > 1) multiPage++
+          }
+        }
+      }
+    }
+    expect(cases).toBe(IVS.length * limits.length * ends.length * modes.length)
+    expect(multiPage).toBeGreaterThan(50)
+  })
+
+  it.each([
+    ['4h', 7],
+    ['1w', 12],
+    ['1m', 2],
+  ] as const)(
+    '%s x 500 (%i pages): starts every 125 ms and finishes after (pages - 1) * 125 ms + one round trip',
+    async (interval, pages) => {
+      vi.useFakeTimers()
+      vi.setSystemTime(NOW_MS)
+      const L = 300
+      const fetch = timedFetch(() => L)
+      const p = new CoinbaseProvider({ fetchFn: fetch.fn, minRequestIntervalMs: 125 })
+      const t0 = Date.now()
+      let doneAt = -1
+      const done = outcome(p.getCandles('BTCUSD', interval, 500)).then((r) => {
+        doneAt = Date.now()
+        return r
+      })
+      await vi.runAllTimersAsync()
+      const res = await done
+      expect(res.ok).toBe(true)
+      if (res.ok) expect(res.value).toHaveLength(500)
+      const starts = fetch.candleSent().map((s) => s.at - t0)
+      expect(starts).toHaveLength(pages)
+      // The catalog round trip first, then one page start per 125 ms slot.
+      expect(starts).toEqual(Array.from({ length: pages }, (_, i) => L + i * 125))
+      // Sequential took catalog + pages * round trip (the 125 ms slot is shorter than L).
+      expect(doneAt - t0).toBe(L + (pages - 1) * 125 + L)
+      expect(doneAt - t0).toBeLessThan(L + pages * L)
+    },
+  )
+
+  it('the default throttle still spaces parallel pages 125 ms apart', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW_MS)
+    const fetch = timedFetch(() => 0)
+    const p = new CoinbaseProvider({ fetchFn: fetch.fn })
+    const done = outcome(p.getCandles('BTCUSD', '1w', 1000))
+    await vi.runAllTimersAsync()
+    expect((await done).ok).toBe(true)
+    const at = fetch.sent.map((s) => s.at)
+    expect(at.length).toBe(1 + 24)
+    for (let i = 1; i < at.length; i++) expect(at[i] - at[i - 1]).toBeGreaterThanOrEqual(125)
+  })
+
+  it('a caller abort mid-load aborts every page, starts none after, and frees the unused slot', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW_MS)
+    const L = 300
+    const fetch = timedFetch(() => L)
+    const p = new CoinbaseProvider({ fetchFn: fetch.fn, minRequestIntervalMs: 125 })
+    const ctrl = new AbortController()
+    const t0 = Date.now()
+    const done = outcome(p.getCandles('BTCUSD', '4h', 500, undefined, { signal: ctrl.signal }))
+    await vi.advanceTimersByTimeAsync(L + 2 * 125 + 10) // pages 1-3 sent
+    expect(fetch.candleSent()).toHaveLength(3)
+    ctrl.abort()
+    const res = await done
+    expect(res.ok).toBe(false)
+    if (!res.ok) expect(res.error).toMatchObject({ kind: 'aborted' })
+    expect(fetch.candleSent().every((s) => s.signal?.aborted === true)).toBe(true)
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(fetch.candleSent()).toHaveLength(3)
+
+    // The next load starts one slot after the last request actually sent (page 3), as the
+    // sequential loop allowed; the cancelled page 4 slot is given back.
+    const lastStart = fetch.candleSent()[2].at
+    vi.setSystemTime(lastStart + 10)
+    const next = outcome(p.getCandles('BTCUSD', '1h', 2))
+    await vi.runAllTimersAsync()
+    expect((await next).ok).toBe(true)
+    expect(fetch.candleSent()[3].at - lastStart).toBe(125)
+    expect(lastStart - t0).toBe(L + 250)
+  })
+
+  it('a 429 on page 2: rate-limited with Retry-After, later pages aborted, none started after', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW_MS)
+    const L = 300
+    const fetch = timedFetch(
+      () => L,
+      'dense',
+      (_u, n) => (n === 2 ? json({ message: 'slow down' }, 429, { 'Retry-After': '2' }) : null),
+    )
+    const p = new CoinbaseProvider({ fetchFn: fetch.fn, minRequestIntervalMs: 125 })
+    const t0 = Date.now()
+    const done = outcome(p.getCandles('BTCUSD', '4h', 500))
+    await vi.runAllTimersAsync()
+    const res = await done
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.error).toBeInstanceOf(MarketDataError)
+      expect(res.error).toMatchObject({ kind: 'rate-limited', status: 429, retryAfter: 2 })
+    }
+    const rateLimitedAt = t0 + L + 125 + L // page 2 sent at L + 125, answered L later
+    const sent = fetch.candleSent()
+    expect(sent.every((s) => s.at <= rateLimitedAt)).toBe(true)
+    expect(sent.map((s) => s.at - t0)).toEqual([L, L + 125, L + 250, L + 375])
+    // Pages sent after page 2 were cancelled; pages 1 and 2 completed.
+    expect(sent.map((s) => s.signal?.aborted === true)).toEqual([false, false, true, true])
+
+    // The throttle stays paused for Retry-After from the 429.
+    const next = outcome(p.getCandles('BTCUSD', '1h', 2))
+    await vi.runAllTimersAsync()
+    expect((await next).ok).toBe(true)
+    expect(fetch.candleSent()[4].at).toBe(rateLimitedAt + 2_000)
+  })
+
+  it('the earliest failing page’s error wins, as in the sequential loop', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW_MS)
+    // Page 2 answers slowly with a 500; page 3 fails fast with a 400 before page 2 returns.
+    const fetch = timedFetch(
+      (u, n) => (u.pathname === '/products' ? 100 : n === 2 ? 900 : n === 3 ? 10 : 300),
+      'dense',
+      (_u, n) =>
+        n === 2
+          ? json({ message: 'page two' }, 500)
+          : n === 3
+            ? json({ message: 'page three' }, 400)
+            : null,
+    )
+    const p = new CoinbaseProvider({ fetchFn: fetch.fn, minRequestIntervalMs: 125 })
+    const done = outcome(p.getCandles('BTCUSD', '4h', 500))
+    await vi.runAllTimersAsync()
+    const res = await done
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.error).toMatchObject({ kind: 'http', status: 500 })
+      expect(String((res.error as Error).message)).toContain('page two')
+    }
+    // Page 3 failed at its start + 10 ms, before page 4's slot: no fourth page.
+    expect(fetch.candleSent()).toHaveLength(3)
+  })
+
+  it('a later page failing after the earlier ones succeed is the error', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW_MS)
+    const fetch = timedFetch(
+      () => 300,
+      'dense',
+      (_u, n) => (n === 5 ? json({ message: 'boom' }, 503) : null),
+    )
+    const p = new CoinbaseProvider({ fetchFn: fetch.fn, minRequestIntervalMs: 125 })
+    const done = outcome(p.getCandles('BTCUSD', '4h', 500))
+    await vi.runAllTimersAsync()
+    const res = await done
+    expect(res.ok).toBe(false)
+    if (!res.ok) expect(res.error).toMatchObject({ kind: 'http', status: 503 })
+    const sent = fetch.candleSent()
+    // Page 5 answered at its start + 300: pages 6 and 7 had started and were aborted.
+    expect(sent).toHaveLength(7)
+    expect(sent.map((s) => s.signal?.aborted === true)).toEqual([
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+    ])
+  })
+})
