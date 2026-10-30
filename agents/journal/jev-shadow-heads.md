@@ -10,3 +10,4 @@ the committed heads are what make a rewritten (re-chained) log detectable, becau
 - 2026-10-30T08:00:26Z seq 2 rows 3 head cd88cf9a837b1753ef1ea8828558bdaf3545bcecc998bff07357d9f96eefafd8
 - 2026-10-30T12:00:27Z seq 3 rows 4 head 02700e535dd83d74c798b1ecf768870e2cbc7ca367136ade44283af311472b7d
 - 2026-10-30T16:00:27Z seq 4 rows 5 head e7bf1938d730458ceac4e17273a2300448898bcbf175e76c6a08d66dbfe15e61
+- 2026-10-30T20:00:27Z seq 5 rows 6 head da0bbc987e9399488cc1946e56f6a69697e3935d1120edfd31ace2cddd22d7ad
