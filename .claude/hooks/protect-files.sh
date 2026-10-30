@@ -40,6 +40,8 @@ case "$rel" in
     if [ -f "$root/$rel" ]; then
       block "'$rel' is a frozen test fixture. Add a new fixture instead of overwriting; ask the owner if it must change."
     fi ;;
+  agents/data/paper/jev-shadow/*|agents/journal/*-multi-jev-shadow.md|agents/journal/jev-shadow-heads.md)
+    block "'$rel' is the Jev shadow judge's frozen record (PLAN.md Phase 17). Only paper_trade.py shadow writes it." ;;
   .claude/lab.lock)
     block "the lab lock is controlled by the owner only." ;;
   .claude/settings.json|.claude/hooks/*)

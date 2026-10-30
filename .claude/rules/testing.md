@@ -16,4 +16,4 @@ paths:
 - DSR/PBO tests reproduce published worked examples.
 - Fixtures under `*/tests/fixtures/` are frozen once created. Add new ones; never overwrite.
 - Never add `skip`, `xfail`, `.only`, `.skip`, or widen a tolerance to make a failure disappear. Find the cause.
-- Slow tests (permutation nulls with N ≥ 1000, live-API integration) are marked and excluded from the default run.
+- Slow tests (permutation nulls run through the backtest pipeline, anything over ~1 s, live-API integration) are marked and excluded from the default run.
