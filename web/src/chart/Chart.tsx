@@ -102,6 +102,7 @@ import {
   toVolumePoint,
   type AutoOlder,
 } from './seriesSync'
+import { BarLineage, planSamePrefix } from './structureBars'
 import { toVolumeData } from './volume'
 import { AlertLinesManager } from './drawings/alertLines'
 import { ChartCoordinateAdapter } from './drawings/chartAdapter'
@@ -448,15 +449,23 @@ export function Chart({
   const [backtestOverlay] = useState(
     () => new BacktestOverlay<MainSeries>(() => markersMux.channel('backtest')),
   )
+  /** Which bars each applied tick kept, so the overlay layers skip their identity scan. */
+  const [lineage] = useState(() => new BarLineage())
   /** Market structure (swings, BOS / ChoCh, flip zones) from closed bars, on the main series. */
   const [structureLayer] = useState(
     () =>
-      new MarketStructureLayer(marketStructureColorsFor(palette), markersMux.channel('structure')),
+      new MarketStructureLayer(
+        marketStructureColorsFor(palette),
+        markersMux.channel('structure'),
+        lineage,
+      ),
   )
   /** Fixed-range volume profiles (range indicators), drawn on the main series. */
   const [profileLayer] = useState(() => new VolumeProfileLayer(volumeProfileColorsFor(palette)))
   /** UTC session high/low boxes (session indicators) from closed bars, on the main series. */
-  const [sessionLayer] = useState(() => new SessionRangesLayer(sessionRangesColorsFor(palette)))
+  const [sessionLayer] = useState(
+    () => new SessionRangesLayer(sessionRangesColorsFor(palette), lineage),
+  )
   const backtestVersion = useSyncExternalStore(
     backtestOverlay.subscribe,
     backtestOverlay.getSnapshot,
@@ -814,6 +823,7 @@ export function Chart({
     } finally {
       pushingRef.current = null
     }
+    lineage.record(appliedRef.current, candles, planSamePrefix(plan, candles))
     appliedRef.current = candles
     // O(1): the index keeps a reference; drawings re-project on LWC's next redraw.
     coords.index.setBars(candles)
@@ -824,7 +834,7 @@ export function Chart({
     // Deferred past this commit's other effects (regime, derivatives setData): the crosshair
     // must stay cleared through every setData while conflation is on (clearCrosshairForSetData).
     if (plan.kind !== 'none') queueMicrotask(() => syncRefreshRef.current?.())
-  }, [candles, indicatorManager, coords, backtestOverlay])
+  }, [candles, indicatorManager, coords, backtestOverlay, lineage])
 
   // Volume profiles follow the configs and the plotted bars (recomputed only when the bars in a
   // profile's range change). Declared after the data effect, so appliedRef is current.
@@ -834,9 +844,9 @@ export function Chart({
 
   // Market structure follows the configs and the plotted (real, never Heikin-Ashi) bars. Only
   // bars at or before `closedThrough` (final values confirmed) are pushed, so a tick on the
-  // forming bar pushes nothing and changes nothing; it costs one O(n) pointer scan per distinct
-  // previous bars array (the pushed prefix is checked by identity). Declared after the data
-  // effect (appliedRef current).
+  // forming bar pushes nothing and changes nothing. The pushed prefix is checked by identity:
+  // free on a live tick (the data effect records what the tick kept in `lineage`), an O(n)
+  // pointer scan otherwise. Declared after the data effect (appliedRef current).
   useEffect(() => {
     structureLayer.sync(indicators, appliedRef.current, closedThrough)
   }, [indicators, candles, closedThrough, structureLayer])

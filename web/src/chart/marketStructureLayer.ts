@@ -46,7 +46,7 @@ import type { IndicatorConfig } from '../state/indicators'
 import type { Candle } from '../types'
 import type { MarkersHandle } from './backtestOverlay'
 import type { ChartMarker } from './seriesMarkers'
-import { closedBarCount } from './structureBars'
+import { BarLineage, closedBarCount } from './structureBars'
 import type { ChartPalette } from './theme'
 
 type RenderTarget = Parameters<IPrimitivePaneRenderer['draw']>[0]
@@ -717,15 +717,6 @@ interface Entry {
   pushed: number
 }
 
-/** Length of the common prefix of `a` and `b` by element identity. */
-function samePrefixLength(a: readonly Candle[], b: readonly Candle[]): number {
-  if (a === b) return a.length
-  const n = Math.min(a.length, b.length)
-  let i = 0
-  while (i < n && a[i] === b[i]) i++
-  return i
-}
-
 const NO_MARKERS: readonly ChartMarker[] = Object.freeze([])
 
 /**
@@ -749,12 +740,17 @@ export class MarketStructureLayer {
   /** Configs of the last sync (setColors re-publishes with them). */
   private lastConfigs: readonly IndicatorConfig[] = []
 
+  /** The chart's record of which bars a tick kept (skips the identity scan on live ticks). */
+  private readonly lineage: BarLineage
+
   constructor(
     colors: MarketStructureColors = DEFAULT_MARKET_STRUCTURE_COLORS,
     markers: MarkersHandle | null = null,
+    lineage: BarLineage = new BarLineage(),
   ) {
     this.colors = colors
     this.markersOut = markers
+    this.lineage = lineage
   }
 
   /** Attach every primitive to `series` (moving them off a previous one). */
@@ -795,7 +791,8 @@ export class MarketStructureLayer {
   ): void {
     const bars = candles ?? []
     const closedLen = closedBarCount(bars, closedThrough)
-    // Identity scan per distinct previous array (O(n) pointer compares, once per sync).
+    // Identity check per distinct previous array: free for the chart's own last step (the
+    // lineage), else an O(n) pointer scan, once per sync.
     const prefixOf = new Map<readonly Candle[], number>()
     const prefixMatches = (entry: Entry): boolean => {
       const n = entry.engine?.count ?? 0
@@ -804,7 +801,7 @@ export class MarketStructureLayer {
       const prev = entry.synced
       let same = prefixOf.get(prev)
       if (same === undefined) {
-        same = samePrefixLength(prev, bars)
+        same = this.lineage.samePrefixLength(prev, bars)
         prefixOf.set(prev, same)
       }
       return same >= n

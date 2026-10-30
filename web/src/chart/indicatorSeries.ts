@@ -28,7 +28,7 @@ import type { IndicatorConfig } from '../state/indicators'
 import type { Candle } from '../types'
 import { formatPrice, formatVolume, selectLegendIndex } from './legend'
 import type { SeriesSyncPlan } from './seriesSync'
-import { sessionsHiddenByAlignment } from './sessionRangesLayer'
+import { SESSION_MAX_INTERVAL_SECONDS, sessionsHiddenByAlignment } from './sessionRangesLayer'
 import {
   colors,
   guideLineOptions,
@@ -237,10 +237,14 @@ const SESSION_NOTE_NAMES: Readonly<Record<SessionKey, string>> = {
   opening: 'opening range',
 }
 
+/** Legend note for session ranges on 1D and above, where nothing is drawn. */
+export const SESSION_DAILY_NOTE = 'Not shown on 1D and above'
+
 /**
- * Legend note when session ranges hides toggled-on sessions whose hours do not line up with the
- * bar length (e.g. London, New York and the 1h opening range on 4h). Undefined when nothing is
- * hidden for that reason, or the interval is unknown.
+ * Legend note when session ranges draws less than it could: nothing on 1D and above
+ * (`SESSION_DAILY_NOTE`), or toggled-on sessions hidden because their hours do not line up with
+ * the bar length (e.g. London, New York and the 1h opening range on 4h). Undefined when nothing
+ * is hidden, or the interval is unknown.
  */
 export function sessionAlignmentNote(
   def: IndicatorDef,
@@ -248,6 +252,7 @@ export function sessionAlignmentNote(
   intervalSeconds: number | undefined,
 ): string | undefined {
   if (def.sessions === undefined || intervalSeconds === undefined) return undefined
+  if (intervalSeconds >= SESSION_MAX_INTERVAL_SECONDS) return SESSION_DAILY_NOTE
   const hidden = sessionsHiddenByAlignment(config.inputs, intervalSeconds)
   if (hidden.length === 0) return undefined
   const names = hidden.map((k) => SESSION_NOTE_NAMES[k])

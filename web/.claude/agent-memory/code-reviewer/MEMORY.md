@@ -4,4 +4,4 @@
 - [Phase 12 derivatives review](phase12-derivatives-review.md) — funding/OI panes: pane-order conventions, open replay-refetch + no-retry items
 - [Phase 14 chart upgrades review](phase14-chart-upgrades-review.md) — round 2: W1-W3 fixed; notes = per-bar VP rebuild, per-load unreachable, future-anchor note; a11y/hover conventions
 - [Phase 16 market structure review](phase16-market-structure-review.md) — round 3: give-up stall closed; open: repairPending blocks recovery, provisional lost in aggregation
-- [Phase 18 session ranges review](phase18-session-ranges-review.md) — rounds 1-2 sound (alignment display rule ok); layer = structure template, interval-switch/culling/order proofs, O(n) scan x2 note
+- [Phase 18 session ranges review](phase18-session-ranges-review.md) — rounds 1-3 sound; layer = structure template, BarLineage plan-prefix proof, interval/culling/order proofs

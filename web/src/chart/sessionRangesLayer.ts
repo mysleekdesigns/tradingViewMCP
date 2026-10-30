@@ -48,7 +48,7 @@ import type {
 } from '../indicators/types'
 import type { IndicatorConfig } from '../state/indicators'
 import type { Candle } from '../types'
-import { closedBarCount } from './structureBars'
+import { BarLineage, closedBarCount } from './structureBars'
 import { fontFamily, type ChartPalette } from './theme'
 
 type RenderTarget = Parameters<IPrimitivePaneRenderer['draw']>[0]
@@ -499,15 +499,6 @@ interface Entry {
   pushed: number
 }
 
-/** Length of the common prefix of `a` and `b` by element identity. */
-function samePrefixLength(a: readonly Candle[], b: readonly Candle[]): number {
-  if (a === b) return a.length
-  const n = Math.min(a.length, b.length)
-  let i = 0
-  while (i < n && a[i] === b[i]) i++
-  return i
-}
-
 const NO_BOXES: readonly SessionBox[] = Object.freeze([])
 
 /**
@@ -521,8 +512,15 @@ export class SessionRangesLayer {
   private readonly entries = new Map<string, Entry>()
   private colors: SessionRangesColors
 
-  constructor(colors: SessionRangesColors = DEFAULT_SESSION_RANGES_COLORS) {
+  /** The chart's record of which bars a tick kept (skips the identity scan on live ticks). */
+  private readonly lineage: BarLineage
+
+  constructor(
+    colors: SessionRangesColors = DEFAULT_SESSION_RANGES_COLORS,
+    lineage: BarLineage = new BarLineage(),
+  ) {
     this.colors = colors
+    this.lineage = lineage
   }
 
   /** Attach every primitive to `series` (moving them off a previous one). */
@@ -574,7 +572,7 @@ export class SessionRangesLayer {
       const prev = entry.synced
       let same = prefixOf.get(prev)
       if (same === undefined) {
-        same = samePrefixLength(prev, bars)
+        same = this.lineage.samePrefixLength(prev, bars)
         prefixOf.set(prev, same)
       }
       return same >= n

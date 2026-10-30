@@ -44,3 +44,11 @@ requestUpdate redraws; legend reads `timeframeSeconds(interval)` at render (inte
 so no stale note); hidden/1d+ path nulls engine/synced/boxes/view and setView(null); reshow
 recomputes from a fresh engine. No cycle: indicatorSeries -> sessionRangesLayer -> registry /
 sessionRanges / structureBars / theme, none import indicatorSeries. Do not re-flag these.
+
+Round 3 (2026-10-30, follow-up): sound. `BarLineage` + `planSamePrefix` closes the "two identity
+scans per tick" note above. Proof to reuse: tailMatch(offset 0) returns prev.length when the last
+bar is identical, else lastIdx, and every earlier index is checked identical, so 'update'.from is
+exactly the identity prefix; 'none' implies equal lengths. A recorded (prev, next, same) is a fact
+about two immutable arrays, so it can never go stale (store arrays are never mutated after publish;
+keepUnchangedIdentity edits only its fresh `next`). Early returns skip both record and appliedRef.
+planSeriesSync's own tailMatch is still one O(n) identity loop per tick (accepted).

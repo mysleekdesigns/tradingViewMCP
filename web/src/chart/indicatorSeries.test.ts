@@ -24,6 +24,7 @@ import {
   ownsPane,
   SESSION_RANGES_HINT,
   paneGuideValues,
+  SESSION_DAILY_NOTE,
   sessionAlignmentNote,
   paneIndicatorUids,
 } from './indicatorSeries'
@@ -1020,8 +1021,14 @@ describe('session indicators (session ranges)', () => {
     expect(sessionAlignmentNote(def('sessions'), or4, 4 * H)).toBe(
       "London and New York hidden: hours don't line up with the bar length",
     )
-    // 1d and above (covered by the hint), unknown interval, other indicators: no note.
-    expect(sessionAlignmentNote(def('sessions'), on, 86_400)).toBeUndefined()
+    // 1d and above: nothing is drawn, and the note says so.
+    for (const l of [86_400, 3 * 86_400, 7 * 86_400]) {
+      expect(sessionAlignmentNote(def('sessions'), on, l)).toBe(SESSION_DAILY_NOTE)
+      expect(buildLegendRow(def('sessions'), on, 0, {}, {}, undefined, l).note).toBe(
+        SESSION_DAILY_NOTE,
+      )
+    }
+    // Unknown interval, other indicators: no note.
     expect(sessionAlignmentNote(def('sessions'), on, undefined)).toBeUndefined()
     expect(sessionAlignmentNote(def('ema'), cfg('ema', 'e'), 4 * H)).toBeUndefined()
     expect(buildLegendRow(def('sessions'), on, 0, {})).not.toHaveProperty('note')

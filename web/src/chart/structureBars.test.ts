@@ -10,7 +10,9 @@ import {
 } from '../state/liveCandles'
 import type { Candle, ConnectionStatus } from '../types'
 import { MarketStructureLayer } from './marketStructureLayer'
-import { closedBarCount, structureClosedThrough } from './structureBars'
+import { planSeriesSync } from './seriesSync'
+import { SessionRangesLayer } from './sessionRangesLayer'
+import { BarLineage, closedBarCount, planSamePrefix, structureClosedThrough } from './structureBars'
 
 const H = 3600
 
@@ -290,5 +292,130 @@ describe('live closedThrough drives the structure layer (forming and partial bar
     // Pushed one bar at a time, never recomputed: nothing was repainted.
     expect(layer.statsOf('ms')).toEqual({ recomputes: 1, pushed: 7, count: 7 })
     controller.stop()
+  })
+})
+
+/** Common prefix by identity, the scan the lineage replaces. */
+function scanPrefix(a: readonly Candle[], b: readonly Candle[]): number {
+  const n = Math.min(a.length, b.length)
+  let i = 0
+  while (i < n && a[i] === b[i]) i++
+  return i
+}
+
+/** Deterministic LCG in [0, 1) (seeded, so the run is repeatable). */
+function rng(seed: number): () => number {
+  let x = seed >>> 0
+  return () => {
+    x = (Math.imul(x, 1664525) + 1013904223) >>> 0
+    return x / 2 ** 32
+  }
+}
+
+describe('BarLineage (skips the overlay identity scan on a live tick)', () => {
+  it('the prefix a sync plan implies equals the identity scan whenever it gives one', () => {
+    const r = rng(18)
+    let prev: Candle[] = Array.from({ length: 40 }, (_, i) => c(i * H, 1, 2, 0, 1))
+    let checked = 0
+    for (let step = 0; step < 2000; step++) {
+      const next = prev.slice()
+      const roll = r()
+      const lastT = next[next.length - 1].time
+      if (roll < 0.4) {
+        // Tick: the forming bar revised (new object, same time).
+        next[next.length - 1] = c(lastT, 1, 2 + r(), 0, 1)
+      } else if (roll < 0.6) {
+        // New bar(s), sometimes with the previous last bar revised too.
+        if (r() < 0.5) next[next.length - 1] = c(lastT, 1, 3, 0, 1)
+        const k = 1 + Math.floor(r() * 8)
+        for (let j = 1; j <= k; j++) next.push(c(lastT + j * H, 1, 2, 0, 1))
+      } else if (roll < 0.7) {
+        // A bar revised in place deep in the history.
+        const i = Math.floor(r() * (next.length - 1))
+        next[i] = { ...next[i] }
+      } else if (roll < 0.8) {
+        // Older history prepended.
+        const first = next[0].time
+        next.unshift(c(first - H, 1, 2, 0, 1))
+      } else if (roll < 0.9) {
+        // Same bars, new array.
+      } else {
+        // Replay step back: bars removed from the end.
+        next.length = Math.max(2, next.length - 1 - Math.floor(r() * 3))
+      }
+      const same = planSamePrefix(planSeriesSync(prev, next), next)
+      if (same !== null) {
+        expect(same).toBe(scanPrefix(prev, next))
+        checked++
+      }
+      prev = next
+    }
+    expect(checked).toBeGreaterThan(1000)
+  })
+
+  it('answers the recorded step without scanning and scans any other pair', () => {
+    const a = ROWS.slice()
+    const b = [...ROWS.slice(0, 3), c(3 * H, 1, 5, 0, 1)]
+    const lineage = new BarLineage()
+    expect(lineage.samePrefixLength(a, b)).toBe(3)
+    expect(lineage.samePrefixLength(a, a)).toBe(4)
+    // The recorded value is used for exactly this pair (a deliberately false 1 proves no scan).
+    lineage.record(a, b, 1)
+    expect(lineage.samePrefixLength(a, b)).toBe(1)
+    expect(lineage.samePrefixLength(b, a)).toBe(3)
+    expect(lineage.samePrefixLength(ROWS, b)).toBe(3)
+    // An unknown step (null) is forgotten: the pair is scanned again.
+    lineage.record(a, b, null)
+    expect(lineage.samePrefixLength(a, b)).toBe(3)
+  })
+
+  it('a set or prepend plan says nothing; none and update give their kept prefix', () => {
+    expect(planSamePrefix({ kind: 'set' }, ROWS)).toBeNull()
+    expect(planSamePrefix({ kind: 'prepend', count: 2 }, ROWS)).toBeNull()
+    expect(planSamePrefix({ kind: 'none' }, ROWS)).toBe(4)
+    expect(planSamePrefix({ kind: 'update', from: 3 }, ROWS)).toBe(3)
+  })
+
+  it('both overlay layers fed through a shared lineage match layers that scan', () => {
+    const cfgs: IndicatorConfig[] = [
+      { uid: 'ms', type: 'mstructure', inputs: { left: 2, right: 2, maxZones: 10 }, visible: true },
+      { uid: 'sr', type: 'sessions', inputs: {}, visible: true },
+    ] as IndicatorConfig[]
+    const r = rng(7)
+    const lineage = new BarLineage()
+    const fast = [
+      new MarketStructureLayer(undefined, null, lineage),
+      new SessionRangesLayer(undefined, lineage),
+    ]
+    const slow = [new MarketStructureLayer(), new SessionRangesLayer()]
+    let applied: Candle[] | null = null
+    let bars: Candle[] = []
+    let price = 100
+    for (let i = 0; i < 300; i++) {
+      // Each new bar arrives as a few forming ticks, then closes.
+      for (let tick = 0; tick < 3; tick++) {
+        price += r() - 0.5
+        const next = bars.slice()
+        const bar = c(i * H, price, price + r(), price - r(), price)
+        if (tick === 0) next.push(bar)
+        else next[next.length - 1] = bar
+        lineage.record(applied, next, planSamePrefix(planSeriesSync(applied, next), next))
+        applied = next
+        bars = next
+        const closedThrough = i === 0 ? null : (i - 1) * H
+        const [fm, fs] = fast as [MarketStructureLayer, SessionRangesLayer]
+        const [sm, ss] = slow as [MarketStructureLayer, SessionRangesLayer]
+        fm.sync(cfgs, next, closedThrough)
+        sm.sync(cfgs, next, closedThrough)
+        fs.sync(cfgs, next, closedThrough, H)
+        ss.sync(cfgs, next, closedThrough, H)
+      }
+    }
+    const [fm, fs] = fast as [MarketStructureLayer, SessionRangesLayer]
+    const [sm, ss] = slow as [MarketStructureLayer, SessionRangesLayer]
+    expect(fm.resultOf('ms')).toEqual(sm.resultOf('ms'))
+    expect(fs.resultOf('sr')).toEqual(ss.resultOf('sr'))
+    expect(fm.statsOf('ms')).toEqual(sm.statsOf('ms'))
+    expect(fs.statsOf('sr')).toEqual(ss.statsOf('sr'))
   })
 })

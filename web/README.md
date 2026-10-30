@@ -312,7 +312,8 @@ recomputed. With the defaults, 1h and every sub-hour preset (1s–30m) draw all 
 draw Asia only; 3h, 6h and 12h draw none (an 8h Asia is not whole 3h, 6h or 12h bars); bar
 lengths that don't divide the day (5h, 7h) draw none. An opening range of N = 4 is drawn on 4h.
 When a session that is toggled on is hidden for this reason, the legend row says so (e.g.
-"London, New York and opening range hidden: hours don't line up with the bar length").
+"London, New York and opening range hidden: hours don't line up with the bar length"). On 1D
+and above nothing is drawn and the legend row says "Not shown on 1D and above".
 
 **Fixed UTC hours, no daylight saving.** The windows never move with DST. In the northern summer,
 London 07:00–16:00 UTC is 08:00–17:00 local time and New York 13:00–22:00 UTC is 09:00–18:00
