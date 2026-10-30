@@ -23,6 +23,7 @@ Backtest honesty:
 - [ ] Adversarial: signal delay 1/3/5 bars (should decay gradually), sign flip, Monte Carlo trade reshuffle, permutation null through the full pipeline
 - [ ] Robustness: ±20% parameter neighbours stay profitable; regime split (bull/bear/sideways)
 - [ ] Locked holdout: untouched by search; if checked, count against the budget and report separately
+- [ ] No LLM decision layer inside the backtest: an LLM take/skip judge (Jev or Claude) is evaluated forward only, on bars after its training cutoff, never on history it may remember
 - [ ] Disclaimer: historical, not forward-looking
 ```
 

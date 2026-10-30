@@ -1,0 +1,2 @@
+- [Phase 17 shadow review](phase17-shadow-review.md) — r1-r4 2026-10-29: centring/git/alias fixed r4; open C: future --asof gives early final report
+- [Review conventions](review-conventions.md) — recurring checks: stopping rules, asof caps, chain anchoring, model aliases, fail-closed readers, stratified-test centring/power

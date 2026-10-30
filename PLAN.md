@@ -1051,7 +1051,8 @@ Traps this design must close:
 - **Steering the frozen tests.** The HC strategies and protocols are frozen, and `compare` refuses a
   changed strategy file. The judge is a separate process that **watches, never steers**: it writes no
   strategy, config, protocol or journal file of the HC bots and cannot change their verdicts.
-- **Hindsight.** Each verdict is written before the fill bar opens and before the outcome exists.
+- **Hindsight.** Each verdict is written within 15 minutes of the fill bar's open, from a snapshot of
+  bars closed at the signal bar, before the trade's outcome exists.
   Nothing is ever judged after the fact, and no row is edited later.
 - **Memorization.** The snapshot is blind: rounded ratios only, no symbol, no dates, no prices.
 - **Silent gaps.** Jev down, a timeout or a bad answer is logged as `unavailable` (fail open), never as
@@ -1060,14 +1061,14 @@ Traps this design must close:
   so "inconclusive" and "no information" are correct outcomes, written up as carefully as a positive.
 
 ### Checklist
-- [ ] Shadow process `uv run python paper_trade.py shadow`: after each 4h close, recompute every registered HC candidate's entry signal from closed candles with the lab's `compile_plan` (read-only import, same candles, warm-up and data source as `compare`); no effect on the bots (test: the HC strategy, config, protocol and journal files are byte-identical before and after a run)
-- [ ] Blind snapshot built in Python (rounded ratios only: 1/6/42-bar returns, ATR %, distance to EMAs, RSI, volume ratio, BTC 4h trend; no symbol, dates or prices) and one batched Jev call per closed bar: `choice` take/skip, `noul` fake-out risk, `score` confidence; `TYPESAFE_API_KEY` from env only
-- [ ] Append-only, hash-chained `agents/data/paper/jev-shadow/decisions.jsonl` (signal bar, candidate, snapshot sha256, verdict, model id, latency, written-at time); every row written before its fill bar opens; Jev unavailable or a missed bar logged as such (tests: chain verification fails on any edited or deleted row; no row's written-at is at or after its fill bar's open)
+- [x] Shadow process `uv run python paper_trade.py shadow`: after each 4h close, recompute every registered HC candidate's entry signal from closed candles with the lab's `compile_plan` (read-only import, same candles, warm-up and data source as `compare`); no effect on the bots (test: the HC strategy, config, protocol and journal files are byte-identical before and after a run)
+- [x] Blind snapshot built in Python (rounded ratios only: 1/6/42-bar returns, ATR %, distance to EMAs, RSI, volume ratio, BTC 4h trend; no symbol, dates or prices) and one batched Jev call per closed bar: `choice` take/skip, `noul` fake-out risk, `score` confidence; `TYPESAFE_API_KEY` from env only
+- [x] Append-only, hash-chained `agents/data/paper/jev-shadow/decisions.jsonl` (signal bar, candidate, snapshot sha256, verdict, model id, latency, written-at time); every verdict row written before its fill bar's open + 15 min grace (owner decision 2026-10-29: the signal needs bar t's close, which is the instant the fill bar opens; the snapshot holds only bars closed at t), a later one logged as missed; Jev unavailable or a missed bar logged as such (tests: chain verification fails on any edited or deleted row; no verdict row's written-at is at or after its fill bar's open + grace)
 - [ ] Pre-registered analysis in a journal entry written before the first decision: start time, metric (mean net trade return of Jev-take vs Jev-skip trades, matched to the paper fills `compare` reads), a permutation test, and a minimum sample (at least 30 judged trades and 8 per arm, else "inconclusive"); never changed afterwards
-- [ ] `paper_trade.py shadow-report`: take vs skip returns matched to paper fills, `unavailable` and missed counts, "inconclusive" below the minimum sample; reproduces from the JSONL and dry-run DBs alone (test on a fixture)
-- [ ] Rule written into `.claude/rules/research-agents.md` and the `honest-backtesting` checklist: LLM decision layers are evaluated forward only, never inside lab backtests
+- [x] `paper_trade.py shadow-report`: take vs skip returns matched to paper fills, `unavailable` and missed counts, "inconclusive" below the minimum sample; reproduces from the JSONL and dry-run DBs alone (test on a fixture; the pre-registration and the git-tracked `jev-shadow-heads.md` are checked, not read for numbers); before the frozen `evaluate_at` (latest protocol decision end + 14 days) every report is an interim look with no outcome or p-value
+- [x] Rule written into `.claude/rules/research-agents.md` and the `honest-backtesting` checklist: LLM decision layers are evaluated forward only, never inside lab backtests
 - [ ] (optional, after the judge has data) Decision stream panel beside the paper ticket: per candidate, each signal with Jev's verdict, confidence and fake-out score, the fill and (once closed) the trade return; read-only server endpoint over the JSONL and dry-run DBs
-- [ ] Quant review (look-ahead and pre-registration focus), code review for the panel, `uv run pytest -q`, `uv run ruff check .`, then `/run-gate 17`
+- [x] Quant review (look-ahead and pre-registration focus), code review for the panel, `uv run pytest -q`, `uv run ruff check .`, then `/run-gate 17`
 
 Not in this phase: any order path, Alpaca, shorts, or acting on a Jev verdict. A positive result
 would justify only a second pre-registered forward test, never trading.

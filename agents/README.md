@@ -232,6 +232,128 @@ uv run python paper_trade.py compare --candidate NAME [--verbose]   # weekly
 - Results are historical, not forward-looking. A candidate is "successful" only after every
   success criterion **and** a passing forward test.
 
+## Jev shadow judge (Phase 17)
+
+Tests, forward only, whether Jev can tell good HC paper entries from bad ones. An LLM judge
+cannot be backtested honestly (a model asked about past bars may remember them), so it only
+ever sees bars that close after its pre-registration.
+
+```bash
+uv run python paper_trade.py shadow                  # runs forever: after each 4h close
+uv run python paper_trade.py shadow --once           # process the closed bars once and exit
+uv run python paper_trade.py shadow --model jev-latest   # the model asked (frozen on run 1)
+uv run python paper_trade.py shadow-report [--asof 2026-12-26T00:00Z] [--write] \
+    [--expect-head SHA256]
+```
+
+- **Key from the environment only.** Jev is asked with `TYPESAFE_API_KEY`. Without it the
+  shadow prints a loud warning and keeps running: every signal is logged `unavailable`.
+- **Watches, never steers.** It recomputes every registered HC candidate's entry signal with
+  the lab's `compile_plan` on the same frozen candle source, host and warm-up window
+  (`[warm_from, fill bar)`) as `compare`. It writes nothing in any candidate folder or
+  candidate journal entry, never opens a dry-run DB, and nothing acts on a verdict. Its files
+  are `agents/data/paper/jev-shadow/` (no `protocol.json`),
+  `agents/journal/<date>-multi-jev-shadow.md` and `agents/journal/jev-shadow-heads.md`.
+- **Blind snapshot.** Rounded ratios only, from bars closed at the signal bar. The snapshot
+  reads 300 more closed bars before `warm_from` (`snapshot_since`, frozen per candidate) so
+  its EMA200 can settle and a short gap in the warm-up cannot leave a bar without a snapshot.
+  Known limitation: it is blind to symbol, dates and prices, but the BTC setup can be
+  recognised from its BTC fields (its `ret_42_pct` equals `btc_ret_42_pct`, its
+  `dist_ema50_pct` equals `btc_trend_pct`). The bars are forward, so this is not look-ahead.
+- **Pre-registration first.** The first run writes the journal entry (start time, candidates
+  with plan and protocol hashes, the blind snapshot fields and fingerprint, Jev's context and
+  questions verbatim, the deadline rule, the analysis and its evaluation time), then the
+  genesis row of the hash-chained `decisions.jsonl`, which freezes the start, grace,
+  candidates, requested model, snapshot version and fingerprint, question hash, analysis, the
+  entry's sha256 and the environment (`env`: Python, numpy and pandas versions and the sha256
+  of `agents/uv.lock`), then the heads file. Later runs refuse (exit 2) if the entry, the
+  questions, the snapshot formulas, a candidate's plan or protocol, the grace or the model
+  changed, or a recorded head no longer matches. A candidate registered later is ignored.
+- **Model.** `--model` (default `jev-latest`, the client default) is the model requested and
+  is frozen by the genesis row. Every decision row records the model id Jev reports serving
+  (`model`, null when Jev names none: the requested alias never stands in for it) and the
+  `requested_model`; a judged bar with no served id prints a loud `WARNING:`. The analysis
+  pins the served id of the first judged decision that has one, normalised to major.minor for
+  `<name>-<major>.<minor>.<patch>` (`jev-1.13.0` and `jev-1.13.1` pin as `jev-1.13`), else the
+  full id. Judged decisions with another pin (`model_mismatch`) or with no served id
+  (`no_served_model`) are excluded from both arms and counted. A served id equal to the
+  requested alias (when that is not a full `<name>-<major>.<minor>.<patch>` id, e.g.
+  `jev-latest`) names no version: it counts as no served id and the report warns loudly.
+- **Deadline rule.** A verdict is written before the fill bar's open + 15 minutes (the signal
+  needs bar t's close, the instant the fill bar opens). A verdict arriving later is discarded
+  and the bar logged `missed`; a bar nobody judged in time is logged `missed` once its
+  deadline has passed (its signals are still counted). Jev down, a timeout or a bad answer is
+  `unavailable`. Neither is ever a skip, and no row is edited or filled in later.
+- **Tamper anchor (commit the heads file).** The hash chain is unkeyed: anyone with write
+  access to `decisions.jsonl` can delete rows from the end, or edit a row and re-chain
+  everything after it, and the result is again a valid chain. So the chain is tamper-evident
+  only against heads recorded elsewhere. After every write the shadow appends
+  `- <UTC time> seq <n> rows <n> head <sha256>` to `agents/journal/jev-shadow-heads.md`;
+  **commit and push that file regularly** (with every push). `shadow-report` and every later
+  shadow run check each recorded head against the log and refuse (exit 2, "the log was
+  rewritten after head X was recorded") on any mismatch. `shadow-report` also refuses when the
+  last recorded head is behind the log's last row (e.g. a header-only heads file with
+  decisions). A crash can land between a log write and its head line, so every `shadow` run
+  first checks every recorded head and, only if all verify and exactly one write (its
+  decision rows ending in their bar row) is uncovered, appends a head line for the tip marked
+  `recovered` and prints a warning. That append happens only after every other check (frozen
+  hashes, grace, model, candidates, recorded heads) has passed, so a refused run writes
+  nothing. The report lists each recovered seq with its lag (head line time minus the row's
+  `written_at`). `shadow-report` also runs `git show HEAD:<heads file>` (read only, no shell,
+  with a timeout) and exits 2 ("the heads file differs from the committed copy") unless the
+  committed text is a prefix of the working file, and walks the file's committed history
+  (`git log --format=%H -- <file>`, then `git show <commit>:<file>`), checking that every
+  committed version extends the one before it. An interim look only warns when git or the
+  committed copy is unavailable, when head lines are not committed yet, or when the history
+  is not append-only. **The final report (at or after the evaluation time) fails closed on
+  all of these:** it exits 2 unless the committed copy exists, anchors the log's last row
+  (zero uncommitted head lines) and has an append-only history, so commit and push the heads
+  file before the final read. `--expect-head` is an extra check against a head kept anywhere
+  else.
+- **Report.** `shadow-report` verifies the chain, every recorded head, every deadline, the
+  pre-registration's sha256 and the snapshot fingerprint and question hash (any problem exits
+  2), matches each judged decision to the paper fill opened in its fill bar, and prints take
+  vs skip mean net trade returns, the unavailable and missed counts, the chain head and
+  `trades_sha256` (the sha256 of the canonical matched-trade list, so a later final report can
+  be checked to be the same report), any notes (e.g. an unreadable dry-run DB), a descriptive
+  split by the snapshot's `btc_trend_pct` (> 0 vs <= 0; a trivial regime rule to set beside
+  Jev's split, no test) and the genesis vs current environment (a reason line when numpy or
+  pandas differ: the permutation stream and the fingerprint depend on them). A final report
+  exits 2 ("final report refused: <candidate> dry-run DB unreadable; retry") while any
+  candidate's dry-run DB is missing, locked or corrupt; a readable DB with no trades is fine. Its
+  numbers come from the JSONL and the dry-run DBs alone (the journal entry and heads file are
+  checked, not read for numbers). Before the frozen evaluation time (the latest candidate
+  decision end + 14 days) a report is an interim look: descriptive only, no test, no p-value,
+  no outcome. `--write` saves `jev-shadow/interim-<asof>.md` before it and
+  `jev-shadow/report-<evaluate_at>.md` at or after it, once each; neither is ever overwritten.
+- **Outcomes.** The frozen test is a two-sided stratified cluster permutation test: one Jev
+  call judges a bar's setups together and the coins are correlated, so labels are permuted as
+  whole fill-bar clusters among clusters of the same size, and only inside the same 7-day block
+  counted from the shadow start (`strata: same_size_within_block`, `block_days: 7`), because
+  regimes persist across bars and would otherwise pass for skill. It tests whether Jev
+  discriminates within a week; the report gives the number of blocks and of informative strata
+  (more than one cluster, both labels). The tested statistic (`statistic:
+  centred_within_block_diff`) is the take-minus-skip difference centred on its exact null
+  mean, `E0[take_sum] = sum_s (n_take_s / n_s) * R_s`: when weeks differ in take share or in
+  mean return the uncentred pooled difference has a null centre away from 0, which would make
+  the "two-sided" test one-sided and blind to a within-week effect of the other sign. Scaled
+  by a constant (no p-value changes), `T` is the weighted mean of the within-week differences
+  (weights `n_take_s * n_skip_s / n_s`; with one stratum it is the plain difference). `T` is
+  the report's headline effect and sets the sign of "take better" / "take worse"; the pooled
+  difference is shown as a description only (it can differ in sign). Below 30 closed judged trades or 8 per arm the
+  result is "inconclusive"; with p >= alpha it is "no information". Both are correct outcomes,
+  written up as carefully as a positive one. A positive result justifies only a second
+  pre-registered forward test, never trading. Results are historical, not forward-looking.
+- **Fail-closed edges (owner).** A crash between writing the pre-registration and the genesis
+  row leaves a stray `*-multi-jev-shadow.md` that makes every later run refuse until the owner
+  moves it aside (outside Claude Code). Never delete `decisions.jsonl` to restart: a second
+  pre-registration in git history would be visible, and the heads file already names the old
+  log. A missing heads file is recreated only while the log holds just its genesis row;
+  afterwards restore it from git.
+- **Recommended protection (owner edits hooks).** Add `agents/data/paper/jev-shadow/**` and
+  `agents/journal/*-multi-jev-shadow.md` (optionally `agents/journal/jev-shadow-heads.md`) to
+  the protect-files hook so Claude's edit tools cannot touch the log or the pre-registration.
+
 ## Files
 
 - `research_loop.py`: CLI.
@@ -241,6 +363,8 @@ uv run python paper_trade.py compare --candidate NAME [--verbose]   # weekly
 - `research/budget.py`, `research/state.py`: budgets and atomic run-state files
   (`agents/data/runs/<run_id>.json` plus a `.resume.json` sidecar).
 - `prompts/{scout,designer,critic}.md`: role briefs (system prompts).
+- `research/paper/shadow.py` (+ `shadow_log.py`, `shadow_snapshot.py`, `shadow_report.py`): the
+  Jev shadow judge, its decision log, blind snapshot and report.
 
 Results are historical backtests and are not forward-looking. A candidate becomes "successful"
 only after it passes every success criterion **and** 4–8 weeks of forward paper trading.

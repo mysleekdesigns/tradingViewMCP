@@ -6,6 +6,9 @@ Usage (from ``agents/``)::
         [--claimed-sharpe 1.2] [--ledger PATH] [--candle-source api|archive] \
         [--exchange binance] [--public-api-host data-api.binance.vision] [--launch]
     uv run python paper_trade.py compare --candidate NAME [--end ...]
+    uv run python paper_trade.py shadow [--once] [--grace-minutes 15] [--settle-seconds 20] \
+        [--model jev-latest]
+    uv run python paper_trade.py shadow-report [--asof ISO] [--write] [--expect-head SHA256]
 
 ``prepare`` requires the plan in the lab ledger (a research-run design-window trial of its
 ``plan_hash``; the ledger is opened strictly read-only). The lab's behaviour family (same logic,
@@ -33,6 +36,26 @@ a dated verdict line to the journal entry and only then writes ``comparison-<dat
 that a comparison file named by the final verdict's journal line but missing (the write failed
 after the verdict was recorded) is recreated, never touching the verdict or the journal. Errors
 (network, rate limit, a locked dry-run DB, bad files) exit 2 with a "cannot compare" message.
+
+``shadow`` runs the Jev shadow judge (PLAN.md Phase 17; :mod:`research.paper.shadow`): it
+watches the registered paper candidates and never steers them. The first run writes the
+pre-registration journal entry ``agents/journal/<date>-multi-jev-shadow.md``, the genesis row
+of ``agents/data/paper/jev-shadow/decisions.jsonl`` and the append-only heads file
+``agents/journal/jev-shadow-heads.md`` (one chain head per write; commit it with every push);
+then, after each bar close, it recomputes every candidate's entry signal with the lab's
+``compile_plan`` and asks Jev (``--model``, frozen on the first run; ``TYPESAFE_API_KEY`` from
+the environment; without it every signal is logged ``unavailable``) about the signalled setups
+before the fill bar's open + grace, else logs them ``missed``. Each decision row logs the
+model id Jev served (null when it names none, with a loud warning) and the requested one. A run
+that finds the log's last write without a head line (a crash between the two) re-anchors it
+with a head line marked ``recovered``, only if every recorded head verifies. ``shadow-report``
+verifies the hash chain, every recorded head, that the last head covers the log's last row, that
+the committed heads file (``git show HEAD:``) is a prefix of the working one (a warning when git
+or the committed copy is unavailable), the deadlines, the pre-registration and the frozen
+snapshot and question hashes (any failure exits 2), and prints the pre-registered take-vs-skip
+analysis from the JSONL and the dry-run DBs (``--write`` saves ``jev-shadow/interim-<asof>.md``
+before the frozen evaluation time and ``jev-shadow/report-<evaluate_at>.md`` at or after it,
+once). A final report exits 2 while any candidate's dry-run DB cannot be read (retry later).
 
 Paper trading only: the config is always ``dry_run: true`` with no exchange keys. Results are
 historical, not forward-looking.
@@ -106,6 +129,7 @@ from research.paper.protocol import (
     resolve_claim,
 )
 from research.paper.protocol import Verdict as ProtocolVerdict  # vs compare's replay verdict
+from research.paper.shadow_log import DEFAULT_GRACE_S
 
 DEFAULT_PUBLIC_HOST = DEFAULT_CANDLE_HOST
 
@@ -598,6 +622,38 @@ def _rewrite_comparison(
     return 0
 
 
+def cmd_shadow(args: argparse.Namespace) -> int:
+    """The Jev shadow judge (watches, never steers); see :mod:`research.paper.shadow`."""
+    from research.paper import shadow
+
+    grace_s = round(args.grace_minutes * 60)
+    return shadow.cli_shadow(
+        Path(args.paper_dir),
+        journal_dir(args),
+        once=args.once,
+        grace_s=grace_s,
+        settle_s=args.settle_seconds,
+        model=args.model,
+        out=print,
+        err=lambda text: print(text, file=sys.stderr),
+    )
+
+
+def cmd_shadow_report(args: argparse.Namespace) -> int:
+    """The pre-registered take-vs-skip report from the JSONL and the dry-run DBs alone."""
+    from research.paper import shadow
+
+    return shadow.cli_shadow_report(
+        Path(args.paper_dir),
+        journal_dir(args),
+        asof=args.asof,
+        write=args.write,
+        expect_head=args.expect_head,
+        out=print,
+        err=lambda text: print(text, file=sys.stderr),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--paper-dir", type=Path, default=PAPER_DIR, help=argparse.SUPPRESS)
@@ -657,6 +713,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     c.add_argument("--verbose", action="store_true", help="print every check")
     c.set_defaults(func=cmd_compare)
+
+    s = sub.add_parser(
+        "shadow", help="Jev shadow judge: log a verdict per HC signal (watches, never steers)"
+    )
+    s.add_argument("--once", action="store_true", help="process the closed bars once and exit")
+    s.add_argument(
+        "--grace-minutes",
+        type=float,
+        default=DEFAULT_GRACE_S / 60,
+        help="minutes after the fill bar's open a verdict may still be written (frozen into "
+        "the genesis row on the first run; later runs must pass the same value)",
+    )
+    s.add_argument(
+        "--settle-seconds",
+        type=float,
+        default=20.0,
+        help="seconds to wait after a bar boundary before loading its closed candle",
+    )
+    s.add_argument(
+        "--model",
+        default="jev-latest",
+        help="Jev model to request (default: jev-latest, the client default); frozen into the "
+        "genesis row on the first run, later runs must pass the same value. The served model "
+        "id is logged per decision and the first judged one is pinned for the analysis",
+    )
+    s.set_defaults(func=cmd_shadow)
+
+    r = sub.add_parser("shadow-report", help="Jev take vs skip, from the JSONL and dry-run DBs")
+    r.add_argument("--asof", default=None, help="UTC date/time of the report (default: now)")
+    r.add_argument(
+        "--write",
+        action="store_true",
+        help="write jev-shadow/interim-<asof>.md before the frozen evaluation time, else "
+        "jev-shadow/report-<evaluate_at>.md (never overwrites)",
+    )
+    r.add_argument(
+        "--expect-head",
+        default=None,
+        help="sha256 of the last row recorded elsewhere: an extra check beside the heads file",
+    )
+    r.set_defaults(func=cmd_shadow_report)
     return parser
 
 
