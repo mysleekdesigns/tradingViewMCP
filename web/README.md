@@ -287,3 +287,109 @@ bar after `t` leaves every swing, event and zone dated `<= t` unchanged. Each sw
 confirmation bar, and each retest or invalidation is later than its zone's creation bar.
 Pushing closed bars one at a time into `MarketStructureEngine` gives the same result as a full
 recompute. 100k bars compute in well under 1.5 s at the defaults.
+
+## Session ranges overlay (Phase 18)
+
+**Visual only, no edge claim.** The overlay draws a high/low box for each Asia, London and New
+York session and for the UTC-day opening range, so the owner can look at session structure on
+the chart. The idea comes from a futures trading-bot video that found most of its profit in the
+Asia session: another asset class, and unverified for crypto, which trades 24/7. Nothing here is
+a backtest or a signal. The compute lives in `src/indicators/sessionRanges.ts`
+(`computeSessionRanges`, and `SessionRangesEngine` for one closed bar at a time).
+
+**Shown only on intervals below 1d** (enforced by the chart layer; on 1d and above every bar is a
+whole UTC day, so the boxes say nothing).
+
+**Only sessions that line up with the bar length are drawn.** The compute takes any bar length,
+but a box on bars that don't fit the session's hours covers other hours (on 4h the New York box
+13–22 would hold the 16:00 and 20:00 bars, i.e. 16:00–24:00; the 1h opening range would be the
+whole 00:00–04:00 bar). So the chart layer draws a session only when, with `L` = the bar length
+in seconds (a whole number > 0), `86400 % L == 0` (the bars tile the UTC day; intraday bars open
+on the epoch grid, so every UTC midnight is a bar open), `(start * 3600) % L == 0` and
+`(duration * 3600) % L == 0` (`sessionAligned` / `alignedSessions` in `sessionRanges.ts`; the
+opening range is start 0, duration N). This is a display rule like the toggles: nothing is
+recomputed. With the defaults, 1h and every sub-hour preset (1s–30m) draw all four; 2h and 4h
+draw Asia only; 3h, 6h and 12h draw none (an 8h Asia is not whole 3h, 6h or 12h bars); bar
+lengths that don't divide the day (5h, 7h) draw none. An opening range of N = 4 is drawn on 4h.
+When a session that is toggled on is hidden for this reason, the legend row says so (e.g.
+"London, New York and opening range hidden: hours don't line up with the bar length").
+
+**Fixed UTC hours, no daylight saving.** The windows never move with DST. In the northern summer,
+London 07:00–16:00 UTC is 08:00–17:00 local time and New York 13:00–22:00 UTC is 09:00–18:00
+local; change the hours in the settings if you want the local sessions.
+
+**Parity source.** `web/src/indicators/sessionRanges.fixture.ts`: 21 hand-built 1h bars from
+day 1 20:00 UTC to day 2 17:00 UTC, across a UTC midnight, with a missing 03:00 bar inside Asia,
+equal highs inside Asia, and the Asia/London and London/New York overlaps. Every box (default
+windows, a wrapping Asia 22 → 06 window, and an opening range of N = 3) is worked out by hand in
+its comments, plus as-of-t snapshots of the default boxes after bars 3, 6, 7, 15 and 17 have
+closed (`EXPECTED_AS_OF_DEFAULTS`: mid-session boxes, across the gap and the overlaps). Any future
+lab feature that reuses these rules (for example an hour-of-day or
+first-N-hours high/low feature in the lab's registry) must reproduce the fixture exactly.
+
+### Inputs and defaults
+
+All hours are UTC. Defaults were fixed in `PLAN.md` before building.
+
+| Input                                           | Default | Range       | Meaning                                                      |
+| ----------------------------------------------- | ------- | ----------- | ------------------------------------------------------------ |
+| Asia start / end (`asiaStart`, `asiaEnd`)       | 0 / 8   | 0–23 / 1–24 | Asia session window, 00:00–08:00                             |
+| London start / end (`londonStart`, `londonEnd`) | 7 / 16  | 0–23 / 1–24 | London session window, 07:00–16:00                           |
+| New York start / end (`nyStart`, `nyEnd`)       | 13 / 22 | 0–23 / 1–24 | New York session window, 13:00–22:00                         |
+| Opening range (`orHours`)                       | 1       | 1–12        | N: the opening range covers the first N hours of the UTC day |
+| Asia / London / New York / Opening range        | on      | on/off      | display toggles only; they never change the computation      |
+
+Hours are whole numbers. Out-of-range or non-numeric values are clamped and rounded; a missing
+value falls back to its default.
+
+### Rules
+
+Only closed bars are used. The chart layer passes closed bars only; the forming bar (the last
+REST row, or a WebSocket kline with `x: false`) is never passed, so it never creates a box or
+moves a box's high or low. All times are bar open times in UNIX seconds, UTC.
+
+- **Window.** A start hour (0–23) and an end hour (1–24). Duration =
+  `((end - start + 24) % 24)` hours, or 24 when that is 0. So `end > start` stays on the same UTC
+  day, and `end <= start` wraps past UTC midnight into the next day (22 → 06 runs from 22:00 to
+  06:00 the next morning; 08 → 08 is a 24-hour window from 08:00).
+- **Instances.** For every UTC day `D` (`D = floor(t / 86400) * 86400`), an instance starts at
+  `D + start * 3600` and ends (exclusive) at its start plus the duration.
+- **Membership by open time.** A bar with open time `t` belongs to the latest instance start
+  `s <= t` when `t < s + duration`; so `start <= t < end`. On intervals that do not divide the
+  session hours, a bar that straddles the end counts for the session it opens in (on 3h bars the
+  06:00 bar is Asia's, not London's, although it runs to 09:00). This is the compute rule; the
+  chart does not draw such sessions (see the alignment rule above), but a lab port must match it.
+- **Opening range.** The window `[D, D + N * 3600)` of each UTC day, N = 1–12.
+- **Overlaps.** Every session is evaluated on its own, so one bar can be in several sessions (the
+  07:00 bar is in Asia and London by default; 13:00–15:00 are in London and New York).
+- **Box.** `high` = the highest high and `low` = the lowest low of the instance's closed bars so
+  far; `firstTime` / `lastTime` = the open times of its first and last closed bar; `bars` = how
+  many. Equal highs (or lows) give the same value; the box does not record which bar set it.
+  Exact floating-point comparisons on the given prices.
+- **No forward fill.** A session instance with no bars has no box. A gap inside a session (a
+  missing bar) just means fewer bars; nothing is synthesised.
+- **Growth.** A box exists from the close of its first bar and grows as later closed bars in the
+  session close. Once the next bar opens at or after its end, it never changes again.
+- **Hindsight on history.** A finished box shows the whole session's high and low, which was
+  known only once the session's last bar closed. At a bar inside that session the box so far
+  was smaller (the as-of-t snapshots in the fixture show it); a finished box is not what a
+  trader could have seen during the session.
+- **Order.** Boxes are ascending by start; equal starts are ordered Asia, London, New York,
+  opening range.
+
+**Timing guarantees (tested).** The box state as of bar `t` (the engine's result after bar `t`
+closed, i.e. what the chart drew then) uses only bars `<= t`: replacing every bar after `t` with
+new, extreme bars leaves that state unchanged, and every box that ended by the next bar's open
+bit-identical. That is not the same as a finished box on history, which uses its whole session
+(see "Hindsight on history"). A forming bar's values never reach a box, and bars after
+`closedThrough` in the array the chart layer receives are never read. If the live feed reconnects
+silently past a missing bar, the box lacks that bar until the gap is filled; the filled history
+then replaces the bars and the layer recomputes from scratch. Pushing closed bars one
+at a time into `SessionRangesEngine` gives the same result as a full recompute at every step
+(fixture, and seeded random walks on 1h, 15m and 4h with gaps), and a box handed out earlier is
+never mutated (a finished box keeps its identity). The engine refuses a bar that is not after
+the previous one; a revised bar starts the computation over. 100k bars compute in well under
+0.4 s.
+
+Not in this phase: a lab opening-range breakout hypothesis (it needs owner registry features
+under the lab lock, and its prior is weak).

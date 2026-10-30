@@ -22,7 +22,9 @@ import {
   IndicatorSeriesManager,
   MARKET_STRUCTURE_HINT,
   ownsPane,
+  SESSION_RANGES_HINT,
   paneGuideValues,
+  sessionAlignmentNote,
   paneIndicatorUids,
 } from './indicatorSeries'
 import { planSeriesSync } from './seriesSync'
@@ -969,5 +971,89 @@ describe('IndicatorSeriesManager with an event (market structure) indicator', ()
 
   it('a pane-placed event def would not take a pane either', () => {
     expect(ownsPane(structureDef('pane'))).toBe(false)
+  })
+})
+
+describe('session indicators (session ranges)', () => {
+  const candles = makeCandles(60)
+  const srCfg: IndicatorConfig = {
+    ...cfg('sessions', 's'),
+    inputs: { ...cfg('sessions', 's').inputs, showAsia: 0 },
+  }
+
+  it('the legend row carries the visual-only hint and no values', () => {
+    const row = buildLegendRow(def('sessions'), srCfg, 0, {})
+    expect(row.hint).toBe(SESSION_RANGES_HINT)
+    expect(row.values).toEqual([])
+    expect(row).not.toHaveProperty('note')
+    expect(SESSION_RANGES_HINT).toMatch(/no edge claim/)
+    expect(SESSION_RANGES_HINT).toMatch(/closed bars/)
+    // A finished box on history is the whole session's range: hindsight, stated in the hint.
+    expect(SESSION_RANGES_HINT).toMatch(
+      /whole session's range, known only once its last bar closed/,
+    )
+  })
+
+  it('the legend row notes toggled-on sessions hidden because their hours miss the bar length', () => {
+    const on = cfg('sessions', 'n')
+    const H = 3_600
+    // 1h and sub-hour: everything lines up, no note.
+    for (const l of [60, 900, H]) {
+      expect(buildLegendRow(def('sessions'), on, 0, {}, {}, undefined, l)).not.toHaveProperty(
+        'note',
+      )
+    }
+    // 4h (defaults): London 07, New York 13 and the 1h opening range are hidden.
+    expect(buildLegendRow(def('sessions'), on, 0, {}, {}, undefined, 4 * H).note).toBe(
+      "London, New York and opening range hidden: hours don't line up with the bar length",
+    )
+    // Toggled-off sessions are not listed (Asia is off in srCfg but aligned anyway).
+    const someOff = { ...on, inputs: { ...on.inputs, showLondon: 0, showOpening: 0 } }
+    expect(sessionAlignmentNote(def('sessions'), someOff, 4 * H)).toBe(
+      "New York hidden: hours don't line up with the bar length",
+    )
+    expect(sessionAlignmentNote(def('sessions'), on, 12 * H)).toBe(
+      "Asia, London, New York and opening range hidden: hours don't line up with the bar length",
+    )
+    // OR N = 4 lines up with 4h bars.
+    const or4 = { ...on, inputs: { ...on.inputs, orHours: 4 } }
+    expect(sessionAlignmentNote(def('sessions'), or4, 4 * H)).toBe(
+      "London and New York hidden: hours don't line up with the bar length",
+    )
+    // 1d and above (covered by the hint), unknown interval, other indicators: no note.
+    expect(sessionAlignmentNote(def('sessions'), on, 86_400)).toBeUndefined()
+    expect(sessionAlignmentNote(def('sessions'), on, undefined)).toBeUndefined()
+    expect(sessionAlignmentNote(def('ema'), cfg('ema', 'e'), 4 * H)).toBeUndefined()
+    expect(buildLegendRow(def('sessions'), on, 0, {})).not.toHaveProperty('note')
+  })
+
+  it('the title lists the session hours and N but not the show toggles', () => {
+    expect(indicatorTitle(def('sessions'), srCfg)).toBe('SR 0 8 7 16 13 22 1')
+  })
+
+  it('creates no series and takes no pane, on sync, toggle edits, hide and ticks', () => {
+    expect(ownsPane(def('sessions'))).toBe(false)
+    const chart = new FakeChart()
+    const manager = new IndicatorSeriesManager()
+    manager.attach(chart as unknown as IChartApi)
+    manager.applyPlan(planSeriesSync(null, candles), candles)
+    manager.sync([srCfg], candles)
+    manager.sync([{ ...srCfg, inputs: { ...srCfg.inputs, showLondon: 0 } }], candles)
+    manager.sync([{ ...srCfg, visible: false }], candles)
+    const ticked = [...candles.slice(0, -1), { ...candles[candles.length - 1], close: 1 }]
+    manager.applyPlan(planSeriesSync(candles, ticked), ticked)
+    expect(chart.all()).toHaveLength(0)
+    expect(chart.panesList).toHaveLength(1)
+    expect(manager.legendRows(undefined)[0]).toMatchObject({
+      uid: 's',
+      pane: 0,
+      values: [],
+      hint: SESSION_RANGES_HINT,
+    })
+    // The manager passes the bar length through to the alignment note.
+    expect(manager.legendRows(undefined, 3_600)[0]).not.toHaveProperty('note')
+    expect(manager.legendRows(undefined, 4 * 3_600)[0].note).toBe(
+      "London, New York and opening range hidden: hours don't line up with the bar length",
+    )
   })
 })

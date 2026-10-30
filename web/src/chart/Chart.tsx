@@ -83,6 +83,7 @@ import { clearCrosshairForSetData, conflationOptions } from './conflation'
 import { resolveHover } from './hover'
 import { VolumeProfileLayer, volumeProfileColorsFor } from './volumeProfileLayer'
 import { MarketStructureLayer, marketStructureColorsFor } from './marketStructureLayer'
+import { SessionRangesLayer, sessionRangesColorsFor } from './sessionRangesLayer'
 import { SeriesMarkersMux } from './seriesMarkers'
 import {
   attachChartAccessibility,
@@ -304,9 +305,9 @@ interface ChartProps {
   /**
    * Open time of the latest bar whose final values are confirmed, with every earlier bar final
    * too (`structureClosedThrough`: the live controller's `closedThrough`, or the replay cursor
-   * bar). The market-structure overlay only uses plotted bars with time <= it, so the forming
-   * bar and a partial bar awaiting a gap fill never create, move or remove anything. Default
-   * null: no bar is known final, so no structure.
+   * bar). The market-structure and session-ranges overlays only use plotted bars with
+   * time <= it, so the forming bar and a partial bar awaiting a gap fill never create, move or
+   * remove anything. Default null: no bar is known final, so no structure and no sessions.
    */
   closedThrough?: number | null
 }
@@ -454,6 +455,8 @@ export function Chart({
   )
   /** Fixed-range volume profiles (range indicators), drawn on the main series. */
   const [profileLayer] = useState(() => new VolumeProfileLayer(volumeProfileColorsFor(palette)))
+  /** UTC session high/low boxes (session indicators) from closed bars, on the main series. */
+  const [sessionLayer] = useState(() => new SessionRangesLayer(sessionRangesColorsFor(palette)))
   const backtestVersion = useSyncExternalStore(
     backtestOverlay.subscribe,
     backtestOverlay.getSnapshot,
@@ -666,6 +669,7 @@ export function Chart({
     // The mux re-applies the structure markers it holds; the overlay re-sets its own channel.
     markersMux.attach(series)
     backtestOverlay.attachSeries(series)
+    sessionLayer.attach(series)
     profileLayer.attach(series)
     structureLayer.attach(series)
     return () => {
@@ -678,6 +682,7 @@ export function Chart({
       backtestOverlay.detachSeries(alive)
       markersMux.detach(alive)
       markersMux.clear('backtest')
+      sessionLayer.detach(alive)
       profileLayer.detach(alive)
       structureLayer.detach(alive)
       if (alive) series.detachPrimitive(primitive)
@@ -695,6 +700,7 @@ export function Chart({
     alertLinesManager,
     markersMux,
     backtestOverlay,
+    sessionLayer,
     profileLayer,
     structureLayer,
   ])
@@ -835,6 +841,13 @@ export function Chart({
     structureLayer.sync(indicators, appliedRef.current, closedThrough)
   }, [indicators, candles, closedThrough, structureLayer])
 
+  // Session ranges: the same closed, plotted (never Heikin-Ashi) bars as market structure, so a
+  // forming-bar tick pushes nothing and moves no box. Nothing is drawn on 1d and above, and a
+  // session whose hours don't line up with the bar length is not drawn (legend note says which).
+  useEffect(() => {
+    sessionLayer.sync(indicators, appliedRef.current, closedThrough, timeframeSeconds(interval))
+  }, [indicators, candles, closedThrough, interval, sessionLayer])
+
   // Theme / candle colours / time zone. Everything is recoloured in place (applyOptions, one
   // volume setData), so the chart, its series, drawings, indicators and the view all survive.
   // Runs after the creation and data effects, so on mount it only re-applies the same values.
@@ -858,6 +871,7 @@ export function Chart({
     indicatorManager.setPalette(palette)
     profileLayer.setColors(volumeProfileColorsFor(palette))
     structureLayer.setColors(marketStructureColorsFor(palette))
+    sessionLayer.setColors(sessionRangesColorsFor(palette))
   }, [
     palette,
     theme,
@@ -868,6 +882,7 @@ export function Chart({
     derivativesPanes,
     profileLayer,
     structureLayer,
+    sessionLayer,
   ])
 
   // Latest header values for screenshots, read when the user exports (not per render).
@@ -1230,7 +1245,7 @@ export function Chart({
 
   // Cheap (binary search per line). useSyncExternalStore above re-renders on every store change
   // (live tick, config change), so this always reads the current values.
-  const indicatorRows = indicatorManager.legendRows(hoveredTime)
+  const indicatorRows = indicatorManager.legendRows(hoveredTime, timeframeSeconds(interval))
   const equityPane = backtestOverlay.equityPaneIndex()
   const equityTop = equityPane !== null ? paneTops[equityPane] : null
   const equityLegend =

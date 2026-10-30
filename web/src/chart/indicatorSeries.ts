@@ -22,11 +22,13 @@ import type {
   IndicatorValues,
   LineDef,
   Placement,
+  SessionKey,
 } from '../indicators/types'
 import type { IndicatorConfig } from '../state/indicators'
 import type { Candle } from '../types'
 import { formatPrice, formatVolume, selectLegendIndex } from './legend'
 import type { SeriesSyncPlan } from './seriesSync'
+import { sessionsHiddenByAlignment } from './sessionRangesLayer'
 import {
   colors,
   guideLineOptions,
@@ -219,6 +221,43 @@ export function indicatorTitle(
 export const MARKET_STRUCTURE_HINT =
   'Visual only, no edge claim. Swings and events appear only after the bar that confirms them closes'
 
+/**
+ * Legend tooltip for session indicators (session ranges): a drawing aid, not a signal; boxes use
+ * closed bars only and are drawn only on intervals below 1D. A finished box is the whole
+ * session's range, which was only known once its last bar closed (hindsight on history).
+ */
+export const SESSION_RANGES_HINT =
+  'Visual only, no edge claim. UTC session high/low from closed bars only; shown below 1D. ' +
+  "A finished box shows the whole session's range, known only once its last bar closed"
+
+const SESSION_NOTE_NAMES: Readonly<Record<SessionKey, string>> = {
+  asia: 'Asia',
+  london: 'London',
+  newyork: 'New York',
+  opening: 'opening range',
+}
+
+/**
+ * Legend note when session ranges hides toggled-on sessions whose hours do not line up with the
+ * bar length (e.g. London, New York and the 1h opening range on 4h). Undefined when nothing is
+ * hidden for that reason, or the interval is unknown.
+ */
+export function sessionAlignmentNote(
+  def: IndicatorDef,
+  config: Pick<IndicatorConfig, 'inputs'>,
+  intervalSeconds: number | undefined,
+): string | undefined {
+  if (def.sessions === undefined || intervalSeconds === undefined) return undefined
+  const hidden = sessionsHiddenByAlignment(config.inputs, intervalSeconds)
+  if (hidden.length === 0) return undefined
+  const names = hidden.map((k) => SESSION_NOTE_NAMES[k])
+  const list =
+    names.length === 1
+      ? names[0]
+      : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+  return `${list} hidden: hours don't line up with the bar length`
+}
+
 export const ANCHOR_NOT_SET_NOTE = 'Set the anchor in Settings'
 export const ANCHOR_NOT_LOADED_NOTE =
   'Anchor is before the loaded history. Scroll left to load older bars, if the market has them.'
@@ -299,14 +338,18 @@ export interface IndicatorLegendRow {
   values: IndicatorLegendValue[]
   /** Why the indicator draws nothing (anchor not set / not loaded); shown inside the row. */
   note?: string
-  /** Tooltip for the row (range indicators: the hindsight caveat; market structure: visual only). */
+  /**
+   * Tooltip for the row (range indicators: the hindsight caveat; market structure and session
+   * ranges: visual only).
+   */
   hint?: string
 }
 
 /**
  * One legend row. `values` are the line values at the shown bar; `prevValues` those at the bar
  * before (only used to colour a histogram value like its bar). `firstTime` is the open time of
- * the first plotted bar (for the anchor note); undefined = no bars yet.
+ * the first plotted bar (for the anchor note); undefined = no bars yet. `intervalSeconds` is the
+ * bar length (for the session-alignment note); undefined = unknown, no note.
  */
 export function buildLegendRow(
   def: IndicatorDef,
@@ -315,6 +358,7 @@ export function buildLegendRow(
   values: IndicatorValues,
   prevValues: IndicatorValues = {},
   firstTime?: number,
+  intervalSeconds?: number,
 ): IndicatorLegendRow {
   const row: IndicatorLegendRow = {
     uid: config.uid,
@@ -336,10 +380,12 @@ export function buildLegendRow(
       }
     }),
   }
-  const note = anchorNote(def, config, firstTime)
+  const note =
+    anchorNote(def, config, firstTime) ?? sessionAlignmentNote(def, config, intervalSeconds)
   if (note !== undefined) row.note = note
   if (def.profile !== undefined) row.hint = VOLUME_PROFILE_HINDSIGHT
   else if (def.structure !== undefined) row.hint = MARKET_STRUCTURE_HINT
+  else if (def.sessions !== undefined) row.hint = SESSION_RANGES_HINT
   return row
 }
 
@@ -612,8 +658,11 @@ export class IndicatorSeriesManager {
     return this.entries.get(uid)?.runner.valuesAt(time) ?? {}
   }
 
-  /** Legend rows in config order, with values at the hovered bar (or the last bar). */
-  legendRows(hoveredTime: number | undefined): IndicatorLegendRow[] {
+  /**
+   * Legend rows in config order, with values at the hovered bar (or the last bar).
+   * `intervalSeconds` (the bar length) enables the session-alignment note.
+   */
+  legendRows(hoveredTime: number | undefined, intervalSeconds?: number): IndicatorLegendRow[] {
     const candles = this.candles ?? []
     const index = selectLegendIndex(candles, hoveredTime)
     const time = index >= 0 ? candles[index].time : undefined
@@ -624,7 +673,17 @@ export class IndicatorSeriesManager {
       if (!entry) continue
       const values = time === undefined ? {} : entry.runner.valuesAt(time)
       const prev = prevTime === undefined ? {} : entry.runner.valuesAt(prevTime)
-      rows.push(buildLegendRow(entry.def, entry.config, entry.pane, values, prev, candles[0]?.time))
+      rows.push(
+        buildLegendRow(
+          entry.def,
+          entry.config,
+          entry.pane,
+          values,
+          prev,
+          candles[0]?.time,
+          intervalSeconds,
+        ),
+      )
     }
     return rows
   }

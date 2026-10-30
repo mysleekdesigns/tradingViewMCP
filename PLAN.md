@@ -1092,10 +1092,10 @@ Definitions (UTC, defaults set before building): Asia 00:00–08:00, London 07:0
 below 1d.
 
 ### Checklist
-- [ ] Pure compute `web/src/indicators/sessionRanges.ts`: per-session high/low boxes and the UTC opening range in one pass over closed bars; inputs for the session hours and N
-- [ ] Rendering as a series primitive under the drawings, themed for light and dark, with per-session toggles in the settings dialog (via `/add-indicator`)
-- [ ] Tests: known values on a hand-built fixture across a UTC midnight; a no-look-ahead perturbation test; the forming bar never moves a box's high or low; incremental tail recompute matches a full recompute
-- [ ] Definitions written in `web/README.md` ("visual only, no edge claim"); code review, `npx tsc -b`, `npx vitest run`, `npm run lint`, then `/run-gate 18`; browser checks listed for the owner
+- [x] Pure compute `web/src/indicators/sessionRanges.ts`: per-session high/low boxes and the UTC opening range in one pass over closed bars; inputs for the session hours and N
+- [x] Rendering as a series primitive under the drawings, themed for light and dark, with per-session toggles in the settings dialog (via `/add-indicator`)
+- [x] Tests: known values on a hand-built fixture across a UTC midnight; a no-look-ahead perturbation test; the forming bar never moves a box's high or low; incremental tail recompute matches a full recompute
+- [x] Definitions written in `web/README.md` ("visual only, no edge claim"); code review, `npx tsc -b`, `npx vitest run`, `npm run lint`, then `/run-gate 18`; browser checks listed for the owner
 
 Not in this phase: a lab opening-range breakout hypothesis. That needs owner registry features
 (hour-of-day, session high/low over the first N bars of a UTC day) under the lab lock, and its prior

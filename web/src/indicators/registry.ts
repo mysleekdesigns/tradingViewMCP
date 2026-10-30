@@ -4,6 +4,7 @@ import { emaDef } from './ema'
 import { macdDef } from './macd'
 import { marketStructureDef } from './marketStructure'
 import { rsiDef } from './rsi'
+import { sessionRangesDef } from './sessionRanges'
 import { smaDef } from './sma'
 import { stochDef } from './stochastic'
 import type { IndicatorDef, IndicatorId } from './types'
@@ -20,6 +21,7 @@ export const INDICATORS: readonly IndicatorDef[] = [
   anchoredVwapDef,
   volumeProfileDef,
   marketStructureDef,
+  sessionRangesDef,
   volumeMaDef,
   rsiDef,
   macdDef,

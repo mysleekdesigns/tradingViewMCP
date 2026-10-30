@@ -11,6 +11,7 @@ const IDS = [
   'avwap',
   'vprofile',
   'mstructure',
+  'sessions',
   'volma',
   'rsi',
   'macd',
@@ -53,6 +54,7 @@ describe('indicator registry', () => {
       avwap: 'overlay',
       vprofile: 'overlay',
       mstructure: 'overlay',
+      sessions: 'overlay',
       volma: 'volume',
       rsi: 'pane',
       macd: 'pane',
@@ -86,7 +88,7 @@ describe('indicator registry', () => {
 
   it('range and event indicators have no lines; every other indicator has at least one', () => {
     for (const def of INDICATORS) {
-      if (def.profile || def.structure) expect(def.lines).toEqual([])
+      if (def.profile || def.structure || def.sessions) expect(def.lines).toEqual([])
       else expect(def.lines.length).toBeGreaterThan(0)
     }
   })
@@ -146,6 +148,26 @@ describe('indicator registry', () => {
     expect(r).toBeDefined()
     expect(r?.swings.length).toBeGreaterThan(0)
     for (const s of r?.swings ?? []) expect(Number.isFinite(s.price)).toBe(true)
+  })
+
+  it('registers session ranges as a session indicator with no per-bar lines', () => {
+    const def = getIndicatorDef('sessions')
+    expect(def).toBeDefined()
+    if (def === undefined) return
+    expect(def.name).toBe('Session Ranges')
+    expect(def.shortName).toBe('SR')
+    expect(def.placement).toBe('overlay')
+    expect(def.lines).toEqual([])
+    expect(def.profile).toBeUndefined()
+    expect(def.structure).toBeUndefined()
+    expect(INDICATORS.filter((d) => d.sessions).map((d) => d.id)).toEqual(['sessions'])
+    const r = def.sessions?.(candles(200), defaultInputs(def))
+    expect(r).toBeDefined()
+    expect(r?.boxes.length).toBeGreaterThan(0)
+    for (const b of r?.boxes ?? []) {
+      expect(Number.isFinite(b.high) && Number.isFinite(b.low)).toBe(true)
+      expect(b.high).toBeGreaterThanOrEqual(b.low)
+    }
   })
 
   it('toggle inputs are 0 / 1 integers', () => {

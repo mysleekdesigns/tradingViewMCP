@@ -1,3 +1,4 @@
 - [Web data honesty conventions](web-data-honesty-conventions.md) — Coinbase live-close/read-back rules, seasonals t-band screen + caption MC, venue gating (Phase 9 w1, rounds 1-4)
 - [Web range indicators](web-range-indicators.md) — Phase 14 AVWAP/volume profile: round-1 issues fixed (r2); cache/runner fuzz harness to rerun on edits
 - [Web market structure](web-market-structure.md) — Phase 16: provisional/hole cap verified r4; open: Binance silent stale reconnect crosses holes
+- [Web session ranges](web-session-ranges.md) — Phase 18 r2: all r1 findings fixed (alignment rule, hindsight caveat, as-of-t fixture); inherited reconnect hole only

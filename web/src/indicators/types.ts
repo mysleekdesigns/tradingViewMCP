@@ -9,6 +9,7 @@ export type IndicatorId =
   | 'avwap'
   | 'vprofile'
   | 'mstructure'
+  | 'sessions'
   | 'volma'
   | 'rsi'
   | 'macd'
@@ -107,6 +108,38 @@ export interface IndicatorDef {
    * uses only bars <= t.
    */
   structure?(closed: readonly Candle[], inputs: IndicatorInputs): MarketStructure
+  /**
+   * Session indicators (session ranges): per-session high/low boxes, drawn by a primitive
+   * instead of per-bar lines (`lines` is empty, the stepper returns {}). `closed` holds closed
+   * bars only (never the forming bar), ascending. A box at bar t uses only bars <= t.
+   */
+  sessions?(closed: readonly Candle[], inputs: IndicatorInputs): SessionRanges
+}
+
+/** The UTC sessions of the session-ranges overlay ('opening' = the UTC-day opening range). */
+export type SessionKey = 'asia' | 'london' | 'newyork' | 'opening'
+
+/** One session instance's range over its closed bars. */
+export interface SessionBox {
+  session: SessionKey
+  /** Session start (UNIX s, UTC), e.g. 00:00 UTC of the day for Asia. */
+  start: number
+  /** Session end (UNIX s), exclusive: a bar belongs to the session when start <= its open < end. */
+  end: number
+  /** Highest high and lowest low of the closed bars in the session so far. */
+  high: number
+  low: number
+  /** Open times of the first and last closed bar in the session so far. */
+  firstTime: number
+  lastTime: number
+  /** Closed bars in the session so far (>= 1; a session with no bars has no box). */
+  bars: number
+}
+
+/** Session ranges over a run of closed bars. */
+export interface SessionRanges {
+  /** Ascending by start; equal starts in the order asia, london, newyork, opening. */
+  boxes: SessionBox[]
 }
 
 /** Trend state from closes through confirmed swings; 'none' until the first break. */
