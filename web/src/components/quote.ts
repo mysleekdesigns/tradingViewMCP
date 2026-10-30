@@ -1,5 +1,7 @@
 import { changePercent, formatChange, formatPrice, type Direction } from '../chart/legend'
 import { timeframeSeconds } from '../data/timeframes'
+import { formatClock } from '../state/appSettings'
+import { panelSelector, rawCandles, type LiveState, type PanelKey } from '../state/liveStore'
 import type { Candle, Timeframe } from '../types'
 
 const DAY_SECONDS = 86_400
@@ -78,6 +80,22 @@ export function summarizeQuote(candles: readonly Candle[], interval: Timeframe):
   }
 }
 
+/**
+ * Same text on screen: equal fields (or both null). Lets a live quote keep its previous object
+ * while a tick leaves the displayed price and change as they were.
+ */
+export function sameQuote(a: Quote | null, b: Quote | null): boolean {
+  if (a === b) return true
+  if (a === null || b === null) return false
+  return (
+    a.price === b.price &&
+    a.change === b.change &&
+    a.changePct === b.changePct &&
+    a.direction === b.direction &&
+    a.basis === b.basis
+  )
+}
+
 /** "2026-10-24 14:00" in UTC (chart times are UTC). */
 export function formatUtc(timeSeconds: number): string {
   return new Date(timeSeconds * 1000).toISOString().slice(0, 16).replace('T', ' ')
@@ -86,4 +104,41 @@ export function formatUtc(timeSeconds: number): string {
 /** "14:08:31" in UTC, for "loaded at" stamps. */
 export function formatUtcClock(date: Date): string {
   return date.toISOString().slice(11, 19)
+}
+
+/** A live-store selector that quotes nothing (replay: the live candles are hidden). */
+export const NO_QUOTE = (): Quote | null => null
+
+/**
+ * A live-store selector for `panel`'s quote: recomputed only when that panel's report changes
+ * (another panel's tick returns the cached quote), null while it has no candles. Pair it with
+ * `sameQuote` so a tick that leaves the text as it was keeps the previous object.
+ */
+export function liveQuoteSelector(panel: PanelKey): (state: LiveState) => Quote | null {
+  return panelSelector(panel, (live) => {
+    const candles = rawCandles(live)
+    return candles ? summarizeQuote(candles, panel.interval) : null
+  })
+}
+
+/**
+ * A live-store selector for `panel`'s "14:08:31" last-update clock in `timezone`, or null before
+ * any data. A string, so a tick within the same second changes nothing; the clock is formatted
+ * only when the whole second of the update changes (formatClock shows whole seconds).
+ */
+export function lastUpdateSelector(
+  panel: PanelKey,
+  timezone: string,
+): (state: LiveState) => string | null {
+  let lastSecond: number | null = null
+  let lastText: string | null = null
+  return panelSelector(panel, (live) => {
+    if (live.lastUpdate === null) return null
+    const second = Math.floor(live.lastUpdate / 1000)
+    if (second !== lastSecond || lastText === null) {
+      lastSecond = second
+      lastText = formatClock(live.lastUpdate, timezone)
+    }
+    return lastText
+  })
 }

@@ -1,4 +1,5 @@
 import {
+  memo,
   useEffect,
   useId,
   useMemo,
@@ -64,7 +65,7 @@ interface TimeframePickerProps {
  * entry. The list is a listbox: arrows move (skipping unavailable entries), Enter/Space picks,
  * Esc or a click outside closes, Tab reaches the custom entry.
  */
-export function TimeframePicker({
+export const TimeframePicker = memo(function TimeframePicker({
   value,
   onChange,
   supports,
@@ -361,4 +362,4 @@ export function TimeframePicker({
       )}
     </div>
   )
-}
+})

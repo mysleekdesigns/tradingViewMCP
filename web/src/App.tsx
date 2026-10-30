@@ -1,10 +1,12 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
   useReducer,
   useRef,
   useState,
+  type ComponentProps,
   type CSSProperties,
   type ErrorInfo,
 } from 'react'
@@ -51,7 +53,7 @@ import {
 } from './components/backtestView'
 import type { FocusPlan } from './chart/backtestOverlay'
 import { ChartContextMenu } from './components/ChartContextMenu'
-import { ChartPanel, type PanelMarket } from './components/ChartPanel'
+import { ChartPanel } from './components/ChartPanel'
 import { DrawingStyleBar } from './components/DrawingStyleBar'
 import { DrawingToolbar } from './components/DrawingToolbar'
 import { shortcutCommand } from './components/drawingTools'
@@ -61,7 +63,8 @@ import { IndicatorSettings } from './components/IndicatorSettings'
 import { LayoutMenu } from './components/LayoutMenu'
 import { PaperTradingPanel } from './components/PaperTradingPanel'
 import { ReplayBar } from './components/ReplayBar'
-import { summarizeQuote } from './components/quote'
+import { LastUpdateClock } from './components/LastUpdateClock'
+import { QuoteReadout } from './components/QuoteReadout'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { ResearchFallback, ResearchPage } from './components/ResearchPage'
 import {
@@ -97,7 +100,6 @@ import { useAlerts } from './state/alerts'
 import {
   alertsUnavailableReason,
   fallbackSymbol,
-  formatClock,
   labOnChart,
   labOverlayBlockedNotice,
   providerNeedsReload,
@@ -131,20 +133,16 @@ import {
   sanitizeTimeframes,
   saveLayout,
   type LayoutKind,
-  type PanelState,
 } from './state/layout'
 import {
   LIVE_OFFLINE_MESSAGE,
   liveFeedUpdates,
   liveQuotesOf,
   paperMarks,
-  priceStamp,
   REPLAY_MARK_OFF,
   replayFeedStep,
   replayPaperPause,
   type LiveFeedSeen,
-  type LiveQuote,
-  type PriceStamp,
   type ReplayMark,
 } from './state/paperFeeds'
 import { savePrefs } from './state/prefs'
@@ -163,9 +161,25 @@ import {
   type Settings,
 } from './state/settings'
 import { appShortcut, isMacPlatform, shortcutRepeats } from './state/shortcuts'
-import { initialSnapshot } from './state/liveCandles'
+import {
+  createLiveStore,
+  headerLiveSelector,
+  lastBarTimeOf,
+  lastCloseOf,
+  panelFeedsOf,
+  panelLive,
+  panelSelector,
+  rawCandles,
+  shallowEqual,
+  statusBarSelector,
+  useLiveSelector,
+  type HeaderLive,
+  type LiveState,
+  type LiveStore,
+  type PanelKey,
+  type PanelMarket,
+} from './state/liveStore'
 import { secondsSourceKind } from './state/timeframeSources'
-import type { UseLiveCandles } from './state/useLiveCandles'
 import { usePaperAccount } from './state/usePaperAccount'
 import { useReplay } from './state/useReplay'
 import { useSymbols } from './state/useSymbols'
@@ -280,61 +294,11 @@ function errorText(err: unknown, fallback: string): string {
   return err instanceof Error && err.message.trim() !== '' ? err.message : fallback
 }
 
-/** Live state of a panel that has not reported yet (or is not mounted). */
-const IDLE_LIVE: UseLiveCandles = { ...initialSnapshot, reload: () => {}, loadOlder: () => {} }
-
-/** Same keys, same values (Object.is): a panel's re-render without new live data. */
-function sameLive(a: UseLiveCandles, b: UseLiveCandles): boolean {
-  const keys = Object.keys(a) as (keyof UseLiveCandles)[]
-  return keys.length === Object.keys(b).length && keys.every((k) => Object.is(a[k], b[k]))
-}
-
-/** A panel's last live report and the market it belongs to. */
-interface PanelLive extends PanelMarket {
-  live: UseLiveCandles
-  /** When its latest price last changed (paper trading ticks and order times). */
-  stamp: PriceStamp | null
-}
-
-/**
- * The panel's live state, or IDLE_LIVE while the stored report is still the previous market's
- * (the render right after a symbol or timeframe change): those candles are another market's.
- */
-function panelLive(
-  lives: Readonly<Record<string, PanelLive>>,
-  panel: Pick<PanelState, 'id' | 'symbol' | 'interval'>,
-): UseLiveCandles {
-  const e = lives[panel.id]
-  return e !== undefined && e.symbol === panel.symbol && e.interval === panel.interval
-    ? e.live
-    : IDLE_LIVE
-}
-
 const NO_BARS: readonly Candle[] = []
 
 /** The bar replay session: the panel it runs on and the market it started on. */
 interface ReplaySession extends PanelMarket {
   panelId: string
-}
-
-/** Every loaded bar, traded or not (pagination cursor, history planning, the quote). */
-function rawCandles(live: UseLiveCandles): readonly Candle[] | null {
-  return live.load.kind === 'ready' ? live.load.candles : null
-}
-
-/**
- * The last traded price. The last candle may still be forming; it is a display/default value
- * only. A bar without trades carries the previous close, so the raw last close is it.
- */
-function lastCloseOf(live: UseLiveCandles): number | null {
-  const candles = rawCandles(live)
-  return candles !== null && candles.length > 0 ? candles[candles.length - 1].close : null
-}
-
-/** Open time of the last plotted bar. */
-function lastBarTimeOf(live: UseLiveCandles): number | null {
-  const bars = live.load.kind === 'ready' ? live.load.bars : null
-  return bars !== null && bars.length > 0 ? bars[bars.length - 1].time : null
 }
 
 /**
@@ -405,6 +369,168 @@ interface AlertDialogState {
   symbol: string
   initialPrice: number
   editing?: Alert
+}
+
+// ---- Shell parts that read the live store (a tick re-renders these, never App's root) ----
+
+type LiveHeaderProps = Omit<
+  ComponentProps<typeof Header>,
+  'quote' | 'quoteSlot' | keyof HeaderLive
+> & {
+  liveStore: LiveStore
+  /** The active panel: its live report feeds the quote, status dot and refresh button. */
+  panel: PanelKey
+  /** Replayed bars to quote instead of the live ones (replay on the active chart), or null. */
+  replayCandles: readonly Candle[] | null
+}
+
+/**
+ * The Header with the active chart's connection status and refresh state. The quote is a
+ * QuoteReadout leaf that reads the live store itself, so a forming-bar tick re-renders only
+ * that leaf: neither this nor the memoised Header renders until the status or refresh state
+ * changes (or the panel / replay bars do).
+ */
+const LiveHeader = memo(function LiveHeader({
+  liveStore,
+  panel,
+  replayCandles,
+  ...rest
+}: LiveHeaderProps) {
+  const selectLive = useMemo(() => headerLiveSelector(panel), [panel])
+  const headerLive = useLiveSelector(liveStore, selectLive, shallowEqual)
+  const quoteSlot = useMemo(
+    () => <QuoteReadout liveStore={liveStore} panel={panel} replayCandles={replayCandles} />,
+    [liveStore, panel, replayCandles],
+  )
+  return <Header {...rest} {...headerLive} quoteSlot={quoteSlot} />
+})
+
+/**
+ * The status bar for the active chart: bar count, status and errors. The "Last update" clock is
+ * a LastUpdateClock leaf that reads the live store itself, so a tick re-renders only that leaf
+ * (once per second at most); this renders once per bar or on a status / zone-name change.
+ */
+const LiveStatusBar = memo(function LiveStatusBar({
+  liveStore,
+  panel,
+  timezone,
+}: {
+  liveStore: LiveStore
+  panel: PanelKey
+  timezone: string
+}) {
+  const select = useMemo(
+    () => statusBarSelector(panel, () => timezoneLabel(timezone)),
+    [panel, timezone],
+  )
+  const { barCount, status, refreshError, timezoneName } = useLiveSelector(
+    liveStore,
+    select,
+    shallowEqual,
+  )
+  const lastUpdateSlot = useMemo(
+    () => (
+      <LastUpdateClock
+        liveStore={liveStore}
+        panel={panel}
+        timezone={timezone}
+        timezoneName={timezoneName}
+      />
+    ),
+    [liveStore, panel, timezone, timezoneName],
+  )
+  return (
+    <StatusBar
+      barCount={barCount}
+      status={status}
+      lastUpdateSlot={lastUpdateSlot}
+      timezoneName={timezoneName}
+      refreshError={refreshError}
+    />
+  )
+})
+
+type LivePaperPanelProps = Omit<
+  ComponentProps<typeof PaperTradingPanel>,
+  'price' | 'time' | 'marks' | 'offlineReason'
+> & {
+  liveStore: LiveStore
+  /** The active panel: the ticket's live price, order time and feed status. */
+  panel: PanelKey
+  /** Every chart on screen: marks for positions in other symbols. */
+  visible: readonly PanelKey[]
+  /** The replayed bar (replay account, `scope` 'replay'), else null. */
+  replayBar: Candle | null
+}
+
+/** The paper ticket with the active chart's live price, or the replayed bar's in replay. */
+function LivePaperPanel({
+  liveStore,
+  panel,
+  visible,
+  replayBar,
+  symbol,
+  scope,
+  ...rest
+}: LivePaperPanelProps) {
+  const replaying = scope === 'replay'
+  const selectActive = useMemo(
+    () =>
+      panelSelector(panel, (live, entry) => ({
+        lastClose: lastCloseOf(live),
+        stampAt: entry?.stamp?.at ?? null,
+        status: live.status,
+      })),
+    [panel],
+  )
+  const active = useLiveSelector(liveStore, selectActive, shallowEqual)
+  // Marks for positions in other symbols: their latest price on any live chart on screen.
+  const selectMarks = useCallback(
+    (s: LiveState) =>
+      replaying ? undefined : paperMarks(liveQuotesOf(panelFeedsOf(s, visible)), symbol),
+    [replaying, visible, symbol],
+  )
+  const marks = useLiveSelector(liveStore, selectMarks, sameMarks)
+  // Orders are stamped with the moment they are placed: the replayed bar's time (only later
+  // bars can fill them), or the wall-clock time the active chart's price last changed.
+  const price = replaying ? (replayBar?.close ?? null) : active.lastClose
+  const time = replaying ? (replayBar?.time ?? null) : active.stampAt
+  // A chart that is not live may show a stale price: no market orders at it, and no mark.
+  const offlineReason = !replaying && active.status !== 'live' ? LIVE_OFFLINE_MESSAGE : null
+  return (
+    <PaperTradingPanel
+      {...rest}
+      symbol={symbol}
+      scope={scope}
+      price={price}
+      time={time}
+      marks={marks}
+      offlineReason={offlineReason}
+    />
+  )
+}
+
+function sameMarks(
+  a: Record<string, number> | undefined,
+  b: Record<string, number> | undefined,
+): boolean {
+  return a === b || (a !== undefined && b !== undefined && shallowEqual(a, b))
+}
+
+type LiveAlertDialogProps = Omit<ComponentProps<typeof AlertDialog>, 'lastPrice'> & {
+  liveStore: LiveStore
+  /** The panel on the dialog's symbol (its last price is shown), or null. */
+  panel: PanelKey | null
+}
+
+/** The alert dialog with the last price of the chart on its symbol. */
+function LiveAlertDialog({ liveStore, panel, ...rest }: LiveAlertDialogProps) {
+  const select = useCallback(
+    (s: LiveState) => (panel === null ? null : lastCloseOf(panelLive(s, panel))),
+    [panel],
+  )
+  const lastPrice = useLiveSelector(liveStore, select)
+  return <AlertDialog {...rest} lastPrice={lastPrice} />
 }
 
 function App() {
@@ -519,44 +645,12 @@ function App() {
     else chartApisRef.current.set(panelId, api)
   }, [])
 
-  // Each panel owns its live data (ChartPanel calls useLiveCandles) and reports it here after
-  // every render; only a real change is stored, so a re-render cannot loop.
-  const [lives, setLives] = useState<Readonly<Record<string, PanelLive>>>({})
-  const livesRef = useRef(lives)
-  const onPanelLive = useCallback(
-    (panelId: string, live: UseLiveCandles | null, market?: PanelMarket) => {
-      const prev = livesRef.current
-      const cur = prev[panelId]
-      if (live === null || market === undefined) {
-        if (cur === undefined) return
-      } else if (
-        cur !== undefined &&
-        cur.symbol === market.symbol &&
-        cur.interval === market.interval &&
-        sameLive(cur.live, live)
-      ) {
-        return
-      }
-      const next = { ...prev }
-      if (live === null || market === undefined) delete next[panelId]
-      else {
-        // Stamped with the wall-clock time the last bar's close changed, never on a history
-        // load or refresh that leaves it as it was (see priceStamp).
-        const stamp = priceStamp(cur?.stamp ?? null, market.symbol, rawCandles(live), Date.now())
-        next[panelId] = { live, symbol: market.symbol, interval: market.interval, stamp }
-      }
-      livesRef.current = next
-      setLives(next)
-    },
-    [],
-  )
-  const liveOf = useCallback(
-    (panelId: string): UseLiveCandles => {
-      const p = layoutPanels.find((x) => x.id === panelId)
-      return p === undefined ? IDLE_LIVE : panelLive(lives, p)
-    },
-    [lives, layoutPanels],
-  )
+  // Each panel owns its live data (ChartPanel calls useLiveCandles) and reports it to this store
+  // whenever it changes. Not React state: a forming-bar tick re-renders only the components that
+  // select from the store (the header quote, the status bar, the paper ticket), never this root.
+  // Handlers read the latest reports at call time (getState).
+  const [liveStore] = useState(() => createLiveStore())
+  const onPanelLive = liveStore.report
 
   // Strategy Tester: dock layout, panel state (kept here so a run survives closing the dock).
   const [dock, setDock] = useState<DockPrefs>(loadDockPrefs)
@@ -668,9 +762,13 @@ function App() {
   const toggleDerivatives = useCallback(() => setDerivativesOn((on) => !on), [])
   const derivativesBlocked = derivativesVenueBlocked(venue)
 
-  // Memoised so React Compiler treats the result as immutable (it is never mutated).
-  const live = useMemo(() => panelLive(lives, activeP), [lives, activeP])
-  const { load } = live
+  // The active chart has more than one plotted bar (bar replay needs them): changes once per
+  // load, not per tick.
+  const selectActiveHasBars = useMemo(
+    () => panelSelector(activeP, (live) => live.load.kind === 'ready' && live.load.bars.length > 1),
+    [activeP],
+  )
+  const activeHasBars = useLiveSelector(liveStore, selectActiveHasBars)
   const symbolList = useSymbols(provider)
   const watchlist = useWatchlist()
   // One indicator list for every panel (v1): adding, editing or removing an indicator applies
@@ -715,8 +813,17 @@ function App() {
     replayCell.symbol === replaySession.symbol &&
     replayCell.interval === replaySession.interval
   const replayPanel = replayValid ? replayCell : activeP
-  const replayLive = useMemo(() => panelLive(lives, replayPanel), [lives, replayPanel])
-  const replaySource = replayLive.load.kind === 'ready' ? replayLive.load.bars : NO_BARS
+  // Only while a session exists: an idle replay ignores its bars, so the root does not follow
+  // the live bars (every tick) outside a replay.
+  const replayOn = replaySession !== null
+  const selectReplaySource = useMemo(
+    () =>
+      panelSelector(replayPanel, (live) =>
+        replayOn && live.load.kind === 'ready' ? live.load.bars : NO_BARS,
+      ),
+    [replayPanel, replayOn],
+  )
+  const replaySource = useLiveSelector(liveStore, selectReplaySource)
   // Called unconditionally; idle (off) until a session starts.
   const replay = useReplay(replaySource)
   const {
@@ -740,10 +847,9 @@ function App() {
    * replay): no backtest overlay, and the quote and paper trading follow the replay.
    */
   const replayShown = replayPanelId !== null && replay.visible !== null
-  const replayBlockedReason =
-    load.kind === 'ready' && load.bars.length > 1
-      ? null
-      : 'Bar replay needs the chart’s bars to load first'
+  const replayBlockedReason = activeHasBars
+    ? null
+    : 'Bar replay needs the chart’s bars to load first'
 
   const closeReplay = useCallback(() => {
     exitReplay()
@@ -766,17 +872,10 @@ function App() {
     [replayPickAt],
   )
 
-  // The active panel's bars: the quote, the status bar, and alerts at the last price.
-  const activeCandles = load.kind === 'ready' ? load.candles : null
-  // What the chart plots: bars without trades are left out, as on TradingView.
-  const bars = load.kind === 'ready' ? load.bars : null
-  const lastClose = lastCloseOf(live)
-  // In replay the header quote is the replayed bar's, never the hidden live price.
-  const quoteCandles = replayShown && replayPanelId === activeP.id ? replay.visible : activeCandles
-  const quote = useMemo(
-    () => (quoteCandles ? summarizeQuote(quoteCandles, interval) : null),
-    [quoteCandles, interval],
-  )
+  // The active panel's live bars feed the quote (LiveHeader) and the status bar (LiveStatusBar)
+  // from the live store. In replay the header quote is the replayed bar's, never the hidden live
+  // price.
+  const headerReplayCandles = replayShown && replayPanelId === activeP.id ? replay.visible : null
 
   // ---- Paper trading: a live account (saved) and a replay account (memory only) ----
   const paperLive = usePaperAccount('live')
@@ -786,26 +885,20 @@ function App() {
   // The latest price of every live chart on screen, stamped with the wall-clock time it last
   // changed (never a bar's open time: a limit only fills on a tick after it was placed).
   // Connecting, reconnecting and offline panels may show a stale price: they feed nothing.
-  const liveQuotes = useMemo<LiveQuote[]>(
-    () =>
-      liveQuotesOf(
-        visible.flatMap((p) => {
-          const e = lives[p.id]
-          return e !== undefined && e.symbol === p.symbol && e.interval === p.interval
-            ? [{ panelId: p.id, symbol: p.symbol, status: e.live.status, stamp: e.stamp }]
-            : []
-        }),
-      ),
-    [visible, lives],
-  )
   // Live ticks fill the live account's limits, on every chart on screen (replay or not: the
-  // live stream keeps running underneath a replay). Each tick is fed once.
+  // live stream keeps running underneath a replay). Each tick is fed once. Fed from a store
+  // subscription, so a tick never re-renders this root.
   const liveFeedRef = useRef<LiveFeedSeen>(new Map())
   useEffect(() => {
-    const { fresh, seen } = liveFeedUpdates(liveFeedRef.current, liveQuotes)
-    liveFeedRef.current = seen
-    for (const q of fresh) paperLiveTick(q.symbol, q.price, q.time)
-  }, [liveQuotes, paperLiveTick])
+    const feed = (): void => {
+      const quotes = liveQuotesOf(panelFeedsOf(liveStore.getState(), visible))
+      const { fresh, seen } = liveFeedUpdates(liveFeedRef.current, quotes)
+      liveFeedRef.current = seen
+      for (const q of fresh) paperLiveTick(q.symbol, q.price, q.time)
+    }
+    feed()
+    return liveStore.subscribe(feed)
+  }, [liveStore, visible, paperLiveTick])
   // Replay steps feed the replay account every revealed bar, oldest first (a 10-bar skip fills
   // limits like ten single steps); bars at or before its high-water mark were fed already and
   // are dropped. A new replay starts a fresh account whose high-water mark is the start bar.
@@ -822,23 +915,13 @@ function App() {
       for (const b of step.bars) paperReplayBar(replaySymbol, b)
     }
   }, [replayStatus, replayCursor, replayVisible, replaySymbol, paperReplayBar, paperReplayRestart])
-  const paperMarksForActive = useMemo(() => paperMarks(liveQuotes, symbol), [liveQuotes, symbol])
   // The paper panel stays on the replay account whenever the active chart shows replayed bars,
   // also while re-picking a start bar (then trading is paused: replayPaperPause).
   const activePaperReplay = replayShown && replayPanelId === activeP.id
   const replayBar = activePaperReplay ? (replay.visible?.at(-1) ?? null) : null
   const paperPaused = activePaperReplay ? replayPaperPause(replayStatus) : null
-  const paperPrice = activePaperReplay ? (replayBar?.close ?? null) : lastClose
-  // Orders are stamped with the moment they are placed: the replayed bar's time (only later
-  // bars can fill them), or the wall-clock time the active chart's price last changed.
-  const activeEntry = lives[activeP.id]
-  const activeStamp =
-    activeEntry !== undefined && activeEntry.symbol === symbol && activeEntry.interval === interval
-      ? activeEntry.stamp
-      : null
-  const paperTime = activePaperReplay ? (replayBar?.time ?? null) : (activeStamp?.at ?? null)
-  // A chart that is not live may show a stale price: no market orders at it, and no mark.
-  const paperOffline = !activePaperReplay && live.status !== 'live' ? LIVE_OFFLINE_MESSAGE : null
+  // The ticket's live price, order time, marks and offline state come from the live store
+  // (LivePaperPanel).
   // ---- Strategy Tester ↔ chart ----
 
   const report = tester.report
@@ -854,17 +937,37 @@ function App() {
   const btPanel = btIndex >= 0 ? layout.panels[btIndex] : activeP
   const btSymbol = btPanel.symbol
   const btInterval = btPanel.interval
-  const btLive = useMemo(() => panelLive(lives, btPanel), [lives, btPanel])
-  const candles = btLive.load.kind === 'ready' ? btLive.load.candles : null
+  const backtestDrawn = tester.shownOnChart && reportOnMarket
+  // The few primitives of the panel's live state the tester needs; they change on a history
+  // page, a status change or (bar count, only while a report is drawn) a new bar, never on a
+  // forming-bar tick.
+  const countBars = backtestDrawn && report !== null
+  const selectBt = useMemo(
+    () =>
+      panelSelector(btPanel, (live) => {
+        const raw = rawCandles(live)
+        const plotted = live.load.kind === 'ready' ? live.load.bars : null
+        return {
+          // Raw first bar: a page of bars without trades still moves the history back.
+          firstBarTime: raw !== null && raw.length > 0 ? raw[0].time : null,
+          // Live ticks replace the candles but rarely change their length; plans depend on the
+          // length only.
+          candleCount: countBars ? (raw?.length ?? null) : null,
+          plottedFirstTime: plotted !== null && plotted.length > 0 ? plotted[0].time : null,
+          loadOlder: live.loadOlder,
+          loadingOlder: live.loadingOlder,
+          retryBlocked: live.retryBlocked,
+          historyExhausted: live.historyExhausted,
+        }
+      }),
+    [btPanel, countBars],
+  )
+  const btLive = useLiveSelector(liveStore, selectBt, shallowEqual)
   const chartData = useMemo(
     () => (report ? buildChartData(report, { win: upColor, loss: downColor }) : null),
     [report, upColor, downColor],
   )
-  const backtestDrawn = tester.shownOnChart && reportOnMarket
-  // Raw first bar: a page of bars without trades still moves the history back.
-  const firstBarTime = candles !== null && candles.length > 0 ? candles[0].time : null
-  // Live ticks replace `candles` but rarely change its length; plans depend on the length only.
-  const candleCount = candles?.length ?? null
+  const { firstBarTime, candleCount, plottedFirstTime } = btLive
   const history = useMemo(
     () =>
       backtestDrawn && report && candleCount !== null
@@ -946,8 +1049,6 @@ function App() {
   )
   // The chart draws trade markers on plotted bars only, so the Strategy Tester counts and
   // links trades from the first PLOTTED bar (history planning above stays on raw bars).
-  const btBars = btLive.load.kind === 'ready' ? btLive.load.bars : null
-  const plottedFirstTime = btBars !== null && btBars.length > 0 ? btBars[0].time : null
   // Runs over every trade, so only when the report or the first plotted bar changes.
   const onChartCount = useMemo(
     () => (report && backtestDrawn ? tradesOnChart(report.trades, plottedFirstTime) : 0),
@@ -1424,7 +1525,7 @@ function App() {
         symbol: target.symbol,
         price,
         time,
-        lastCandleTime: lastBarTimeOf(liveOf(panelId)),
+        lastCandleTime: lastBarTimeOf(panelLive(liveStore.getState(), target)),
         style: drawingStyle,
         nowSeconds: Date.now() / 1000,
       })
@@ -1433,7 +1534,7 @@ function App() {
       if (isRejected(drawingsOf(target.symbol).add(drawing))) return
       setSelection({ panelId, id: drawing.id })
     },
-    [panelById, liveOf, drawingStyle, drawingsOf],
+    [panelById, liveStore, drawingStyle, drawingsOf],
   )
 
   // ---- Alerts ----
@@ -1450,9 +1551,11 @@ function App() {
     },
     [symbol],
   )
+  // The active chart's last price when called (header button, Alt+A, the alerts panel): read
+  // from the live store, so neither this callback nor the keyboard listener changes per tick.
   const openAlertAtLast = useCallback(
-    () => openAlertDialog(lastClose ?? Number.NaN),
-    [openAlertDialog, lastClose],
+    () => openAlertDialog(lastCloseOf(panelLive(liveStore.getState(), activeP)) ?? Number.NaN),
+    [openAlertDialog, liveStore, activeP],
   )
   const closeAlertDialog = useCallback(() => setAlertDialog(null), [])
 
@@ -1472,6 +1575,25 @@ function App() {
       else await alerts.create({ symbol: alertDialog.symbol, ...values })
     },
     [alertDialog, alerts],
+  )
+
+  const { update: updateAlert, remove: removeAlert, clearHistory: clearAlertHistory } = alerts
+  const editAlert = useCallback((a: Alert) => openAlertDialog(a.price, a), [openAlertDialog])
+  const toggleAlertActive = useCallback(
+    (a: Alert) =>
+      runAlertAction(
+        updateAlert(a.id, { active: !a.active }),
+        a.active ? 'Pausing the alert' : 'Resuming the alert',
+      ),
+    [runAlertAction, updateAlert],
+  )
+  const deleteAlert = useCallback(
+    (a: Alert) => runAlertAction(removeAlert(a.id), 'Deleting the alert'),
+    [runAlertAction, removeAlert],
+  )
+  const clearAlertLog = useCallback(
+    () => runAlertAction(clearAlertHistory(), 'Clearing the alert log'),
+    [runAlertAction, clearAlertHistory],
   )
 
   const requestPermission = useCallback(() => {
@@ -1609,8 +1731,8 @@ function App() {
   // The dialog's market may be on another panel than the active one (or on none).
   const alertPanel =
     alertDialog !== null ? pickPanel(layout, (p) => p.symbol === alertDialog.symbol) : -1
-  const alertDialogLastPrice =
-    alertPanel >= 0 ? lastCloseOf(liveOf(layout.panels[alertPanel].id)) : null
+  // Its last price comes from the live store (LiveAlertDialog).
+  const alertDialogPanel = alertPanel >= 0 ? layout.panels[alertPanel] : null
 
   // ---- Elements handed to the memoised ChartPanels: stable between ticks of other panels ----
   const historyChip = useMemo(
@@ -1710,6 +1832,29 @@ function App() {
       ) : undefined,
     [selectedDrawing, stylePanelSymbol, changeSelectedStyle, deleteDrawing],
   )
+  // ---- Shell props: stable, so the memoised Header, Watchlist and AlertsPanel skip renders ----
+  const openSearchBlank = useCallback(() => openSearch(), [openSearch])
+  const toggleWatchlistPanel = useCallback(
+    () => setPanel((p) => (p === 'watchlist' ? null : 'watchlist')),
+    [],
+  )
+  const layoutKind = layout.kind
+  const syncSymbol = layout.syncSymbol
+  const syncCrosshair = layout.syncCrosshair
+  const layoutControl = useMemo(
+    () => (
+      <LayoutMenu
+        kind={layoutKind}
+        onKindChange={changeLayout}
+        syncSymbol={syncSymbol}
+        onSyncSymbolChange={setSyncSymbol}
+        syncCrosshair={syncCrosshair}
+        onSyncCrosshairChange={setSyncCrosshair}
+      />
+    ),
+    [layoutKind, changeLayout, syncSymbol, setSyncSymbol, syncCrosshair, setSyncCrosshair],
+  )
+
   // Seconds charts need the venue (Binance 1s klines or none): until the server reports it,
   // they wait in a loading state instead of failing on a provider without seconds.
   const venuePending = venue === null && provider.getVenue !== undefined
@@ -1723,7 +1868,10 @@ function App() {
 
   return (
     <div ref={appRef} className={appClass} style={appStyle}>
-      <Header
+      <LiveHeader
+        liveStore={liveStore}
+        panel={activeP}
+        replayCandles={headerReplayCandles}
         symbol={symbol}
         description={description}
         interval={interval}
@@ -1732,7 +1880,7 @@ function App() {
         chartType={chartType}
         onChartTypeChange={changeChartType}
         onOpenIndicators={openIndicatorMenu}
-        onOpenSearch={() => openSearch()}
+        onOpenSearch={openSearchBlank}
         onOpenAlert={openAlertAtLast}
         alertDisabledReason={alertDisabledReason}
         replayOn={replaySession !== null}
@@ -1743,13 +1891,8 @@ function App() {
         derivativesOn={derivativesOn}
         onToggleDerivatives={toggleDerivatives}
         watchlistOpen={panel === 'watchlist'}
-        onToggleWatchlist={() => setPanel((p) => (p === 'watchlist' ? null : 'watchlist'))}
+        onToggleWatchlist={toggleWatchlistPanel}
         source={SOURCE}
-        quote={quote}
-        status={live.status}
-        loading={load.kind === 'loading' || live.refreshing}
-        onRefresh={live.reload}
-        refreshDisabled={live.retryBlocked}
         onOpenSeasonals={openSeasonals}
         onScreenshot={saveScreenshot}
         theme={theme}
@@ -1757,16 +1900,7 @@ function App() {
         onOpenShortcuts={openShortcuts}
         onOpenSettings={openSettingsDialog}
         isMac={IS_MAC}
-        layoutControl={
-          <LayoutMenu
-            kind={layout.kind}
-            onKindChange={changeLayout}
-            syncSymbol={layout.syncSymbol}
-            onSyncSymbolChange={setSyncSymbol}
-            syncCrosshair={layout.syncCrosshair}
-            onSyncCrosshairChange={setSyncCrosshair}
-          />
-        }
+        layoutControl={layoutControl}
       />
       <DrawingToolbar
         tool={tool}
@@ -1853,19 +1987,19 @@ function App() {
               onSelect={selectSymbol}
               onRemove={watchlist.remove}
               onMove={watchlist.move}
-              onAdd={() => openSearch()}
+              onAdd={openSearchBlank}
             />
           ) : panel === 'paper' ? (
-            <PaperTradingPanel
+            <LivePaperPanel
+              liveStore={liveStore}
+              panel={activeP}
+              visible={visible}
+              replayBar={replayBar}
               symbol={symbol}
-              price={paperPrice}
-              time={paperTime}
               scope={activePaperReplay ? 'replay' : 'live'}
               paper={activePaperReplay ? paperReplay : paperLive}
-              marks={activePaperReplay ? undefined : paperMarksForActive}
               pausedReason={paperPaused}
               quoteAsset={info?.quoteAsset ?? null}
-              offlineReason={paperOffline}
               formatPrice={formatSymbolPrice}
               onSelectSymbol={selectSymbol}
             />
@@ -1879,15 +2013,10 @@ function App() {
               onRequestPermission={requestPermission}
               onCreate={openAlertAtLast}
               onSelectSymbol={selectSymbol}
-              onEdit={(a) => openAlertDialog(a.price, a)}
-              onToggleActive={(a) =>
-                runAlertAction(
-                  alerts.update(a.id, { active: !a.active }),
-                  a.active ? 'Pausing the alert' : 'Resuming the alert',
-                )
-              }
-              onDelete={(a) => runAlertAction(alerts.remove(a.id), 'Deleting the alert')}
-              onClearLog={() => runAlertAction(alerts.clearHistory(), 'Clearing the alert log')}
+              onEdit={editAlert}
+              onToggleActive={toggleAlertActive}
+              onDelete={deleteAlert}
+              onClearLog={clearAlertLog}
               formatPrice={formatSymbolPrice}
             />
           )}
@@ -1947,13 +2076,7 @@ function App() {
         researchOpen={researchOpen}
         onToggleResearch={toggleResearch}
       />
-      <StatusBar
-        barCount={bars ? bars.length : null}
-        status={live.status}
-        lastUpdate={live.lastUpdate !== null ? formatClock(live.lastUpdate, timezone) : null}
-        timezoneName={timezoneLabel(timezone)}
-        refreshError={load.kind === 'ready' ? live.refreshError : null}
-      />
+      <LiveStatusBar liveStore={liveStore} panel={activeP} timezone={timezone} />
       {contextMenu !== null && contextPanel !== undefined && (
         <ChartContextMenu
           key={contextMenu.key}
@@ -1972,11 +2095,12 @@ function App() {
         />
       )}
       {alertDialog !== null && (
-        <AlertDialog
+        <LiveAlertDialog
           key={alertDialog.key}
+          liveStore={liveStore}
+          panel={alertDialogPanel}
           symbol={alertDialog.symbol}
           initialPrice={alertDialog.initialPrice}
-          lastPrice={alertDialogLastPrice}
           editing={alertDialog.editing}
           formatPrice={(price) => formatSymbolPrice(alertDialog.symbol, price)}
           onSubmit={submitAlert}

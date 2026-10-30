@@ -1,6 +1,7 @@
 // Which plotted bars the market-structure overlay (Phase 16) may use: only bars whose final
 // values are confirmed. Pure, so the wiring in ChartPanel is tested.
 
+import { knownSamePrefix as storeSamePrefix, samePrefixLength } from '../data/candleStore'
 import type { LiveCandlesSnapshot } from '../state/liveCandles'
 import type { Candle } from '../types'
 import type { SeriesSyncPlan } from './seriesSync'
@@ -59,14 +60,28 @@ export class BarLineage {
     this.same = same ?? 0
   }
 
-  /** Length of the common prefix of `a` and `b` by element identity. */
+  /**
+   * Length of the common prefix of `a` and `b` by element identity. The recorded step is
+   * answered as recorded; any other pair scans, starting after the prefix the candle store's
+   * lineage already vouches for (`data/candleStore` `samePrefixLength`), so a pair a few live
+   * ticks apart costs O(changed tail) and an unrelated pair O(n).
+   */
   samePrefixLength(a: readonly Candle[], b: readonly Candle[]): number {
     if (a === b) return a.length
     if (a === this.prev && b === this.next) return this.same
-    const n = Math.min(a.length, b.length)
-    let i = 0
-    while (i < n && a[i] === b[i]) i++
-    return i
+    return samePrefixLength(a, b)
+  }
+
+  /**
+   * What is known without reading any bar: a lower bound on the identity prefix of `older`
+   * and `newer` (the recorded step's own value, or the candle store's lineage when `newer`
+   * was derived from `older`), or null when nothing is known. For callers whose own scan is
+   * cheaper than an O(n) prefix scan (a fixed volume-profile range).
+   */
+  knownSamePrefix(older: readonly Candle[], newer: readonly Candle[]): number | null {
+    if (older === newer) return older.length
+    if (older === this.prev && newer === this.next) return this.same
+    return storeSamePrefix(older, newer)
   }
 }
 

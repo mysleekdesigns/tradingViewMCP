@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
+import { memo, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { CHART_TYPES, type ChartType } from '../types'
 
 const CHART_TYPE_LABELS: Record<ChartType, string> = {
@@ -15,7 +15,7 @@ interface ChartTypeMenuProps {
 }
 
 /** Button + listbox. Arrow keys move, Enter/Space picks, Esc or a click outside closes. */
-export function ChartTypeMenu({ value, onChange }: ChartTypeMenuProps) {
+export const ChartTypeMenu = memo(function ChartTypeMenu({ value, onChange }: ChartTypeMenuProps) {
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(() => CHART_TYPES.indexOf(value))
   const rootRef = useRef<HTMLDivElement>(null)
@@ -149,7 +149,7 @@ export function ChartTypeMenu({ value, onChange }: ChartTypeMenuProps) {
       )}
     </div>
   )
-}
+})
 
 function ChartTypeIcon({ type }: { type: ChartType }) {
   const common = { width: 18, height: 18, viewBox: '0 0 18 18', 'aria-hidden': true } as const

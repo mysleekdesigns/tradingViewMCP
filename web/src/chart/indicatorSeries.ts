@@ -418,7 +418,10 @@ interface Entry {
 }
 
 export interface IndicatorSnapshot {
-  /** Bumps whenever data, configs, or panes change (legend values). */
+  /**
+   * `getSnapshot`: bumps whenever data, configs, or panes change (legend values).
+   * `getLayoutSnapshot`: the same, except a live tick's tail update ('update' plan).
+   */
   version: number
   /** Bumps when indicator panes were added, removed, or rebuilt (legend positions). */
   paneVersion: number
@@ -456,7 +459,12 @@ function toHistogramData(points: readonly IndicatorPoint[], positive: string): H
  * Usage from Chart: `attach(chart)` after createChart, `sync(configs, appliedCandles)` when the
  * configs change, `applyPlan(plan, candles)` in the candles effect (same plan as the main
  * series), `detach()` before chart.remove(). It is also an external store for
- * `useSyncExternalStore` (`subscribe` / `getSnapshot`), so the legend re-renders on changes.
+ * `useSyncExternalStore`, in two grains:
+ * - `subscribe` / `getSnapshot`: every change, including a live tick's tail update. The legend
+ *   rows read this, so they always show the values of the bar just applied.
+ * - `subscribeLayout` / `getLayoutSnapshot`: everything except tail updates (configs, panes,
+ *   highlight, full data loads). The Chart component reads this, so a forming-bar tick does not
+ *   re-render the whole chart a second time.
  */
 export class IndicatorSeriesManager {
   private chart: IChartApi | null = null
@@ -466,9 +474,21 @@ export class IndicatorSeriesManager {
   private candles: readonly Candle[] | null = null
   private snapshot: IndicatorSnapshot = { version: 0, paneVersion: 0 }
   private readonly listeners = new Set<() => void>()
+  private layoutSnapshot: IndicatorSnapshot = { version: 0, paneVersion: 0 }
+  private readonly layoutListeners = new Set<() => void>()
+  /** Config uid of every built indicator series (kept in step with `slots`). */
+  private readonly uidBySeries = new Map<unknown, string>()
   private palette: IndicatorPalette = colors
   /** Indicator under the mouse (LWC hit testing): its lines draw one pixel wider. */
   private highlighted: string | null = null
+  private legendMemo: {
+    snapshot: IndicatorSnapshot
+    candles: readonly Candle[] | null
+    configs: readonly IndicatorConfig[]
+    hoveredTime: number | undefined
+    intervalSeconds: number | undefined
+    rows: IndicatorLegendRow[]
+  } | null = null
 
   constructor(defs: Defs = INDICATOR_BY_ID) {
     this.defs = defs
@@ -478,6 +498,8 @@ export class IndicatorSeriesManager {
     this.chart = chart
     this.highlighted = null
     this.entries.clear()
+    this.legendMemo = null
+    this.uidBySeries.clear()
     this.configs = []
     this.candles = null
     this.emit(true)
@@ -488,6 +510,8 @@ export class IndicatorSeriesManager {
     this.chart = null
     this.highlighted = null
     this.entries.clear()
+    this.legendMemo = null
+    this.uidBySeries.clear()
     this.configs = []
     this.candles = null
     this.emit(true)
@@ -507,6 +531,7 @@ export class IndicatorSeriesManager {
       const entry = this.entries.get(uid)
       if (entry) this.destroySeries(entry)
       this.entries.delete(uid)
+      this.legendMemo = null
       if (uid === this.highlighted && !byUid.has(uid)) this.highlighted = null
     }
     if (diff.rebuildPanes) {
@@ -623,15 +648,17 @@ export class IndicatorSeriesManager {
       }
     }
     this.candles = candles
-    if (plan.kind !== 'none') this.emit(false)
+    // A tail update changes legend values only: the layout snapshot (Chart) stays put.
+    if (plan.kind === 'update') this.emitValues()
+    else if (plan.kind !== 'none') this.emit(false)
   }
 
-  /** Config uid of the indicator that owns `series`, or null (main series, volume, other). */
+  /**
+   * Config uid of the indicator that owns `series`, or null (main series, volume, other).
+   * O(1): a map kept in step with the built series (crosshair moves call this).
+   */
   uidOfSeries(series: ISeriesApi<SeriesType>): string | null {
-    for (const [uid, entry] of this.entries) {
-      for (const slot of entry.slots) if ((slot.series as unknown) === series) return uid
-    }
-    return null
+    return this.uidBySeries.get(series) ?? null
   }
 
   /**
@@ -668,6 +695,34 @@ export class IndicatorSeriesManager {
    * `intervalSeconds` (the bar length) enables the session-alignment note.
    */
   legendRows(hoveredTime: number | undefined, intervalSeconds?: number): IndicatorLegendRow[] {
+    // The main legend and the pane legends both ask per render: build the rows once per state.
+    const memo = this.legendMemo
+    if (
+      memo !== null &&
+      memo.snapshot === this.snapshot &&
+      memo.candles === this.candles &&
+      memo.configs === this.configs &&
+      memo.hoveredTime === hoveredTime &&
+      memo.intervalSeconds === intervalSeconds
+    ) {
+      return memo.rows
+    }
+    const rows = this.buildLegendRows(hoveredTime, intervalSeconds)
+    this.legendMemo = {
+      snapshot: this.snapshot,
+      candles: this.candles,
+      configs: this.configs,
+      hoveredTime,
+      intervalSeconds,
+      rows,
+    }
+    return rows
+  }
+
+  private buildLegendRows(
+    hoveredTime: number | undefined,
+    intervalSeconds: number | undefined,
+  ): IndicatorLegendRow[] {
     const candles = this.candles ?? []
     const index = selectLegendIndex(candles, hoveredTime)
     const time = index >= 0 ? candles[index].time : undefined
@@ -702,11 +757,33 @@ export class IndicatorSeriesManager {
 
   getSnapshot = (): IndicatorSnapshot => this.snapshot
 
+  /** Like `subscribe`, but not notified on a live tick's tail update. */
+  subscribeLayout = (listener: () => void): (() => void) => {
+    this.layoutListeners.add(listener)
+    return () => {
+      this.layoutListeners.delete(listener)
+    }
+  }
+
+  /** Like `getSnapshot`, but unchanged by a live tick's tail update. */
+  getLayoutSnapshot = (): IndicatorSnapshot => this.layoutSnapshot
+
   private emit(paneChanged: boolean): void {
     this.snapshot = {
       version: this.snapshot.version + 1,
       paneVersion: this.snapshot.paneVersion + (paneChanged ? 1 : 0),
     }
+    this.layoutSnapshot = {
+      version: this.layoutSnapshot.version + 1,
+      paneVersion: this.layoutSnapshot.paneVersion + (paneChanged ? 1 : 0),
+    }
+    for (const listener of this.listeners) listener()
+    for (const listener of this.layoutListeners) listener()
+  }
+
+  /** Values changed (tail update): only the full-grain store moves. */
+  private emitValues(): void {
+    this.snapshot = { version: this.snapshot.version + 1, paneVersion: this.snapshot.paneVersion }
     for (const listener of this.listeners) listener()
   }
 
@@ -749,6 +826,7 @@ export class IndicatorSeriesManager {
         series.priceScale().applyOptions({ scaleMargins: indicatorPaneScaleMargins })
       }
       entry.slots.push({ line, series })
+      this.uidBySeries.set(series, config.uid)
     }
     entry.built = true
     const host = entry.slots[0]?.series
@@ -762,6 +840,7 @@ export class IndicatorSeriesManager {
   private destroySeries(entry: Entry): void {
     const chart = this.chart
     if (chart) for (const { series } of entry.slots) chart.removeSeries(series)
+    for (const { series } of entry.slots) this.uidBySeries.delete(series)
     entry.slots = []
     entry.built = false
     entry.guides = []

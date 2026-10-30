@@ -298,7 +298,18 @@ export interface CandleStreamOptions {
   seedRetryMs?: number
   /** Local clock, ms. Only used to reject a stale REST seed before the first heartbeat. */
   now?: () => number
+  /**
+   * Coalesce forming-bar updates within a bucket to at most one `onCandle` per this many ms
+   * (leading and trailing edge: an update after a quiet window goes out at once, a burst ends
+   * with its latest bar). The first forming bar of a bucket, every closed bar and every status
+   * change are never held: a pending forming bar is flushed first, so order is kept. 0 (the
+   * default) sends every update at once; the provider passes DEFAULT_FORMING_FLUSH_MS.
+   */
+  formingFlushMs?: number
 }
+
+/** Forming-bar coalescing window used by the Coinbase provider (per-trade bars are 10-50 Hz). */
+export const DEFAULT_FORMING_FLUSH_MS = 100
 
 /**
  * Shared start-up for both streams: resolve what to subscribe to (product ids need the
@@ -443,6 +454,7 @@ export function openCoinbaseCandleStream(opts: CandleStreamOptions): () => void 
   const reconcileTimeoutMs = opts.reconcileTimeoutMs ?? DEFAULT_RECONCILE_TIMEOUT_MS
   const reconcileRetryMs = opts.reconcileRetryMs ?? DEFAULT_RECONCILE_RETRY_MS
   const seedRetryMs = opts.seedRetryMs ?? DEFAULT_SEED_RETRY_MS
+  const formingFlushMs = Math.max(0, opts.formingFlushMs ?? 0)
   const abort = new AbortController()
   const { bucketStart } = opts
   const now = opts.now ?? (() => Date.now())
@@ -483,6 +495,10 @@ export function openCoinbaseCandleStream(opts: CandleStreamOptions): () => void 
   let socketStatus: ConnectionStatus | null = null
   let emitStatus: (s: ConnectionStatus) => void = () => {}
   let stopAll: () => void = () => {}
+  /** Latest forming bar held back by the coalescing window (always of the newest bucket). */
+  let pendingForming: Candle | null = null
+  /** Open coalescing window: forming updates until it ends are held in `pendingForming`. */
+  let formingTimer: ReturnType<typeof setTimeout> | undefined
 
   const later = (fn: () => void, ms: number): void => {
     const timer = setTimeout(() => {
@@ -502,10 +518,45 @@ export function openCoinbaseCandleStream(opts: CandleStreamOptions): () => void 
     }
   }
 
-  const emitCandle = (c: Candle, closed: boolean, provisional = false): void => {
+  const sendCandle = (c: Candle, closed: boolean, provisional: boolean): void => {
     if (disposed || c.time < lastEmittedTime) return
     lastEmittedTime = c.time
     deliver(c, closed, provisional)
+  }
+
+  /** Coalescing window: at its end the held bar (if any) goes out and a new window opens. */
+  const openFormingWindow = (): void => {
+    if (formingTimer !== undefined) clearTimeout(formingTimer)
+    formingTimer = setTimeout(() => {
+      formingTimer = undefined
+      if (disposed || pendingForming === null) return
+      const c = pendingForming
+      pendingForming = null
+      sendCandle(c, false, false)
+      openFormingWindow()
+    }, formingFlushMs)
+  }
+
+  /**
+   * Send the held forming bar now (before a closed bar or a status change). The window restarts
+   * from this emit, so forming updates stay at least `formingFlushMs` apart.
+   */
+  const flushForming = (): void => {
+    const c = pendingForming
+    if (c === null) return
+    pendingForming = null
+    sendCandle(c, false, false)
+    if (!disposed) openFormingWindow()
+  }
+
+  /**
+   * A closed bar goes out at once, after any held forming bar (so the consumer sees the same
+   * sequence as without coalescing, minus superseded forming updates).
+   */
+  const emitCandle = (c: Candle, closed: boolean, provisional = false): void => {
+    if (disposed) return
+    if (closed) flushForming()
+    sendCandle(c, closed, provisional)
   }
 
   /**
@@ -514,14 +565,36 @@ export function openCoinbaseCandleStream(opts: CandleStreamOptions): () => void 
    */
   const emitSettled = (c: Candle): void => {
     if (disposed) return
+    flushForming()
     if (c.time >= lastEmittedTime) emitCandle(c, true)
     else deliver(c, true, false)
+  }
+
+  /**
+   * A forming update. Without coalescing it goes out at once. With it: the first bar of a new
+   * bucket, or any update outside a window, goes out at once and opens a window; updates inside
+   * the window replace the held bar, which goes out when the window ends (or before the next
+   * closed bar / status change).
+   */
+  const sendForming = (c: Candle): void => {
+    if (formingFlushMs === 0) {
+      sendCandle(c, false, false)
+      return
+    }
+    if (formingTimer === undefined || c.time > lastEmittedTime) {
+      flushForming()
+      sendCandle(c, false, false)
+      openFormingWindow()
+      return
+    }
+    pendingForming = c
   }
 
   const emitForming = (): void => {
     if (seeding || reconciling || closeQueue.length > 0 || forming === null) return
     if (forming.time === unseededBucket) return
-    emitCandle(forming, false)
+    if (disposed || forming.time < lastEmittedTime) return
+    sendForming(forming)
   }
 
   const sleep = (ms: number): Promise<void> =>
@@ -870,13 +943,24 @@ export function openCoinbaseCandleStream(opts: CandleStreamOptions): () => void 
     }
   }
 
+  const onStatus = opts.onStatus
   stopAll = startStream({
     what: 'subscribeCandles',
     abort,
-    onStatus: opts.onStatus,
+    // A status change never overtakes a held forming bar.
+    onStatus:
+      onStatus === undefined
+        ? undefined
+        : (st) => {
+            flushForming()
+            onStatus(st)
+          },
     resolve: opts.resolveProduct,
     onDispose: () => {
       disposed = true
+      if (formingTimer !== undefined) clearTimeout(formingTimer)
+      formingTimer = undefined
+      pendingForming = null
       if (delayTimer !== undefined) clearTimeout(delayTimer)
       delayTimer = undefined
       for (const timer of timers) clearTimeout(timer)

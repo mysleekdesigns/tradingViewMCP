@@ -2,7 +2,7 @@
 // and custom timeframes are aggregated from the finest native source that tiles them
 // (`baseFor`): Binance `1s` klines for seconds, a native Interval for the rest.
 import type { Candle, Interval, Timeframe } from '../types'
-import { aggregateBucket, aggregateCandles } from './aggregate'
+import { RunningBucket, aggregateCandles } from './aggregate'
 import { MarketDataError, type MarketDataProvider, type SubscribeOptions } from './provider'
 import {
   baseFor,
@@ -338,8 +338,8 @@ function holdSeconds(err: unknown): number {
   return err.kind === 'banned' ? SEED_BAN_WAIT_S : SEED_RATE_LIMIT_WAIT_S
 }
 
+/** Flags of one base bar of a bucket (its values live in BucketState.ohlcv). */
 interface BaseBar {
-  candle: Candle
   closed: boolean
   /** Closed, but the base source will send it closed once more (it may still change). */
   provisional: boolean
@@ -348,6 +348,8 @@ interface BaseBar {
 interface BucketState {
   start: number
   bars: Map<number, BaseBar>
+  /** Running OHLCV of the same base bars as `bars` (set together, never one without the other). */
+  ohlcv: RunningBucket
   /** `bars` holds every base bar since `start` (streamed from it or seeded) with no drop since. */
   complete: boolean
   /** In-flight REST seed. */
@@ -376,6 +378,17 @@ function sameCandle(a: Candle, b: Candle): boolean {
     a.close === b.close &&
     a.volume === b.volume
   )
+}
+
+/** Record base bar `c` of `st` (replacing an earlier send of the same time). */
+function setBar(st: BucketState, c: Candle, closed: boolean, provisional: boolean): void {
+  const b = st.bars.get(c.time)
+  if (b === undefined) st.bars.set(c.time, { closed, provisional })
+  else {
+    b.closed = closed
+    b.provisional = provisional
+  }
+  st.ohlcv.set(c)
 }
 
 function subscribeAggregated(
@@ -416,10 +429,7 @@ function subscribeAggregated(
 
   const emit = (st: BucketState): void => {
     if (disposed || st.done || !ready(st)) return
-    const candle = aggregateBucket(
-      st.start,
-      [...st.bars.values()].map((b) => b.candle),
-    )
+    const candle = st.ohlcv.value(st.start)
     if (candle === null) return
     const closed = st.superseded || lastBarClosed(st)
     // Closed on a base bar that is not settled yet: closed and provisional, and not done
@@ -494,7 +504,7 @@ function subscribeAggregated(
           // A closed live bar is final; otherwise REST is at least as authoritative.
           // A provisional close is left for the base source's settling send.
           if (st.bars.get(r.time)?.closed === true) continue
-          st.bars.set(r.time, { candle: r, closed: r.time < newestRest, provisional: false })
+          setBar(st, r, r.time < newestRest, false)
         }
         st.complete = true
         emit(st)
@@ -569,6 +579,7 @@ function subscribeAggregated(
       st = {
         start,
         bars: new Map(),
+        ohlcv: new RunningBucket(),
         // Streaming without a gap since before this bucket opened: we see all of it.
         complete: synced,
         seeding: null,
@@ -581,7 +592,7 @@ function subscribeAggregated(
       buckets.set(start, st)
     }
     if (st.done) return
-    st.bars.set(c.time, { candle: c, closed, provisional: closed && provisional })
+    setBar(st, c, closed, closed && provisional)
     if (!synced) {
       synced = true
       // Base updates are cumulative, so a bucket entered at its first base bar is complete;

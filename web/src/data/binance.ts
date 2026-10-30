@@ -11,7 +11,12 @@ import {
   parseSymbolInfo,
   parseTicker24hr,
 } from './binanceTicker'
-import { MarketDataError, type MarketDataProvider, type SubscribeOptions } from './provider'
+import {
+  MarketDataError,
+  type MarketDataProvider,
+  type SubscribeOptions,
+  type TickerSubscribeOptions,
+} from './provider'
 import type { SecondsSource } from './timeframeProvider'
 import { BINANCE_REST, BINANCE_WS, DIRECT_VENUE, type VenueInfo } from './venue'
 
@@ -424,15 +429,23 @@ export class BinanceProvider implements MarketDataProvider {
     return out
   }
 
-  subscribeTickers(onTickers: (tickers: Ticker[]) => void, opts?: SubscribeOptions): () => void {
+  /**
+   * One `!miniTicker@arr` socket. With `opts.symbols`, each push keeps only the symbols in the
+   * set read at that push (checked on the raw `s` before any Ticker is built).
+   */
+  subscribeTickers(
+    onTickers: (tickers: Ticker[]) => void,
+    opts?: TickerSubscribeOptions,
+  ): () => void {
     const WS = this.resolveWebSocket('subscribeTickers')
+    const watched = opts?.symbols
     return openReconnectingSocket({
       WebSocketImpl: WS,
       url: `${this.wsBaseUrl}/ws/${MINI_TICKER_STREAM}`,
       staleTimeoutMs: this.staleTimeoutMs,
       onStatus: opts?.onStatus,
       onMessage: (data) => {
-        const tickers = parseMiniTickerMessage(data)
+        const tickers = parseMiniTickerMessage(data, watched?.())
         if (tickers.length === 0) return
         try {
           onTickers(tickers)

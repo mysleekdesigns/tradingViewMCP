@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { CandleSource } from '../data/timeframeProvider'
 import type { Timeframe } from '../types'
 import { initialSnapshot, LiveCandlesController, type LiveCandlesSnapshot } from './liveCandles'
@@ -44,6 +44,9 @@ function sameParams(a: Params, b: Params): boolean {
  * source stops the old controller (closing its socket and aborting its requests) and starts
  * a new one. StrictMode's double effect run creates and stops one extra controller; a
  * stopped controller never emits, so its snapshots cannot leak into state.
+ *
+ * The returned object is stable: the same object while the snapshot and the controller are
+ * unchanged, so consumers can compare it by identity (ChartPanel reports it up only on change).
  */
 export function useLiveCandles(
   /** A MarketDataProvider (native Intervals) or a TimeframeProvider (any Timeframe). */
@@ -78,5 +81,6 @@ export function useLiveCandles(
     (beyondLimit?: boolean) => controller?.loadOlder(beyondLimit === true),
     [controller],
   )
-  return { ...(current?.snapshot ?? initialSnapshot), reload, loadOlder }
+  const snapshot = current?.snapshot ?? initialSnapshot
+  return useMemo(() => ({ ...snapshot, reload, loadOlder }), [snapshot, reload, loadOlder])
 }

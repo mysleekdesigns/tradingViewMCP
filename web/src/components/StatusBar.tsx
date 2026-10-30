@@ -1,22 +1,30 @@
+import { memo, type ReactNode } from 'react'
 import type { ConnectionStatus } from '../types'
 import { ConnectionIndicator } from './ConnectionStatus'
+import { LastUpdateText } from './LastUpdateClock'
 
 interface StatusBarProps {
   barCount: number | null
   /** Live-stream state. */
   status: ConnectionStatus
   /** "14:08:31" (in `timezoneName`) of the last REST result or live tick, or null before any data. */
-  lastUpdate: string | null
+  lastUpdate?: string | null
+  /**
+   * The clock element in its place (e.g. a LastUpdateClock that reads the live store itself, so
+   * a tick re-renders only that leaf). Pass a stable element; it wins over `lastUpdate`.
+   */
+  lastUpdateSlot?: ReactNode
   /** Short name of the display time zone (Settings), e.g. "UTC" or "EDT". */
   timezoneName: string
   /** Why the last refresh failed, while the previous candles are still shown. */
   refreshError: string | null
 }
 
-export function StatusBar({
+export const StatusBar = memo(function StatusBar({
   barCount,
   status,
   lastUpdate,
+  lastUpdateSlot,
   timezoneName,
   refreshError,
 }: StatusBarProps) {
@@ -34,13 +42,12 @@ export function StatusBar({
       <span className="statusbar__item statusbar__item--error" role="status">
         {refreshError !== null ? `Refresh failed: ${refreshError}` : ''}
       </span>
-      {/* Not a live region: it changes on every tick. */}
-      {lastUpdate !== null && (
-        <span className="statusbar__item statusbar__clock" title="Time of the last price update">
-          Last update {lastUpdate} {timezoneName}
-        </span>
+      {lastUpdateSlot !== undefined ? (
+        lastUpdateSlot
+      ) : (
+        <LastUpdateText lastUpdate={lastUpdate ?? null} timezoneName={timezoneName} />
       )}
       <ConnectionIndicator status={status} variant="full" />
     </footer>
   )
-}
+})

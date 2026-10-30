@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
+import { memo, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { LAYOUT_KINDS, type LayoutKind } from '../state/layout'
 import './Layout.css'
 
@@ -24,7 +24,7 @@ interface LayoutMenuProps {
 }
 
 /** Toolbar button + menu: layout tiles (1 / 2 / 2×2) and the symbol / crosshair sync toggles. */
-export function LayoutMenu({
+export const LayoutMenu = memo(function LayoutMenu({
   kind,
   onKindChange,
   syncSymbol,
@@ -175,7 +175,7 @@ export function LayoutMenu({
       )}
     </div>
   )
-}
+})
 
 interface SyncToggleProps {
   label: string

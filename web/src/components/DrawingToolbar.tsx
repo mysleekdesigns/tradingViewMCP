@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
+import { memo, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import type { ToolMode } from '../chart/drawings/types'
 import { DRAWING_TOOLS, clearAllPrompt, nextTool, toolTitle } from './drawingTools'
 import './Drawings.css'
@@ -16,7 +16,7 @@ export interface DrawingToolbarProps {
  * with an inline confirm. Shortcuts are shown in the tooltips; the parent handles the keys
  * (see `shortcutCommand` in drawingTools.ts).
  */
-export function DrawingToolbar({
+export const DrawingToolbar = memo(function DrawingToolbar({
   tool,
   onToolChange,
   symbol,
@@ -135,7 +135,7 @@ export function DrawingToolbar({
       </div>
     </nav>
   )
-}
+})
 
 const ICON = {
   width: 22,

@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { memo, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { Alert, AlertEvent, AlertsStatus, NotifyPermission } from '../data/alertTypes'
 import {
   ALERT_STATE_LABELS,
@@ -45,7 +45,7 @@ function useNowSeconds(periodMs: number): number {
  * Sidebar panel: the user's price alerts (Active, then Stopped) and the log of triggered
  * alerts. Alerts are evaluated on the local server; without it the panel explains how to start it.
  */
-export function AlertsPanel({
+export const AlertsPanel = memo(function AlertsPanel({
   alerts,
   events,
   status,
@@ -224,7 +224,7 @@ export function AlertsPanel({
       )}
     </section>
   )
-}
+})
 
 interface AlertGroupProps {
   title: string

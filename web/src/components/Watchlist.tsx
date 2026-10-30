@@ -1,4 +1,15 @@
-import { useEffect, useId, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent,
+  type KeyboardEvent,
+} from 'react'
 import type { MarketDataProvider } from '../data/provider'
 import {
   formatTickerChange,
@@ -34,7 +45,7 @@ interface DropTarget {
  * Right-hand watchlist: live last price and 24h change for each saved symbol. Click or Enter
  * loads a symbol; drag rows (or Alt+Arrow) to reorder; Delete or the × button removes.
  */
-export function Watchlist({
+export const Watchlist = memo(function Watchlist({
   provider,
   items,
   activeSymbol,
@@ -62,76 +73,104 @@ export function Watchlist({
   const activeIndex = items.indexOf(activeSymbol)
   const tabStop = activeIndex >= 0 ? activeIndex : 0
 
-  const focusRow = (index: number) => {
-    const symbol = items[Math.min(Math.max(index, 0), items.length - 1)]
-    if (symbol !== undefined) rowRefs.current.get(symbol)?.focus()
-  }
+  // Row handlers are created once and read the latest render's values from this ref, so a
+  // memoised row re-renders only when its own data changes (not on every ticker emit or parent
+  // render). Updated after each commit, which is when the handlers of that render would have
+  // been attached before.
+  const latest = useRef({ items, dragFrom, drop, onSelect, onRemove, onMove })
+  useLayoutEffect(() => {
+    latest.current = { items, dragFrom, drop, onSelect, onRemove, onMove }
+  })
 
-  const remove = (index: number, refocus: boolean) => {
-    const symbol = items[index]
-    if (symbol === undefined) return
-    if (refocus) pendingFocus.current = items[index + 1] ?? items[index - 1] ?? null
-    onRemove(symbol)
-  }
-
-  const onRowKeyDown = (e: KeyboardEvent<HTMLDivElement>, index: number) => {
-    const symbol = items[index]
-    switch (e.key) {
-      case 'Enter':
-      case ' ':
-        e.preventDefault()
-        onSelect(symbol)
-        break
-      case 'ArrowUp':
-      case 'ArrowDown': {
-        e.preventDefault()
-        const step = e.key === 'ArrowUp' ? -1 : 1
-        if (e.altKey) {
-          const to = index + step
-          if (to < 0 || to >= items.length) return
-          pendingFocus.current = symbol
-          onMove(index, to)
-        } else focusRow(index + step)
-        break
-      }
-      case 'Home':
-        e.preventDefault()
-        focusRow(0)
-        break
-      case 'End':
-        e.preventDefault()
-        focusRow(items.length - 1)
-        break
-      case 'Delete':
-      case 'Backspace':
-        e.preventDefault()
-        remove(index, true)
-        break
+  const handlers = useMemo<RowHandlers>(() => {
+    const focusRow = (index: number) => {
+      const { items } = latest.current
+      const symbol = items[Math.min(Math.max(index, 0), items.length - 1)]
+      if (symbol !== undefined) rowRefs.current.get(symbol)?.focus()
     }
-  }
 
-  const endDrag = () => {
-    setDragFrom(null)
-    setDrop(null)
-  }
+    const remove = (index: number, refocus: boolean) => {
+      const { items, onRemove } = latest.current
+      const symbol = items[index]
+      if (symbol === undefined) return
+      if (refocus) pendingFocus.current = items[index + 1] ?? items[index - 1] ?? null
+      onRemove(symbol)
+    }
 
-  const onDragOver = (e: DragEvent<HTMLLIElement>, index: number) => {
-    if (dragFrom === null) return // not one of our rows
-    e.preventDefault()
-    e.dataTransfer.dropEffect = 'move'
-    const rect = e.currentTarget.getBoundingClientRect()
-    const after = e.clientY > rect.top + rect.height / 2
-    if (drop?.index !== index || drop.after !== after) setDrop({ index, after })
-  }
+    const endDrag = () => {
+      setDragFrom(null)
+      setDrop(null)
+    }
 
-  const onDrop = (e: DragEvent<HTMLLIElement>) => {
-    if (dragFrom === null || drop === null) return endDrag()
-    e.preventDefault()
-    const insertAt = drop.index + (drop.after ? 1 : 0)
-    const to = insertAt > dragFrom ? insertAt - 1 : insertAt
-    if (to !== dragFrom) onMove(dragFrom, to)
-    endDrag()
-  }
+    return {
+      rowRef: (symbol, el) => {
+        if (el === null) rowRefs.current.delete(symbol)
+        else rowRefs.current.set(symbol, el)
+      },
+      select: (symbol) => latest.current.onSelect(symbol),
+      remove: (index) => remove(index, false),
+      keyDown: (e, index) => {
+        const { items, onSelect, onMove } = latest.current
+        const symbol = items[index]
+        switch (e.key) {
+          case 'Enter':
+          case ' ':
+            e.preventDefault()
+            onSelect(symbol)
+            break
+          case 'ArrowUp':
+          case 'ArrowDown': {
+            e.preventDefault()
+            const step = e.key === 'ArrowUp' ? -1 : 1
+            if (e.altKey) {
+              const to = index + step
+              if (to < 0 || to >= items.length) return
+              pendingFocus.current = symbol
+              onMove(index, to)
+            } else focusRow(index + step)
+            break
+          }
+          case 'Home':
+            e.preventDefault()
+            focusRow(0)
+            break
+          case 'End':
+            e.preventDefault()
+            focusRow(items.length - 1)
+            break
+          case 'Delete':
+          case 'Backspace':
+            e.preventDefault()
+            remove(index, true)
+            break
+        }
+      },
+      dragStart: (e, symbol, index) => {
+        e.dataTransfer.effectAllowed = 'move'
+        e.dataTransfer.setData('text/plain', symbol)
+        setDragFrom(index)
+      },
+      dragOver: (e, index) => {
+        const { dragFrom, drop } = latest.current
+        if (dragFrom === null) return // not one of our rows
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'move'
+        const rect = e.currentTarget.getBoundingClientRect()
+        const after = e.clientY > rect.top + rect.height / 2
+        if (drop?.index !== index || drop.after !== after) setDrop({ index, after })
+      },
+      drop: (e) => {
+        const { dragFrom, drop, onMove } = latest.current
+        if (dragFrom === null || drop === null) return endDrag()
+        e.preventDefault()
+        const insertAt = drop.index + (drop.after ? 1 : 0)
+        const to = insertAt > dragFrom ? insertAt - 1 : insertAt
+        if (to !== dragFrom) onMove(dragFrom, to)
+        endDrag()
+      },
+      dragEnd: endDrag,
+    }
+  }, [])
 
   return (
     <section className="watchlist" aria-label="Watchlist">
@@ -188,21 +227,8 @@ export function Watchlist({
                 tabbable={index === tabStop}
                 dragging={dragFrom === index}
                 dropEdge={drop?.index === index ? (drop.after ? 'after' : 'before') : null}
-                rowRef={(el) => {
-                  if (el === null) rowRefs.current.delete(symbol)
-                  else rowRefs.current.set(symbol, el)
-                }}
-                onSelect={() => onSelect(symbol)}
-                onRemove={() => remove(index, false)}
-                onKeyDown={(e) => onRowKeyDown(e, index)}
-                onDragStart={(e) => {
-                  e.dataTransfer.effectAllowed = 'move'
-                  e.dataTransfer.setData('text/plain', symbol)
-                  setDragFrom(index)
-                }}
-                onDragOver={(e) => onDragOver(e, index)}
-                onDrop={onDrop}
-                onDragEnd={endDrag}
+                index={index}
+                handlers={handlers}
               />
             ))}
           </ul>
@@ -214,10 +240,27 @@ export function Watchlist({
       )}
     </section>
   )
+})
+
+/**
+ * Row callbacks shared by every row and stable for the Watchlist's lifetime; each takes the
+ * row's symbol or index, so no per-row closures are created on a render.
+ */
+interface RowHandlers {
+  rowRef(symbol: string, el: HTMLDivElement | null): void
+  select(symbol: string): void
+  remove(index: number): void
+  keyDown(e: KeyboardEvent<HTMLDivElement>, index: number): void
+  dragStart(e: DragEvent<HTMLLIElement>, symbol: string, index: number): void
+  dragOver(e: DragEvent<HTMLLIElement>, index: number): void
+  drop(e: DragEvent<HTMLLIElement>): void
+  dragEnd(): void
 }
 
 interface RowProps {
   symbol: string
+  /** Position in the list; the handlers take it (reorder and keyboard moves). */
+  index: number
   info: SymbolInfo | undefined
   /** The exchange's symbol list is loaded and this symbol is not on it. */
   unknown: boolean
@@ -227,18 +270,13 @@ interface RowProps {
   tabbable: boolean
   dragging: boolean
   dropEdge: 'before' | 'after' | null
-  rowRef: (el: HTMLDivElement | null) => void
-  onSelect: () => void
-  onRemove: () => void
-  onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => void
-  onDragStart: (e: DragEvent<HTMLLIElement>) => void
-  onDragOver: (e: DragEvent<HTMLLIElement>) => void
-  onDrop: (e: DragEvent<HTMLLIElement>) => void
-  onDragEnd: () => void
+  handlers: RowHandlers
 }
 
-function WatchlistRow({
+/** Memoised: re-renders only when this row's ticker, flash, position or state changes. */
+const WatchlistRow = memo(function WatchlistRow({
   symbol,
+  index,
   info,
   unknown,
   ticker,
@@ -247,15 +285,12 @@ function WatchlistRow({
   tabbable,
   dragging,
   dropEdge,
-  rowRef,
-  onSelect,
-  onRemove,
-  onKeyDown,
-  onDragStart,
-  onDragOver,
-  onDrop,
-  onDragEnd,
+  handlers,
 }: RowProps) {
+  const rowRef = useCallback(
+    (el: HTMLDivElement | null) => handlers.rowRef(symbol, el),
+    [handlers, symbol],
+  )
   const tick = info?.tickSize
   const direction = ticker === undefined ? 'flat' : tickerDirection(ticker.changePct)
   const base = info?.baseAsset ?? symbol
@@ -281,10 +316,10 @@ function WatchlistRow({
     <li
       className={className}
       draggable
-      onDragStart={onDragStart}
-      onDragOver={onDragOver}
-      onDrop={onDrop}
-      onDragEnd={onDragEnd}
+      onDragStart={(e) => handlers.dragStart(e, symbol, index)}
+      onDragOver={(e) => handlers.dragOver(e, index)}
+      onDrop={handlers.drop}
+      onDragEnd={handlers.dragEnd}
     >
       <div
         ref={rowRef}
@@ -295,8 +330,8 @@ function WatchlistRow({
         aria-label={label}
         aria-keyshortcuts="Enter Alt+ArrowUp Alt+ArrowDown Delete"
         title={unknown ? `${symbol} is not listed on this exchange` : undefined}
-        onClick={onSelect}
-        onKeyDown={onKeyDown}
+        onClick={() => handlers.select(symbol)}
+        onKeyDown={(e) => handlers.keyDown(e, index)}
       >
         <span className="watchlist__symbol">
           <span className="watchlist__base">{base}</span>
@@ -325,14 +360,14 @@ function WatchlistRow({
         title="Remove from watchlist"
         onClick={(e) => {
           e.stopPropagation()
-          onRemove()
+          handlers.remove(index)
         }}
       >
         <CloseIcon />
       </button>
     </li>
   )
-}
+})
 
 function Dash() {
   return <span className="watchlist__dash">—</span>

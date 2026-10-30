@@ -37,6 +37,7 @@ import {
   alignedSessions,
   sessionParams,
   sessionParamsKey,
+  type SessionRangesParams,
 } from '../indicators/sessionRanges'
 import type {
   IndicatorDef,
@@ -489,6 +490,12 @@ interface Entry {
   primitive: SessionRangesPrimitive
   engine: SessionRangesEngine | null
   paramsKey: string
+  /**
+   * Params, their key and the drawn sessions derived from `inputs` and `intervalSeconds`
+   * (re-derived only when the config's inputs object or the interval changes, not per tick;
+   * IndicatorInputs are immutable, replaced on edit).
+   */
+  derived: DerivedInputs | null
   /** The bars array the engine was last brought up to date with (its first `count` were pushed). */
   synced: readonly Candle[] | null
   boxes: readonly SessionBox[]
@@ -500,6 +507,34 @@ interface Entry {
 }
 
 const NO_BOXES: readonly SessionBox[] = Object.freeze([])
+
+interface DerivedInputs {
+  inputs: IndicatorInputs
+  intervalSeconds: number
+  params: SessionRangesParams
+  key: string
+  show: SessionShow
+}
+
+/** `entry`'s params/key/drawn sessions, derived once per inputs object and interval. */
+function derivedInputs(
+  entry: Entry,
+  inputs: IndicatorInputs,
+  intervalSeconds: number,
+): DerivedInputs {
+  const d = entry.derived
+  if (d !== null && d.inputs === inputs && d.intervalSeconds === intervalSeconds) return d
+  const params = sessionParams(inputs)
+  const next = {
+    inputs,
+    intervalSeconds,
+    params,
+    key: sessionParamsKey(params),
+    show: sessionDrawn(inputs, intervalSeconds),
+  }
+  entry.derived = next
+  return next
+}
 
 /**
  * Every session-ranges instance drawn on the main series. Usage from Chart: `attach(series)` when
@@ -588,6 +623,7 @@ export class SessionRangesLayer {
           primitive: new SessionRangesPrimitive(config.uid, this.colors),
           engine: null,
           paramsKey: '',
+          derived: null,
           synced: null,
           boxes: NO_BOXES,
           version: 0,
@@ -612,10 +648,10 @@ export class SessionRangesLayer {
         continue
       }
 
-      const params = sessionParams(config.inputs)
-      const key = sessionParamsKey(params)
+      const derived = derivedInputs(entry, config.inputs, intervalSeconds)
+      const key = derived.key
       if (entry.engine === null || entry.paramsKey !== key || !prefixMatches(entry)) {
-        entry.engine = new SessionRangesEngine(params)
+        entry.engine = new SessionRangesEngine(derived.params)
         entry.paramsKey = key
         entry.boxes = NO_BOXES
         entry.version += 1
@@ -631,7 +667,7 @@ export class SessionRangesLayer {
       }
       entry.synced = bars
 
-      const show = sessionDrawn(config.inputs, intervalSeconds)
+      const show = derived.show
       if (!sameShow(show, entry.show)) entry.show = show
       const v = entry.view
       if (v === null || v.version !== entry.version || v.show !== entry.show) {

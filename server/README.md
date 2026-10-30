@@ -143,7 +143,20 @@ are attached, and closes it when the last one leaves.
 - Upgrades are accepted only with no `Origin` header or an Origin on `localhost` / `127.0.0.1`
   (else close `1008`). At most 50 distinct upstream streams; a new one beyond that closes `1013`.
 - A client whose send buffer exceeds 1 MB is terminated (the browser sees close `1006`).
-- Clients never send anything; any client message is ignored.
+- `/ws/klines` clients never send anything; any client message is ignored.
+- `/ws/tickers` clients may send a watch filter (Phase 19), so the server forwards only the
+  symbols they show:
+  - `{ "type": "watch", "symbols": string[] }` sets the filter; send it on every open and
+    whenever the watched set changes (same socket, no reconnect).
+  - `{ "type": "unwatch" }` goes back to the full array.
+  - Until a client sends `watch` it gets the full array, as before. Frames over 32 KB, bad
+    JSON, a non-array, more than 500 entries or a non-string entry are ignored; strings that
+    do not match `^[A-Z0-9]{2,20}$` are dropped one by one. A bad message never closes the
+    socket.
+  - Each push is serialised once per distinct watched set (and once for unfiltered clients). A
+    push with none of a client's symbols sends that client nothing; the 20 s status heartbeat
+    keeps its stale timer alive. The upstream socket and the alert engine still see every
+    symbol.
 
 ### Alerts (Phase 6)
 

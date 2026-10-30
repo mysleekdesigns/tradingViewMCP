@@ -46,7 +46,10 @@ export class TickersController {
   private readonly throttleMs: number
   private readonly now: () => number
   private snapshot: TickersSnapshot = initialTickersSnapshot
+  /** Replaced (never mutated) on every change: the provider's `symbols` getter reads it. */
   private watched = new Set<string>()
+  /** Provider callbacks to run after `watched` changes (`onSymbolsChange`). */
+  private readonly symbolListeners = new Set<() => void>()
   private tickers = new Map<string, Ticker>()
   private moves = new Map<string, TickMove>()
   private started = false
@@ -80,6 +83,15 @@ export class TickersController {
     try {
       this.unsubscribe = this.provider.subscribeTickers((t) => this.onTickers(t), {
         onStatus: (s) => this.onStatus(s),
+        // Lets the provider drop unwatched symbols before parsing them; the socket stays open
+        // across watchlist edits (the getter is read per push).
+        symbols: () => this.watched,
+        onSymbolsChange: (listener) => {
+          this.symbolListeners.add(listener)
+          return () => {
+            this.symbolListeners.delete(listener)
+          }
+        },
       })
     } catch {
       this.setStatus('offline')
@@ -103,6 +115,13 @@ export class TickersController {
       this.moves.delete(s)
     }
     if (removed.length > 0) this.markDirty()
+    for (const listener of [...this.symbolListeners]) {
+      try {
+        listener()
+      } catch (err) {
+        console.error('TickersController: symbols listener threw', err)
+      }
+    }
     if (this.started) this.seed(added)
   }
 
@@ -112,6 +131,7 @@ export class TickersController {
     this.stopped = true
     this.unsubscribe?.()
     this.unsubscribe = null
+    this.symbolListeners.clear()
     for (const c of this.seeds) c.abort()
     this.seeds.clear()
     if (this.emitTimer !== null) clearTimeout(this.emitTimer)
@@ -278,6 +298,22 @@ function magnitudeDecimals(value: number): number {
   return 8
 }
 
+/** en-US fixed-decimal formatters by decimal count (0-12), shared by every row and tick. */
+const fixedFormats = new Map<number, Intl.NumberFormat>()
+
+/** Same text as `value.toLocaleString('en-US', { min/max fraction digits = decimals })`. */
+function formatFixed(value: number, decimals: number): string {
+  let f = fixedFormats.get(decimals)
+  if (f === undefined) {
+    f = new Intl.NumberFormat('en-US', {
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
+    })
+    fixedFormats.set(decimals, f)
+  }
+  return f.format(value)
+}
+
 /**
  * Watchlist price text: tick-size decimals when known (else by magnitude), with thousands
  * separators. "—" for non-finite values.
@@ -286,10 +322,7 @@ export function formatTickerPrice(value: number, tickSize?: number): string {
   if (!Number.isFinite(value)) return '—'
   const decimals =
     (tickSize !== undefined ? tickDecimals(tickSize) : null) ?? magnitudeDecimals(value)
-  return value.toLocaleString('en-US', {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
-  })
+  return formatFixed(value, decimals)
 }
 
 /** Signed absolute 24h change in the same decimals as the price, never "-0.00". */
@@ -299,10 +332,7 @@ export function formatTickerChange(last: number, open: number, tickSize?: number
     (tickSize !== undefined ? tickDecimals(tickSize) : null) ?? magnitudeDecimals(last)
   const diff = Number((last - open).toFixed(decimals))
   if (diff === 0) return (0).toFixed(decimals)
-  const text = Math.abs(diff).toLocaleString('en-US', {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
-  })
+  const text = formatFixed(Math.abs(diff), decimals)
   return `${diff > 0 ? '+' : '-'}${text}`
 }
 

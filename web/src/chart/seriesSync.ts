@@ -1,4 +1,5 @@
 import type { CandlestickData, HistogramData, UTCTimestamp } from 'lightweight-charts'
+import { knownSamePrefix } from '../data/candleStore'
 import type { Candle } from '../types'
 import type { VolumeColors } from './volume'
 
@@ -61,7 +62,11 @@ function tailMatch(
   const appended = next.length - offset - prev.length
   if (appended < 0 || appended > MAX_APPENDED_BARS) return null
   const lastIdx = prev.length - 1
-  for (let i = 0; i < lastIdx; i++) {
+  // A live tick records how much of `prev` it kept (data/candleStore lineage): those bars are
+  // the same objects without reading them, so only the rest is compared (O(tail) per tick).
+  // Unknown lineage (history replaced, a prepend, replay bars) compares every bar.
+  const known = offset === 0 ? (knownSamePrefix(prev, next) ?? 0) : 0
+  for (let i = Math.min(known, lastIdx); i < lastIdx; i++) {
     if (next[offset + i] !== prev[i]) return null
   }
   // series.update() with a different time would append rather than replace the last bar.

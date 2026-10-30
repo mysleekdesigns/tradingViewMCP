@@ -34,6 +34,7 @@ import {
   MarketStructureEngine,
   structureParams,
   structureParamsKey,
+  type MarketStructureParams,
 } from '../indicators/marketStructure'
 import { INDICATOR_BY_ID } from '../indicators/registry'
 import type {
@@ -701,6 +702,11 @@ interface Entry {
   engine: MarketStructureEngine | null
   paramsKey: string
   /**
+   * Params, their key and the toggles derived from `inputs` (re-derived only when the config's
+   * inputs object changes, not per tick; IndicatorInputs are immutable, replaced on edit).
+   */
+  derived: DerivedInputs | null
+  /**
    * The bars array the engine was last brought up to date with: its first `engine.count`
    * elements are exactly the bars pushed (candles are never mutated, so the same object means
    * the same values).
@@ -718,6 +724,23 @@ interface Entry {
 }
 
 const NO_MARKERS: readonly ChartMarker[] = Object.freeze([])
+
+interface DerivedInputs {
+  inputs: IndicatorInputs
+  params: MarketStructureParams
+  key: string
+  show: StructureShow
+}
+
+/** `entry`'s params/key/toggles for `inputs`, derived once per inputs object. */
+function derivedInputs(entry: Entry, inputs: IndicatorInputs): DerivedInputs {
+  const d = entry.derived
+  if (d !== null && d.inputs === inputs) return d
+  const params = structureParams(inputs)
+  const next = { inputs, params, key: structureParamsKey(params), show: structureShow(inputs) }
+  entry.derived = next
+  return next
+}
 
 /**
  * Every market-structure instance drawn on the main series. Usage from Chart: `attach(series)`
@@ -817,6 +840,7 @@ export class MarketStructureLayer {
           primitive: new MarketStructurePrimitive(config.uid, this.colors),
           engine: null,
           paramsKey: '',
+          derived: null,
           synced: null,
           spans: new StructureSpans(),
           version: 0,
@@ -834,10 +858,10 @@ export class MarketStructureLayer {
       // Hidden instances draw nothing, give no markers and are not advanced until shown.
       if (!config.visible) continue
 
-      const params = structureParams(config.inputs)
-      const key = structureParamsKey(params)
+      const derived = derivedInputs(entry, config.inputs)
+      const key = derived.key
       if (entry.engine === null || entry.paramsKey !== key || !prefixMatches(entry)) {
-        entry.engine = new MarketStructureEngine(params)
+        entry.engine = new MarketStructureEngine(derived.params)
         entry.paramsKey = key
         entry.spans = new StructureSpans()
         entry.version += 1
@@ -853,7 +877,7 @@ export class MarketStructureLayer {
       // The pushed bars are bars[0 .. count - 1] now.
       entry.synced = bars
 
-      const show = structureShow(config.inputs)
+      const show = derived.show
       if (!sameShow(show, entry.show)) entry.show = show
       const v = entry.view
       if (

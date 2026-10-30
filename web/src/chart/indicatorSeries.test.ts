@@ -1064,3 +1064,158 @@ describe('session indicators (session ranges)', () => {
     )
   })
 })
+
+/* ------------------------- Phase 19: store grains and the series → uid map ------------------------- */
+
+describe('IndicatorSeriesManager store grains (live tick)', () => {
+  const candles = makeCandles(80)
+
+  it("a tail update ('update' plan) notifies the full grain only; a reader then gets the current forming-bar value", () => {
+    const ema = cfg('ema', 'e')
+    const { manager } = setup([ema], candles)
+    let layout = 0
+    manager.subscribeLayout(() => layout++)
+    const l0 = manager.getLayoutSnapshot()
+    const s0 = manager.getSnapshot()
+    const ticked = [...candles.slice(0, -1), { ...candles[candles.length - 1], close: 250 }]
+    // What a legend subscribed to the full grain reads when it is notified.
+    const seen: string[] = []
+    manager.subscribe(() => seen.push(manager.legendRows(undefined)[0].values[0].text))
+    manager.applyPlan(planSeriesSync(candles, ticked), ticked)
+    const want = computeIndicator(def('ema'), ticked, { period: 20 }, 'close').ema.at(-1)
+    expect(seen).toEqual([want?.value.toFixed(2)])
+    expect(manager.getSnapshot().version).toBe(s0.version + 1)
+    // The layout grain (what Chart subscribes to) did not move.
+    expect(layout).toBe(0)
+    expect(manager.getLayoutSnapshot()).toBe(l0)
+  })
+
+  it('configs, panes, highlight and full loads move both grains', () => {
+    const ema = cfg('ema', 'e')
+    const { manager } = setup([ema], candles)
+    let layout = 0
+    manager.subscribeLayout(() => layout++)
+    const l0 = manager.getLayoutSnapshot()
+    manager.sync([ema, cfg('rsi', 'r')], candles)
+    expect(manager.getLayoutSnapshot().paneVersion).toBe(l0.paneVersion + 1)
+    manager.setHighlighted('r')
+    const more = makeCandles(90)
+    manager.applyPlan(planSeriesSync(candles, more), more)
+    expect(layout).toBe(3)
+    expect(manager.getLayoutSnapshot().version).toBe(l0.version + 3)
+    // 'none' notifies nobody.
+    manager.applyPlan(planSeriesSync(more, more), more)
+    expect(layout).toBe(3)
+  })
+})
+
+describe('IndicatorSeriesManager uidOfSeries map', () => {
+  const candles = makeCandles(60)
+  const pool = (): IndicatorConfig[] => {
+    const out: IndicatorConfig[] = []
+    for (const [id, uid] of [
+      ['ema', 'e'],
+      ['sma', 's'],
+      ['rsi', 'r'],
+      ['macd', 'm'],
+      ['stoch', 'k'],
+      ['bb', 'b'],
+    ] as [IndicatorId, string][]) {
+      if (INDICATOR_BY_ID.has(id)) out.push(cfg(id, uid))
+    }
+    return out
+  }
+
+  /** Every series the fake chart shows maps to exactly one config with that many lines. */
+  function expectConsistent(
+    chart: { all(): unknown[]; removed: unknown[] },
+    manager: IndicatorSeriesManager,
+    configs: readonly IndicatorConfig[],
+  ): void {
+    const live = chart.all()
+    const counts = new Map<string, number>()
+    for (const s of live) {
+      const uid = manager.uidOfSeries(s as never)
+      expect(uid).not.toBeNull()
+      counts.set(uid as string, (counts.get(uid as string) ?? 0) + 1)
+    }
+    for (const c of configs) {
+      expect(counts.get(c.uid) ?? 0).toBe(def(c.type).lines.length)
+    }
+    expect([...counts.keys()].every((u) => configs.some((c) => c.uid === u))).toBe(true)
+    // Removed series (pane rebuilds, removals) map to nothing.
+    for (const s of chart.removed)
+      if (!live.includes(s)) expect(manager.uidOfSeries(s as never)).toBeNull()
+  }
+
+  it('stays correct across random add, remove, reorder, hide and recolour', () => {
+    const r = (() => {
+      let a = 77
+      return () => {
+        a = (a * 1103515245 + 12345) % 2147483648
+        return a / 2147483648
+      }
+    })()
+    const all = pool()
+    const { chart, manager } = setup([], candles)
+    let configs: IndicatorConfig[] = []
+    for (let i = 0; i < 200; i++) {
+      const x = r()
+      if (x < 0.35) {
+        const missing = all.filter((c) => !configs.some((d) => d.uid === c.uid))
+        if (missing.length > 0) configs = [...configs, missing[Math.floor(r() * missing.length)]]
+      } else if (x < 0.6 && configs.length > 0) {
+        const k = Math.floor(r() * configs.length)
+        configs = configs.filter((_, j) => j !== k)
+      } else if (x < 0.8 && configs.length > 1) {
+        const k = Math.floor(r() * configs.length)
+        const moved = configs[k]
+        configs = [...configs.filter((_, j) => j !== k), moved]
+      } else if (configs.length > 0) {
+        const k = Math.floor(r() * configs.length)
+        configs = configs.map((c, j) => (j === k ? { ...c, visible: !c.visible } : c))
+      }
+      manager.sync(configs, candles)
+      expectConsistent(chart, manager, configs)
+    }
+    expect(manager.uidOfSeries(new FakeSeries('Line', {}) as never)).toBeNull()
+  })
+
+  it('is cleared by detach and by a re-attach', () => {
+    const { chart, manager } = setup([cfg('ema', 'e'), cfg('rsi', 'r')], candles)
+    const shown = chart.all()
+    manager.detach()
+    for (const s of shown) expect(manager.uidOfSeries(s as never)).toBeNull()
+    manager.attach(chart as unknown as IChartApi)
+    for (const s of shown) expect(manager.uidOfSeries(s as never)).toBeNull()
+  })
+})
+
+describe('IndicatorSeriesManager legendRows memo', () => {
+  const candles = makeCandles(80)
+
+  it('the main and pane legends asking in one render share one build', () => {
+    const { manager } = setup([cfg('ema', 'e'), cfg('rsi', 'r')], candles)
+    const a = manager.legendRows(undefined, 3_600)
+    expect(manager.legendRows(undefined, 3_600)).toBe(a)
+  })
+
+  it('a tick, a hover, a bar length or a config change rebuilds the rows', () => {
+    const ema = cfg('ema', 'e')
+    const { manager } = setup([ema], candles)
+    const a = manager.legendRows(undefined)
+    const ticked = [...candles.slice(0, -1), { ...candles[candles.length - 1], close: 250 }]
+    manager.applyPlan(planSeriesSync(candles, ticked), ticked)
+    const b = manager.legendRows(undefined)
+    expect(b).not.toBe(a)
+    const want = computeIndicator(def('ema'), ticked, { period: 20 }, 'close').ema.at(-1)
+    expect(b[0].values[0].text).toBe(want?.value.toFixed(2))
+    expect(manager.legendRows(ticked[40].time)).not.toBe(b)
+    expect(manager.legendRows(undefined, 3_600)).not.toBe(manager.legendRows(undefined))
+    const before = manager.legendRows(undefined)
+    manager.sync([{ ...ema, visible: false }], ticked)
+    const hidden = manager.legendRows(undefined)
+    expect(hidden).not.toBe(before)
+    expect(hidden[0].visible).toBe(false)
+  })
+})

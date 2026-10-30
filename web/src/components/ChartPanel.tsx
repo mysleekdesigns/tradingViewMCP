@@ -21,6 +21,7 @@ import type { DrawingsApi } from '../state/drawings'
 import type { IndicatorConfig } from '../state/indicators'
 import type { PanelState } from '../state/layout'
 import { atHistoryLimit } from '../state/liveCandles'
+import type { PanelMarket } from '../state/liveStore'
 import { REGIME_THRESHOLD, REGIME_WINDOW_BARS, regimeParamsLabel } from '../state/regimePref'
 import { useLiveCandles, type UseLiveCandles } from '../state/useLiveCandles'
 import { regimeSupported, useRegime, type RegimeOverlay } from '../state/useRegime'
@@ -31,7 +32,7 @@ import {
   useDerivatives,
   type DerivativesState,
 } from '../state/useDerivatives'
-import type { Candle, Timeframe } from '../types'
+import type { Candle } from '../types'
 import './AppShell.css'
 import './Derivatives.css'
 import { ConnectionIndicator } from './ConnectionStatus'
@@ -49,14 +50,12 @@ import { ErrorView, LoadingView } from './StatusViews'
  * comes back down as `candlesOverride`; the regime ribbon is fetched here from the panel's
  * loaded bars and drawn on the ones it plots.
  *
- * Memoised: App re-renders on every tick of any panel, so every prop App passes must be stable
- * between ticks of other panels (callbacks, memoised arrays and elements).
+ * Memoised: every prop App passes must be stable between ticks (callbacks, memoised arrays and
+ * elements). Live reports go to App's live store (state/liveStore), not App state, so a tick
+ * re-renders only this panel and the few components that read the store.
  */
-/** The market a live report belongs to. */
-export interface PanelMarket {
-  symbol: string
-  interval: Timeframe
-}
+/** The market a live report belongs to (defined with the live store). */
+export type { PanelMarket } from '../state/liveStore'
 
 export interface ChartPanelProps {
   panel: PanelState
@@ -83,10 +82,10 @@ export interface ChartPanelProps {
   onActivate: (panelId: string) => void
   /**
    * The panel's latest live state (candles in `load`, connection status, reload, loadOlder)
-   * after every render, with the market it belongs to, and null on unmount. The object is fresh
-   * per render; compare it shallowly before storing it. Right after a symbol or timeframe
-   * change the panel's previous report is still stored for one render: check `market` before
-   * using the candles for the new market.
+   * whenever it changes, with the market it belongs to, and null on unmount. The object is
+   * stable (useLiveCandles): a new one means new live data. Right after a symbol or timeframe
+   * change the panel's previous report is still stored until the new market's arrives: check
+   * `market` before using the candles for the new market.
    */
   onLive?: (panelId: string, live: UseLiveCandles | null, market?: PanelMarket) => void
   /** The mounted chart's API (screenshots), null while no chart is shown. */

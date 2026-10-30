@@ -7,6 +7,28 @@ export interface SubscribeOptions {
 }
 
 /**
+ * `subscribeTickers` options: SubscribeOptions plus the caller's watched set. Both additions are
+ * optional; without `symbols` the stream carries every symbol, as before.
+ */
+export interface TickerSubscribeOptions extends SubscribeOptions {
+  /**
+   * The symbols the caller keeps (exact `Ticker.symbol` values). Read on every push, so one
+   * socket serves the whole subscription however often the set changes; return a new Set
+   * whenever its contents change (identity marks a change). Providers may drop every other
+   * symbol before building Ticker objects (Binance direct) or ask their upstream to (the local
+   * server); callers must still tolerate extra symbols.
+   */
+  symbols?: () => ReadonlySet<string>
+  /**
+   * Registers `listener`, which the caller calls after the set `symbols` returns has changed.
+   * Providers that tell an upstream what to send (the server's `/ws/tickers` `watch` message)
+   * re-send on it; returns an unregister that the provider calls on unsubscribe. Optional:
+   * without it, such a provider notices a change on its next push only.
+   */
+  onSymbolsChange?: (listener: () => void) => () => void
+}
+
+/**
  * Source of public market data. Every exchange-specific detail (hosts, symbol
  * formats, string prices, ms timestamps) stays behind this interface.
  */
@@ -62,11 +84,15 @@ export interface MarketDataProvider {
   getTickers(symbols: readonly string[], opts?: { signal?: AbortSignal }): Promise<Ticker[]>
   /**
    * Live 24h stats for all symbols over ONE socket (Binance `!miniTicker@arr`). Each call
-   * of `onTickers` carries only the symbols that changed since the last push. Same
+   * of `onTickers` carries only the symbols that changed since the last push (only watched
+   * ones when `opts.symbols` is given and the provider filters; never an empty call). Same
    * reconnect/backoff/stale/status behaviour as `subscribeCandles`. Returns an idempotent
    * unsubscribe that closes the socket.
    */
-  subscribeTickers(onTickers: (tickers: Ticker[]) => void, opts?: SubscribeOptions): () => void
+  subscribeTickers(
+    onTickers: (tickers: Ticker[]) => void,
+    opts?: TickerSubscribeOptions,
+  ): () => void
 }
 
 /**

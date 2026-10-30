@@ -6,6 +6,7 @@ import {
   type MarketDataErrorKind,
   type MarketDataProvider,
   type SubscribeOptions,
+  type TickerSubscribeOptions,
 } from './provider'
 import { parseVenueInfo, type VenueInfo } from './venue'
 
@@ -18,6 +19,8 @@ import { parseVenueInfo, type VenueInfo } from './venue'
 const MAX_LIMIT = 1000
 const DEFAULT_LIMIT = 500
 const DEFAULT_TIMEOUT_MS = 10_000
+/** `WebSocket.OPEN` (test doubles may lack the static). */
+const WS_OPEN = 1
 /** WebSocket close codes after which the stream stops for good (policy violation = bad params). */
 export const SERVER_FATAL_CLOSE_CODES: readonly number[] = [1008]
 
@@ -122,13 +125,42 @@ function parseArray<T>(body: unknown, parse: (v: unknown) => T | null, what: str
   return out
 }
 
+/** Most symbols one `/ws/tickers` `watch` message may carry (server-enforced, same value). */
+export const MAX_WATCH_SYMBOLS = 500
+/** Symbol syntax the server accepts in a `watch` message (Binance spot symbols). */
+const WATCH_SYMBOL_RE = /^[A-Z0-9]{2,20}$/
+
+/**
+ * The `/ws/tickers` client message for a watched set: `{"type":"watch","symbols":[...]}`
+ * (sorted), or `{"type":"unwatch"}` (every symbol again) when the set cannot be expressed:
+ * more than MAX_WATCH_SYMBOLS entries, or an entry the server would not accept (it could then
+ * never be delivered).
+ */
+export function watchMessage(symbols: ReadonlySet<string>): string {
+  if (symbols.size > MAX_WATCH_SYMBOLS) return JSON.stringify({ type: 'unwatch' })
+  const list: string[] = []
+  for (const s of symbols) {
+    if (!WATCH_SYMBOL_RE.test(s)) return JSON.stringify({ type: 'unwatch' })
+    list.push(s)
+  }
+  list.sort()
+  return JSON.stringify({ type: 'watch', symbols: list })
+}
+
 /** Server WS message, or null when malformed. */
 type StreamMessage =
   | { type: 'kline'; candle: Candle; closed: boolean }
   | { type: 'tickers'; tickers: Ticker[] }
   | { type: 'status'; status: 'live' | 'reconnecting' }
 
-export function parseStreamMessage(data: unknown): StreamMessage | null {
+/**
+ * Parse one server WS message. With `only`, ticker entries whose `symbol` is not in the set are
+ * skipped before validation (the server filters already once it has the client's `watch`).
+ */
+export function parseStreamMessage(
+  data: unknown,
+  only?: ReadonlySet<string>,
+): StreamMessage | null {
   let msg: unknown = data
   if (typeof msg === 'string') {
     try {
@@ -148,6 +180,12 @@ export function parseStreamMessage(data: unknown): StreamMessage | null {
       if (!Array.isArray(msg.tickers)) return null
       const tickers: Ticker[] = []
       for (const t of msg.tickers) {
+        if (
+          only !== undefined &&
+          !(isRecord(t) && typeof t.symbol === 'string' && only.has(t.symbol))
+        ) {
+          continue
+        }
         const parsed = toTicker(t)
         if (parsed !== null) tickers.push(parsed)
       }
@@ -399,13 +437,60 @@ export class ServerProvider implements MarketDataProvider {
     )
   }
 
-  subscribeTickers(onTickers: (tickers: Ticker[]) => void, opts?: SubscribeOptions): () => void {
-    const WS = this.resolveWebSocket('subscribeTickers')
-    return this.openStream(
+  /**
+   * `/ws/tickers`. With `opts.symbols`, every socket sends `watchMessage(symbols())` when it
+   * opens and again whenever the set's identity changes (on `opts.onSymbolsChange`, and checked
+   * on each push as a fallback), so the server sends only watched symbols; entries outside the
+   * set are also skipped client-side (an older server ignores `watch` and sends everything).
+   */
+  subscribeTickers(
+    onTickers: (tickers: Ticker[]) => void,
+    opts?: TickerSubscribeOptions,
+  ): () => void {
+    const BaseWS = this.resolveWebSocket('subscribeTickers')
+    const getSymbols = opts?.symbols
+    let disposed = false
+    /** The newest socket (older ones are discarded by the reconnecting socket). */
+    const latest: { sock: WebSocket | null } = { sock: null }
+    /** The set last sent on `latest.sock` (null: nothing sent on it yet). */
+    let sentFor: ReadonlySet<string> | null = null
+
+    const sendWatch = (): void => {
+      if (disposed || getSymbols === undefined) return
+      const sock = latest.sock
+      if (sock === null || sock.readyState !== WS_OPEN) return
+      const set = getSymbols()
+      if (set === sentFor) return
+      try {
+        sock.send(watchMessage(set))
+        sentFor = set
+      } catch {
+        // Closing; the next socket sends on open.
+      }
+    }
+
+    let WS = BaseWS
+    if (getSymbols !== undefined) {
+      WS = class WatchingWebSocket extends BaseWS {
+        constructor(url: string | URL, protocols?: string | string[]) {
+          super(url, protocols)
+          latest.sock = this
+          sentFor = null
+          this.addEventListener('open', () => {
+            if (latest.sock === this) sendWatch()
+          })
+        }
+      }
+    }
+    const offChange = getSymbols !== undefined ? opts?.onSymbolsChange?.(sendWatch) : undefined
+
+    const teardown = this.openStream(
       '/ws/tickers',
       opts?.onStatus,
       (msg) => {
-        if (msg.type !== 'tickers' || msg.tickers.length === 0) return
+        if (msg.type !== 'tickers') return
+        sendWatch()
+        if (msg.tickers.length === 0) return
         try {
           onTickers(msg.tickers)
         } catch (err) {
@@ -413,7 +498,15 @@ export class ServerProvider implements MarketDataProvider {
         }
       },
       WS,
+      getSymbols,
     )
+    return () => {
+      if (disposed) return
+      disposed = true
+      latest.sock = null
+      offChange?.()
+      teardown()
+    }
   }
 
   /**
@@ -430,6 +523,7 @@ export class ServerProvider implements MarketDataProvider {
     onStatus: ((s: ConnectionStatus) => void) | undefined,
     onData: (msg: Exclude<StreamMessage, { type: 'status' }>) => void,
     WS: typeof WebSocket,
+    only?: () => ReadonlySet<string>,
   ): () => void {
     let disposed = false
     let socketStatus: ConnectionStatus | null = null
@@ -461,7 +555,7 @@ export class ServerProvider implements MarketDataProvider {
       },
       onMessage: (data) => {
         if (disposed) return
-        const msg = parseStreamMessage(data)
+        const msg = parseStreamMessage(data, only?.())
         if (msg === null) return
         if (msg.type === 'status') {
           upstream = msg.status

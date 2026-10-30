@@ -42,7 +42,7 @@ import {
   type FocusPlan,
   type OverlayChart,
 } from './backtestOverlay'
-import { IndicatorSeriesManager } from './indicatorSeries'
+import { IndicatorSeriesManager, type IndicatorLegendRow } from './indicatorSeries'
 import { buildLegend, firstVisibleBarTime, selectLegendIndex, type LegendValues } from './legend.ts'
 import {
   DEFAULT_APPEARANCE,
@@ -103,7 +103,7 @@ import {
   type AutoOlder,
 } from './seriesSync'
 import { BarLineage, planSamePrefix } from './structureBars'
-import { toVolumeData } from './volume'
+import { toVolumeData, volumeColorsOf } from './volume'
 import { AlertLinesManager } from './drawings/alertLines'
 import { ChartCoordinateAdapter } from './drawings/chartAdapter'
 import { DrawingController, plottedBarTime, type PointerInput } from './drawings/controller'
@@ -118,9 +118,9 @@ import type {
   ToolMode,
 } from './drawings/types'
 
-/** Volume bar colours of a palette. */
+/** Volume bar colours of a palette: one cached object per palette, not one per volume point. */
 function volumePaletteOf(p: ChartPalette) {
-  return { up: p.volumeUp, down: p.volumeDown }
+  return volumeColorsOf(p)
 }
 
 /** What the app can ask of a mounted chart (see the `onApi` prop). */
@@ -423,9 +423,12 @@ export function Chart({
   const [fontsReady, setFontsReady] = useState(false)
   /** Series of every indicator; also the store the indicator legend reads from. */
   const [indicatorManager] = useState(() => new IndicatorSeriesManager())
+  // The layout grain: configs, panes, highlight, full loads. A forming-bar tick's tail update
+  // does not move it (the candles prop already re-rendered this component for that tick); the
+  // legend rows subscribe to the full grain themselves (LiveIndicatorRows).
   const indicatorSnapshot = useSyncExternalStore(
-    indicatorManager.subscribe,
-    indicatorManager.getSnapshot,
+    indicatorManager.subscribeLayout,
+    indicatorManager.getLayoutSnapshot,
   )
   /** Top of each pane (px from the chart's top edge), for the pane legends. */
   const [paneTops, setPaneTops] = useState<readonly (number | null)[]>([])
@@ -461,7 +464,9 @@ export function Chart({
       ),
   )
   /** Fixed-range volume profiles (range indicators), drawn on the main series. */
-  const [profileLayer] = useState(() => new VolumeProfileLayer(volumeProfileColorsFor(palette)))
+  const [profileLayer] = useState(
+    () => new VolumeProfileLayer(volumeProfileColorsFor(palette), lineage),
+  )
   /** UTC session high/low boxes (session indicators) from closed bars, on the main series. */
   const [sessionLayer] = useState(
     () => new SessionRangesLayer(sessionRangesColorsFor(palette), lineage),
@@ -1253,9 +1258,7 @@ export function Chart({
     [candles, hoveredTime],
   )
 
-  // Cheap (binary search per line). useSyncExternalStore above re-renders on every store change
-  // (live tick, config change), so this always reads the current values.
-  const indicatorRows = indicatorManager.legendRows(hoveredTime, timeframeSeconds(interval))
+  const intervalSeconds = timeframeSeconds(interval)
   const equityPane = backtestOverlay.equityPaneIndex()
   const equityTop = equityPane !== null ? paneTops[equityPane] : null
   const equityLegend =
@@ -1288,17 +1291,31 @@ export function Chart({
         values={legend}
         timezone={timezone}
       >
-        <IndicatorLegendRows
-          rows={indicatorRows.filter((r) => r.pane === 0)}
-          highlightedUid={highlightedUid}
-          {...legendActions}
+        <LiveIndicatorRows
+          manager={indicatorManager}
+          hoveredTime={hoveredTime}
+          intervalSeconds={intervalSeconds}
+          render={(rows) => (
+            <IndicatorLegendRows
+              rows={rows.filter((r) => r.pane === 0)}
+              highlightedUid={highlightedUid}
+              {...legendActions}
+            />
+          )}
         />
       </Legend>
-      <PaneLegends
-        rows={indicatorRows.filter((r) => r.pane > 0)}
-        paneTops={paneTops}
-        highlightedUid={highlightedUid}
-        {...legendActions}
+      <LiveIndicatorRows
+        manager={indicatorManager}
+        hoveredTime={hoveredTime}
+        intervalSeconds={intervalSeconds}
+        render={(rows) => (
+          <PaneLegends
+            rows={rows.filter((r) => r.pane > 0)}
+            paneTops={paneTops}
+            highlightedUid={highlightedUid}
+            {...legendActions}
+          />
+        )}
       />
       {equityLegend.length > 0 && typeof equityTop === 'number' && (
         <div className="bt-pane-legend" style={{ top: equityTop + 6 }} aria-live="off">
@@ -1344,6 +1361,27 @@ export function Chart({
       )}
     </div>
   )
+}
+
+/**
+ * Indicator legend rows, read from the indicator store's full grain: a live tick's tail update
+ * re-renders only this (after the data effect applied the bar), so the rows always show the
+ * values of the bar just pushed while Chart itself renders once per tick. Cheap: a binary
+ * search per line. Also re-renders with Chart (hover, configs, highlight).
+ */
+function LiveIndicatorRows({
+  manager,
+  hoveredTime,
+  intervalSeconds,
+  render,
+}: {
+  manager: IndicatorSeriesManager
+  hoveredTime: number | undefined
+  intervalSeconds: number
+  render: (rows: IndicatorLegendRow[]) => ReactNode
+}) {
+  useSyncExternalStore(manager.subscribe, manager.getSnapshot)
+  return render(manager.legendRows(hoveredTime, intervalSeconds))
 }
 
 /**

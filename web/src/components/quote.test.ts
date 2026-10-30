@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Candle } from '../types'
-import { formatUtc, formatUtcClock, summarizeQuote } from './quote'
+import { formatUtc, formatUtcClock, sameQuote, summarizeQuote } from './quote'
 
 const H = 3600
 
@@ -112,5 +112,19 @@ describe('UTC formatting', () => {
 
   it('formats a clock time in UTC seconds', () => {
     expect(formatUtcClock(new Date(Date.UTC(2026, 9, 24, 14, 8, 31)))).toBe('14:08:31')
+  })
+})
+
+describe('sameQuote', () => {
+  it('is true for the same text and false when any shown field changes', () => {
+    const a = summarizeQuote(hourly([100, 101]), '1h')
+    const b = summarizeQuote(hourly([100, 101]), '1h')
+    expect(a).not.toBe(b)
+    expect(sameQuote(a, b)).toBe(true)
+    expect(sameQuote(a, summarizeQuote(hourly([100, 102]), '1h'))).toBe(false)
+    expect(sameQuote(a, a === null ? null : { ...a, basis: '24h' })).toBe(false)
+    expect(sameQuote(null, null)).toBe(true)
+    expect(sameQuote(a, null)).toBe(false)
+    expect(sameQuote(null, b)).toBe(false)
   })
 })

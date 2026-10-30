@@ -1,11 +1,17 @@
 import type { Candle, Interval, SymbolInfo, Ticker } from '../types'
 import { DEFAULT_STALE_TIMEOUT_MS } from './binanceStream'
 import {
+  DEFAULT_FORMING_FLUSH_MS,
   makeTickerFields,
   openCoinbaseCandleStream,
   openCoinbaseTickerStream,
 } from './coinbaseStream'
-import { MarketDataError, type MarketDataProvider, type SubscribeOptions } from './provider'
+import {
+  MarketDataError,
+  type MarketDataProvider,
+  type SubscribeOptions,
+  type TickerSubscribeOptions,
+} from './provider'
 import { COINBASE_REST, COINBASE_VENUE, COINBASE_WS, type VenueInfo } from './venue'
 
 /*
@@ -670,6 +676,8 @@ export class CoinbaseProvider implements MarketDataProvider {
         this.candles(sym, interval, limit, endTime, signal, false),
       onCandle,
       onStatus: opts?.onStatus,
+      // Per-trade bars are 10-50 Hz on busy pairs: coalesce the forming updates.
+      formingFlushMs: DEFAULT_FORMING_FLUSH_MS,
     })
   }
 
@@ -725,7 +733,14 @@ export class CoinbaseProvider implements MarketDataProvider {
     return out
   }
 
-  subscribeTickers(onTickers: (tickers: Ticker[]) => void, opts?: SubscribeOptions): () => void {
+  /**
+   * `opts.symbols` is accepted but not used: the feed subscribes every tradable product and
+   * coalesces per 250 ms, and the watchlist controller keeps only its watched symbols.
+   */
+  subscribeTickers(
+    onTickers: (tickers: Ticker[]) => void,
+    opts?: TickerSubscribeOptions,
+  ): () => void {
     const WS = this.resolveWebSocket('subscribeTickers')
     return openCoinbaseTickerStream({
       WebSocketImpl: WS,

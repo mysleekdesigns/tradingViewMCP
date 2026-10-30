@@ -108,9 +108,10 @@ export function parseMiniTicker(raw: unknown): Ticker | null {
 /**
  * A `!miniTicker@arr` message (JSON string or parsed value; the combined-stream
  * `{ stream, data }` wrapper is unwrapped). Malformed elements are skipped; a message
- * that is not an array yields [].
+ * that is not an array yields []. With `only`, an element whose raw `s` is not in the set is
+ * skipped before any Ticker is built (`s` is the exact `Ticker.symbol` it would get).
  */
-export function parseMiniTickerMessage(data: unknown): Ticker[] {
+export function parseMiniTickerMessage(data: unknown, only?: ReadonlySet<string>): Ticker[] {
   let msg: unknown = data
   if (typeof msg === 'string') {
     try {
@@ -123,6 +124,9 @@ export function parseMiniTickerMessage(data: unknown): Ticker[] {
   if (!Array.isArray(msg)) return []
   const out: Ticker[] = []
   for (const el of msg) {
+    if (only !== undefined && !(isRecord(el) && typeof el.s === 'string' && only.has(el.s))) {
+      continue
+    }
     const t = parseMiniTicker(el)
     if (t !== null) out.push(t)
   }

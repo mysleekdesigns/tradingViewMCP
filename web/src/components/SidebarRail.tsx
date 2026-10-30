@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { badgeText } from './alertsView'
 import { TesterIcon } from './BacktestPanel'
 import { ResearchIcon } from './ResearchPage'
@@ -27,7 +28,7 @@ const PANELS: readonly { id: SidebarPanel; label: string }[] = [
  * Far-right icon rail (TradingView style). Picks the sidebar panel; clicking the open panel's
  * button collapses the sidebar.
  */
-export function SidebarRail({
+export const SidebarRail = memo(function SidebarRail({
   active,
   onSelect,
   alertBadge,
@@ -90,7 +91,7 @@ export function SidebarRail({
       </button>
     </nav>
   )
-}
+})
 
 const ICON = {
   width: 22,

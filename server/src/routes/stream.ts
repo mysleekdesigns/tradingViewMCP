@@ -14,6 +14,11 @@ export const MAX_UPSTREAM_KEYS = 50
 const ALLOWED_ORIGIN_HOSTS = new Set(['localhost', '127.0.0.1'])
 const WS_OPEN = 1
 const SYMBOL_RE = /^[A-Z0-9]{2,30}$/
+/** Most symbols a `/ws/tickers` `watch` message may name; a longer list is ignored. */
+export const MAX_WATCH_SYMBOLS = 500
+const WATCH_SYMBOL_RE = /^[A-Z0-9]{2,20}$/
+/** Client frames larger than this are ignored unparsed (500 symbols fit in ~12 KB). */
+export const MAX_CLIENT_MESSAGE_BYTES = 32 * 1024
 
 /** The subset of the `ws` server-side socket this route uses. */
 interface ClientSocket {
@@ -49,6 +54,75 @@ function serialize(event: HubEvent): string {
   return s
 }
 
+/** A `/ws/tickers` client's watched symbols; `key` is canonical (sorted, comma-joined). */
+export interface Watch {
+  readonly symbols: ReadonlySet<string>
+  readonly key: string
+}
+
+/**
+ * A `/ws/tickers` client message: `{"type":"watch","symbols":[...]}` -> that set (strings that
+ * are not `[A-Z0-9]{2,20}` are skipped: no upstream symbol can match them), `{"type":"unwatch"}`
+ * -> null (every symbol again). Anything else (not JSON, too large, binary junk, a non-array or
+ * more than MAX_WATCH_SYMBOLS entries, a non-string entry) -> undefined: ignored. Never throws.
+ */
+export function parseWatchMessage(data: unknown): Watch | null | undefined {
+  let text: string
+  if (typeof data === 'string') text = data
+  else if (Buffer.isBuffer(data)) {
+    if (data.length > MAX_CLIENT_MESSAGE_BYTES) return undefined
+    text = data.toString('utf8')
+  } else if (data instanceof ArrayBuffer) {
+    if (data.byteLength > MAX_CLIENT_MESSAGE_BYTES) return undefined
+    text = Buffer.from(data).toString('utf8')
+  } else if (Array.isArray(data) && data.every((d) => Buffer.isBuffer(d))) {
+    const total = data.reduce((n, d) => n + d.length, 0)
+    if (total > MAX_CLIENT_MESSAGE_BYTES) return undefined
+    text = Buffer.concat(data).toString('utf8')
+  } else return undefined
+  if (text.length > MAX_CLIENT_MESSAGE_BYTES) return undefined
+  let msg: unknown
+  try {
+    msg = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (msg === null || typeof msg !== 'object' || Array.isArray(msg)) return undefined
+  const { type, symbols } = msg as { type?: unknown; symbols?: unknown }
+  if (type === 'unwatch') return null
+  if (type !== 'watch' || !Array.isArray(symbols) || symbols.length > MAX_WATCH_SYMBOLS) {
+    return undefined
+  }
+  const set = new Set<string>()
+  for (const s of symbols as unknown[]) {
+    if (typeof s !== 'string') return undefined
+    if (WATCH_SYMBOL_RE.test(s)) set.add(s)
+  }
+  return { symbols: set, key: [...set].sort().join(',') }
+}
+
+type TickersEvent = Extract<HubEvent, { type: 'tickers' }>
+
+/**
+ * A tickers event narrowed to one watched set, serialized once per (event, distinct set) however
+ * many clients share the set. null: none of the set changed in this push (nothing to send).
+ */
+const watchedSerialized = new WeakMap<TickersEvent, Map<string, string | null>>()
+export function serializeWatched(event: TickersEvent, watch: Watch): string | null {
+  let byKey = watchedSerialized.get(event)
+  if (byKey === undefined) {
+    byKey = new Map()
+    watchedSerialized.set(event, byKey)
+  }
+  let s = byKey.get(watch.key)
+  if (s === undefined) {
+    const tickers = event.tickers.filter((t) => watch.symbols.has(t.symbol))
+    s = tickers.length === 0 ? null : JSON.stringify({ type: 'tickers', tickers })
+    byKey.set(watch.key, s)
+  }
+  return s
+}
+
 export default async function streamRoutes(
   app: FastifyInstance,
   opts: RouteOptions,
@@ -56,13 +130,16 @@ export default async function streamRoutes(
   // Shared with the alert engine; created and closed by buildApp.
   const { hub } = opts
 
-  const attach = (socket: ClientSocket, key: StreamKey): void => {
+  /** `watchable`: the client may narrow tickers events with a `watch` message (`/ws/tickers`). */
+  const attach = (socket: ClientSocket, key: StreamKey, watchable = false): void => {
     if (hub.status(key) === undefined && hub.size >= MAX_UPSTREAM_KEYS) {
       socket.close(1013, 'too many streams')
       return
     }
     let release: () => void = () => {}
     let done = false
+    /** Until the client sends a `watch`, it gets every symbol (older clients never send one). */
+    let watch: Watch | null = null
     const cleanup = (): void => {
       if (done) return
       done = true
@@ -83,8 +160,11 @@ export default async function streamRoutes(
 
     socket.on('close', cleanup)
     socket.on('error', cleanup)
-    socket.on('message', () => {
-      // Clients never send anything; ignore.
+    socket.on('message', (data: unknown) => {
+      // Only `watch`/`unwatch` on /ws/tickers means anything; every other frame is ignored.
+      if (!watchable || done) return
+      const next = parseWatchMessage(data)
+      if (next !== undefined) watch = next
     })
 
     const send = (event: HubEvent): void => {
@@ -99,8 +179,12 @@ export default async function streamRoutes(
         }
         return
       }
+      let payload: string | null
+      if (watch !== null && event.type === 'tickers') payload = serializeWatched(event, watch)
+      else payload = serialize(event)
+      if (payload === null) return
       try {
-        socket.send(serialize(event))
+        socket.send(payload)
       } catch {
         // Socket is going away; 'close' will clean up.
       }
@@ -136,6 +220,6 @@ export default async function streamRoutes(
 
   app.get('/ws/tickers', { websocket: true }, (socket: ClientSocket, req) => {
     if (!originOk(socket, req)) return
-    attach(socket, TICKERS_KEY)
+    attach(socket, TICKERS_KEY, true)
   })
 }

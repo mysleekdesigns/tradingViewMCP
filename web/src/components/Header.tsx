@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { memo, type ReactNode } from 'react'
 import { shortcutHint } from '../state/appSettings'
 import type { ThemeName } from '../state/settings'
 import type { ChartType, ConnectionStatus, Timeframe } from '../types'
@@ -7,6 +7,7 @@ import { ChartTypeMenu } from './ChartTypeMenu'
 import { ConnectionIndicator } from './ConnectionStatus'
 import './Indicators.css'
 import type { Quote } from './quote'
+import { QuoteView } from './QuoteReadout'
 import { TimeframePicker } from './TimeframePicker'
 
 interface HeaderProps {
@@ -42,7 +43,13 @@ interface HeaderProps {
   watchlistOpen: boolean
   onToggleWatchlist: () => void
   source: string
-  quote: Quote | null
+  /** The quote to show; ignored when `quoteSlot` is given. */
+  quote?: Quote | null
+  /**
+   * The quote element in its place (e.g. a QuoteReadout that reads the live store itself, so a
+   * tick re-renders only that leaf). Pass a stable element; it wins over `quote`.
+   */
+  quoteSlot?: ReactNode
   /** Live-stream state, shown as a small dot beside the ticker. */
   status: ConnectionStatus
   loading: boolean
@@ -62,7 +69,7 @@ interface HeaderProps {
   layoutControl?: ReactNode
 }
 
-export function Header({
+export const Header = memo(function Header({
   symbol,
   description,
   interval,
@@ -85,6 +92,7 @@ export function Header({
   onToggleWatchlist,
   source,
   quote,
+  quoteSlot,
   status,
   loading,
   onRefresh,
@@ -106,7 +114,7 @@ export function Header({
   return (
     <header className="topbar">
       <div className="topbar__brand" role="img" aria-label="tradingView">
-        <LogoMark />
+        {LOGO_MARK}
       </div>
 
       <div className="topbar__divider" aria-hidden="true" />
@@ -120,21 +128,7 @@ export function Header({
           aria-label={`Symbol ${symbol}. Change symbol`}
           title="Change symbol (Ctrl/Cmd+K, or just start typing)"
         >
-          <svg
-            className="symbol-btn__glass"
-            width="14"
-            height="14"
-            viewBox="0 0 16 16"
-            aria-hidden="true"
-          >
-            <circle cx="7" cy="7" r="4.75" fill="none" stroke="currentColor" strokeWidth="1.5" />
-            <path
-              d="M10.5 10.5 14 14"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-            />
-          </svg>
+          {SEARCH_GLASS}
           <span className="topbar__ticker">{symbol}</span>
         </button>
         <ConnectionIndicator status={status} variant="compact" />
@@ -157,7 +151,7 @@ export function Header({
         aria-label="Indicators"
         title="Indicators (/)"
       >
-        <IndicatorsIcon />
+        {INDICATORS_ICON}
         <span className="ind-btn__label">Indicators</span>
       </button>
 
@@ -171,7 +165,7 @@ export function Header({
         aria-label="Create alert"
         title={alertDisabledReason ?? 'Create alert (Alt+A)'}
       >
-        <BellIcon />
+        {BELL_ICON}
         <span className="ind-btn__label">Alert</span>
       </button>
 
@@ -190,7 +184,7 @@ export function Header({
               'Bar replay: click a bar to replay history from it, bar by bar (Shift+→ step, Shift+↓ play)')
         }
       >
-        <ReplayIcon />
+        {REPLAY_ICON}
         <span className="ind-btn__label">Replay</span>
       </button>
 
@@ -206,7 +200,7 @@ export function Header({
             : 'Regime ribbon: hedgeFund bull / sideways / bear label of each closed bar (needs the lab)'
         }
       >
-        <RegimeIcon />
+        {REGIME_ICON}
         <span className="ind-btn__label">Regime</span>
       </button>
 
@@ -223,7 +217,7 @@ export function Header({
               : "Funding / OI: historical funding rate and open interest panes from Binance's futures archive (needs the lab; no live stream)"
           }
         >
-          <DerivativesIcon />
+          {DERIVATIVES_ICON}
           <span className="ind-btn__label">Funding / OI</span>
         </button>
       )}
@@ -236,26 +230,13 @@ export function Header({
         aria-label="Seasonals"
         title={`Seasonals: monthly and weekday returns of ${symbol}`}
       >
-        <CalendarIcon />
+        {CALENDAR_ICON}
         <span className="ind-btn__label">Seasonals</span>
       </button>
 
       <div className="topbar__divider" aria-hidden="true" />
 
-      {/* No aria-live: once prices stream, it would announce every tick. */}
-      <div className={`quote quote--${quote?.direction ?? 'flat'}`}>
-        {quote ? (
-          <>
-            <span className="quote__price">{quote.price}</span>
-            <span className="quote__change">
-              {quote.change} ({quote.changePct})
-            </span>
-            <span className="quote__basis">{quote.basis}</span>
-          </>
-        ) : (
-          <span className="quote__placeholder" aria-hidden="true" />
-        )}
-      </div>
+      {quoteSlot !== undefined ? quoteSlot : <QuoteView quote={quote ?? null} />}
 
       <div className="topbar__spacer" />
 
@@ -290,7 +271,7 @@ export function Header({
           title={`Save chart image as PNG (${shortcutHint(isMac, 'screenshot')})`}
           onClick={onScreenshot}
         >
-          <CameraIcon />
+          {CAMERA_ICON}
         </button>
         <button
           type="button"
@@ -299,7 +280,7 @@ export function Header({
           title={`Switch to ${nextTheme} theme (${shortcutHint(isMac, 'theme')})`}
           onClick={onToggleTheme}
         >
-          {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
+          {theme === 'dark' ? SUN_ICON : MOON_ICON}
         </button>
         <button
           type="button"
@@ -309,7 +290,7 @@ export function Header({
           title={`Keyboard shortcuts (${shortcutHint(isMac, 'help')})`}
           onClick={onOpenShortcuts}
         >
-          <KeyboardIcon />
+          {KEYBOARD_ICON}
         </button>
         <button
           type="button"
@@ -319,7 +300,7 @@ export function Header({
           title="Settings: theme, colours, data provider, time zone"
           onClick={onOpenSettings}
         >
-          <GearIcon />
+          {GEAR_ICON}
         </button>
       </div>
 
@@ -333,27 +314,53 @@ export function Header({
         title={watchlistOpen ? 'Hide watchlist' : 'Show watchlist'}
         onClick={onToggleWatchlist}
       >
-        <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
-          <rect
-            x="2.5"
-            y="3"
-            width="13"
-            height="12"
-            rx="1.5"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.3"
-          />
-          <path
-            d="M11 3v12M12.8 6.5h1.2M12.8 9h1.2M12.8 11.5h1.2"
-            stroke="currentColor"
-            strokeWidth="1.3"
-          />
-        </svg>
+        {WATCHLIST_GLYPH}
       </button>
     </header>
   )
-}
+})
+
+// Static icon elements, created once: the Header re-renders on every quote tick, and reusing the
+// same element objects lets React skip these subtrees instead of re-running each icon function.
+// (The function declarations below are hoisted, so referencing them here is safe.)
+const LOGO_MARK = <LogoMark />
+const INDICATORS_ICON = <IndicatorsIcon />
+const BELL_ICON = <BellIcon />
+const REPLAY_ICON = <ReplayIcon />
+const REGIME_ICON = <RegimeIcon />
+const DERIVATIVES_ICON = <DerivativesIcon />
+const CALENDAR_ICON = <CalendarIcon />
+const CAMERA_ICON = <CameraIcon />
+const SUN_ICON = <SunIcon />
+const MOON_ICON = <MoonIcon />
+const KEYBOARD_ICON = <KeyboardIcon />
+const GEAR_ICON = <GearIcon />
+
+const SEARCH_GLASS = (
+  <svg className="symbol-btn__glass" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+    <circle cx="7" cy="7" r="4.75" fill="none" stroke="currentColor" strokeWidth="1.5" />
+    <path d="M10.5 10.5 14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+  </svg>
+)
+const WATCHLIST_GLYPH = (
+  <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+    <rect
+      x="2.5"
+      y="3"
+      width="13"
+      height="12"
+      rx="1.5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+    />
+    <path
+      d="M11 3v12M12.8 6.5h1.2M12.8 9h1.2M12.8 11.5h1.2"
+      stroke="currentColor"
+      strokeWidth="1.3"
+    />
+  </svg>
+)
 
 function LogoMark() {
   // Three candles: a compact, recognisable mark for a charting app.

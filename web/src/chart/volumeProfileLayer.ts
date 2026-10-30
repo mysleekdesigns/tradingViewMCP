@@ -10,7 +10,9 @@
 // The profile itself is computed by the indicator def (`IndicatorDef.profile`); this file only
 // draws it. It is recomputed only when the instance's inputs or the candles in its range change
 // (candle object identity), so live ticks after a fixed range cost a binary search and an
-// identity scan; a tick inside an open-ended range adds only the forming bar (O(rows)).
+// identity check (O(1) with the chart's shared `BarLineage`, which knows what the tick kept;
+// otherwise a scan of the range); a tick inside an open-ended range adds only the forming bar
+// (O(rows)).
 
 import type {
   AutoscaleInfo,
@@ -43,6 +45,7 @@ import type {
 } from '../indicators/types'
 import type { IndicatorConfig } from '../state/indicators'
 import type { Candle } from '../types'
+import { BarLineage } from './structureBars'
 import type { ChartPalette } from './theme'
 
 type RenderTarget = Parameters<IPrimitivePaneRenderer['draw']>[0]
@@ -278,6 +281,11 @@ export const volumeProfileOpenOps: OpenProfileOps = {
 /** Last computed profile of one instance and what it was computed from. */
 export interface ProfileCache {
   inputsKey: string
+  /**
+   * The inputs object `inputsKey` was built from. Configs are immutable, so the same object
+   * means the same key and the string is not rebuilt per tick.
+   */
+  inputs?: IndicatorInputs
   candles: readonly Candle[] | null
   /** In-range bars when computed: `candles[start .. start + count - 1]`. */
   start: number
@@ -329,8 +337,15 @@ function sameBars(
   b: readonly Candle[],
   bStart: number,
   k: number,
+  lineage: Pick<BarLineage, 'knownSamePrefix'> | null = null,
 ): boolean {
-  for (let i = 0; i < k; i++) if (a[aStart + i] !== b[bStart + i]) return false
+  let i = 0
+  if (lineage !== null && aStart === bStart) {
+    // a[j] === b[j] for j < known: the in-range bars below it need no check.
+    const known = lineage.knownSamePrefix(a, b)
+    if (known !== null) i = Math.min(k, Math.max(0, known - aStart))
+  }
+  for (; i < k; i++) if (a[aStart + i] !== b[bStart + i]) return false
   return true
 }
 
@@ -350,12 +365,14 @@ export function nextProfileCache(
   open: OpenProfileOps | null = def.profile === volumeProfileDef.profile
     ? volumeProfileOpenOps
     : null,
+  lineage: Pick<BarLineage, 'knownSamePrefix'> | null = null,
 ): ProfileCache {
-  const key = inputsKey(inputs)
+  const key = cache !== null && cache.inputs === inputs ? cache.inputsKey : inputsKey(inputs)
   if (cache !== null && cache.inputsKey === key && cache.candles === candles) return cache
   if (candles === null || candles.length === 0 || def.profile === undefined) {
     return {
       inputsKey: key,
+      inputs,
       candles,
       start: 0,
       count: 0,
@@ -375,9 +392,9 @@ export function nextProfileCache(
       : null
   const prevCandles = prev?.candles ?? null
   if (prev !== null && prevCandles !== null) {
-    if (sameBars(prevCandles, prev.start, candles, start, count)) {
+    if (sameBars(prevCandles, prev.start, candles, start, count, lineage)) {
       // Same bars in range: keep the profile, remember the new array for the identity check.
-      return { ...prev, candles, start }
+      return { ...prev, inputs, candles, start }
     }
   }
 
@@ -386,6 +403,7 @@ export function nextProfileCache(
   if (!openEnded) {
     return {
       inputsKey: key,
+      inputs,
       candles,
       start,
       count,
@@ -402,13 +420,14 @@ export function nextProfileCache(
     prev !== null &&
     prevCandles !== null &&
     prev.base !== null &&
-    sameBars(prevCandles, prev.start, candles, start, count - 1) &&
+    sameBars(prevCandles, prev.start, candles, start, count - 1, lineage) &&
     open.fits(prev.base, forming)
       ? prev.base
       : null
   if (base === null) base = open.base(candles, start, last, inputs)
   return {
     inputsKey: key,
+    inputs,
     candles,
     start,
     count,
@@ -656,15 +675,22 @@ interface Entry {
  * Every range indicator (a def with `profile`) drawn on the main series: one primitive per
  * instance. Usage from Chart: `attach(mainSeries)` when the main series is created and
  * `detach(alive)` before it is removed (chart-type switch), `sync(configs, appliedCandles)` when
- * the indicator configs or the candles change, `setColors` on theme change.
+ * the indicator configs or the candles change, `setColors` on theme change. `lineage` is the
+ * chart's shared `BarLineage` (as for market structure and sessions): with it a live tick
+ * checks the in-range bars without reading them.
  */
 export class VolumeProfileLayer {
   private series: PrimitiveHost | null = null
   private readonly entries = new Map<string, Entry>()
   private colors: VolumeProfileColors
+  private readonly lineage: BarLineage
 
-  constructor(colors: VolumeProfileColors = DEFAULT_VOLUME_PROFILE_COLORS) {
+  constructor(
+    colors: VolumeProfileColors = DEFAULT_VOLUME_PROFILE_COLORS,
+    lineage: BarLineage = new BarLineage(),
+  ) {
     this.colors = colors
+    this.lineage = lineage
   }
 
   /** Attach every primitive to `series` (moving them off a previous one). */
@@ -708,7 +734,14 @@ export class VolumeProfileLayer {
       entry.primitive.setVisible(config.visible)
       // Hidden instances draw nothing and are not recomputed until shown again.
       if (!config.visible) continue
-      entry.cache = nextProfileCache(entry.cache, def, config.inputs, candles)
+      entry.cache = nextProfileCache(
+        entry.cache,
+        def,
+        config.inputs,
+        candles,
+        def.profile === volumeProfileDef.profile ? volumeProfileOpenOps : null,
+        this.lineage,
+      )
       entry.primitive.setProfile(entry.cache.profile)
     }
     for (const [uid, entry] of this.entries) {
