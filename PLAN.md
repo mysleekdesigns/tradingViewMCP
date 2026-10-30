@@ -1108,6 +1108,72 @@ and incremental-vs-full tests pass.
 
 ---
 
+## Phase 19 — Web Performance & DRY (chart, data, server, bundle)
+
+Why: the 2026-10-30 audit (`agents/research/reports/Web performance research.md`) found no single
+hot spot but a layer of steady-state overhead that grows with history length, panel count and tick
+rate, plus a startup payload shipped as one 1.02 MB chunk. The tick path already uses
+`series.update`, incremental indicator checkpoints, `BarLineage` prefix checks and `barsKey` gating;
+this phase removes the remaining per-tick scans and root re-renders, cleans the per-frame path in the
+primitives, trims history-load and network cost, splits the bundle, and consolidates the duplicate
+code those fixes touch. Touches `web/` and `server/` only; nothing in `lab/`.
+
+Rules for this phase: measure before and after every wave with the protocol in report section 7
+(Chrome Performance trace on BTCUSDT 1m with 2 indicators and 1 drawing, single and 4-panel; React
+Profiler highlight-updates; allocation sampling; server upstream-call log; `vite build` chunk sizes).
+A wave is not done on "looks faster"; it is done when the trace shows the change. Every indicator or
+layer rewrite keeps its known-value, no-look-ahead and incremental-vs-full tests green. No behaviour
+change is allowed in this phase: same pixels, same numbers, same markers.
+
+### Checklist
+
+Wave 1 — per-tick waste (highest payoff)
+- [ ] Baseline traces recorded and saved under `agents/research/research_notes/` before any change (single and 4-panel, Binance 1m, plus Coinbase BTC-USD 1m)
+- [ ] Tail detection by lineage/version instead of full scans: `data/candleStore.ts` `applyLiveCandle`, `data/plottable.ts` `every(isTradedBar)`, `chart/seriesSync.ts` `tailMatch`; volume profile layer takes the shared `BarLineage` like structure and sessions; per-tick scripting time independent of history length in the trace
+- [ ] Live snapshots out of App state: `lives` becomes a small external store read by the quote, StatusBar and paper feed only; status/closedThrough/error stay in React state; `indicatorSeries` stops emitting on 'update' plans; `useLiveCandles` returns a stable object; keydown handler reads `lastClose` from a ref; React Profiler shows no shell commit (Header, SidebarRail, StatusBar, DrawingToolbar, Watchlist) on a forming-bar tick
+- [ ] `memo()` the shell: Header (hoisted callbacks, memoised LayoutMenu element), Watchlist and `WatchlistRow` (symbol-keyed stable callbacks, cached `Intl.NumberFormat`), StatusBar (cached clock formatter per timezone), SidebarRail, AlertsPanel props hoisted
+- [ ] Coinbase forming-bar emits coalesced per animation frame (or 100–250 ms), same pattern as the existing ticker flush in `coinbaseStream.ts`
+- [ ] Ticker stream filtered before object construction: direct path checks `raw.s` against the watched set in `binanceTicker.ts`; server `/ws/tickers` clients send their watched symbols and the hub filters before serialising; `/ws/tickers` bytes per second drop by the watched-to-total ratio
+- [ ] Small per-tick allocations removed: `volumePaletteOf` per point, `inputsKey` string and param/toggle objects per tick in the three layers, `uidOfSeries` linear scan replaced by a `Map`, aggregated-timeframe bucket kept as running OHLCV in `BucketState`
+
+Wave 2 — per-frame path (crosshair, scroll, zoom, drawing drag)
+- [ ] Drawings primitive (`chart/drawings/primitives.ts`): rgba strings, scaled dash arrays, fib label strings and handle points precomputed into `RenderItem` in `updateAllViews`; `draw()` is canvas calls only; trace with the mouse moving shows no string or `Intl` work per paint
+- [ ] Geometry signature cache for market structure, volume profile and session layers (visible logical range, width, barSpacing, two reference `priceToCoordinate` values, view version); unchanged view returns cached geometry; volume profile culls off-screen before building rows, caches `maxVolume` and value-area flags on `setProfile`, and derives barSpacing from `logicalToCoordinate` instead of `timeScale().options()`
+- [ ] Drawings hit test uses the frame's cached shapes instead of re-projecting every drawing per mouse move; selected drawing projected once
+- [ ] Legend rows memoised on `[indicatorSnapshot.version, hoveredTime, lastBarTime]` and partitioned once; dash arrays hoisted once per draw and strokes batched by colour in the three layers
+
+Wave 3 — history load, bar close, network
+- [ ] Rolling-window indicator primitives (`indicators/primitives.ts`) use a ring buffer with running sum and sum-of-squares (periodic re-sum for drift); 'prepend' computes only the new head and splices; perturbation and known-value tests unchanged; a 1000-bar prepend on a 150k history no longer resets every runner
+- [ ] Prepend/gap merge by binary-search splice of two sorted arrays (no Map + sort); one plotted-times `Set` and one `barsKey` shared by `Chart.tsx`, `backtestOverlay` and `derivativesPanes`; `series.update()` for the newest point when only the tail grew; volume `setData` gated on up/down colour actually changing; same-kind chart-type switches use `applyOptions` + `setData` without removing the series
+- [ ] Server: candles route serves the forming bar from the hub's last kline so a warm-cache `/api/candles` makes zero upstream calls (verified in the server log); `@fastify/compress` (brotli/gzip); `Cache-Control: immutable` + ETag on closed-history pages (`endTime` set)
+- [ ] Ref-counted live-candle controller cache keyed on provider/symbol/interval so two panels on the same market share one socket and one REST load; Coinbase REST pages fetched in parallel within the 125 ms throttle budget
+
+Wave 4 — startup and bundle
+- [ ] `TesterIcon` and `ResearchIcon` moved out of `BacktestPanel`/`ResearchPage` into a small icons module; `React.lazy` + `Suspense` for ResearchPage, BacktestPanel, PaperTradingPanel, SeasonalsView and SettingsDialog (their CSS splits with them); vendor groups via `build.rolldownOptions.output.codeSplitting.groups` for react/react-dom, lightweight-charts and lwc-plugin-accessibility; main chunk under ~150 KB gzip and vendor hashes stable across an app-only change
+- [ ] Fonts: four weights (sans 400/600, mono 400/500) or `@fontsource-variable` packages; `<link rel="preload" as="font">` for the two body weights in `index.html`; `server.warmup` for `App.tsx` and `Chart.tsx` in dev
+- [ ] React Compiler: `eslint-plugin-react-compiler` added and violations fixed (setState-during-render sites in `App.tsx` and `useReplay.ts`, over-specified deps in `state/drawings.ts`, render-computed `slots` closure); compiler enabled on `@vitejs/plugin-react` v6 (`react({ compiler: true })` with `oxc-transform-react`, or `@rolldown/plugin-babel` + `reactCompilerPreset()`) in `annotation` mode on the shell first, then `all`; existing `useMemo`/`useCallback` left in place until profiled
+
+Wave 5 — DRY consolidation (interleave with waves 1–4 where a fix touches the duplicate)
+- [ ] `web/src/data/http.ts` (one typed request helper: fetch, JSON, abort, Retry-After, error mapping) and `web/src/data/guards.ts` (isRecord/finite/nonEmptyString/toFiniteNumber/dedupeByTime/candle equality) replace the copies in `binance.ts`, `coinbase.ts`, `server.ts`, `persistence.ts`, `labApi.ts`, `researchApi.ts`, `drawingsApi.ts`
+- [ ] `chart/layers/base.ts`: shared primitive base (uid, visible, attach/detach, paneViews, updateAllViews, render-target types), shared layer host (entries map, keep-set sweep, setColors fan-out), shared coords adapter, lineage prefix memo inside `BarLineage`; `chart/util/search.ts` with one `lowerBound`; one luminance function (pick Rec.709 or Rec.601, used everywhere); one candle→point mapper set
+- [ ] State/UI: one `storedValue<T>` + `useStoredState` for the six localStorage pairs and eight persist-on-change effects; `useModalKeys` extended to the twelve hand-rolled Escape handlers; a `useMenu` hook for TimeframePicker, ChartTypeMenu and LayoutMenu; a `useController(factory, deps)` hook for the seven controller-in-state hooks
+- [ ] `components/primitives.css`: icon button, tab with accent underline, dialog shell/head/foot, `:focus-visible` ring, thin scrollbar, panel head/title/empty chrome; the seven-plus copies removed from the component stylesheets; visual diff shows no change
+- [ ] After each wave: code review (`code-reviewer`; `quant-reviewer` for anything under `web/src/indicators/`), `npx tsc -b`, `npx vitest run`, `npm run lint` in `web/`; `npx tsc --noEmit`, `npx vitest run` in `server/`; then `/run-gate 19`; browser checks listed for the owner
+
+Not in this phase: a Web Worker for indicators (only worth it for full recomputes on very long
+histories once the primitives are O(1) per bar; revisit if the post-wave-3 trace still shows
+`runner.reset` as a long task), compact kline arrays on the wire (client and server change; measure
+after compression first), and any change to what the chart shows.
+
+**Done when:** on BTCUSDT 1m with two indicators, one drawing and a 4-panel layout, a 10 s Chrome
+Performance trace shows no React commit outside ChartPanel on a forming-bar tick, per-tick scripting
+time that does not grow with history length, no string or `Intl` work while the crosshair moves; a
+warm-cache candles request makes no upstream call and is served compressed; `vite build` emits
+separate vendor and panel chunks with the main chunk under ~150 KB gzip; and every existing test,
+typecheck and lint stays green with no visual change.
+
+---
+
 ## Testing Strategy
 
 - **Unit (Vitest):** indicator math, data mappers (Binance kline → Candle).
@@ -1163,5 +1229,6 @@ and incremental-vs-full tests pass.
 | 16 | Market structure overlay (non-repainting swing points, BOS/ChoCh markers, flip zones with first retest; visual only, no lab changes) | Medium |
 | 17 | Jev trade-time judge (forward-only shadow judge on the HC paper bots, hash-chained decision log, pre-registered take-vs-skip test; optional decision panel) | Medium |
 | 18 | Session ranges overlay (Asia/London/New York boxes and UTC opening range; visual only, no lab changes) | Small |
+| 19 | Web performance & DRY (per-tick scans and root re-renders removed, primitive frame path cleaned, forming bar from the hub + compression, code splitting + React Compiler, ~1.7–2k duplicate lines consolidated; no visual change) | Large |
 
 **First usable version = end of Phase 3.**
