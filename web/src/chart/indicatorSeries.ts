@@ -394,6 +394,36 @@ export function buildLegendRow(
   return row
 }
 
+/** Legend rows split by where they render: the main legend (pane 0) and the pane legends. */
+export interface LegendRowPartition {
+  /** Overlay and volume rows (`pane === 0`), in config order: the main (top-left) legend. */
+  readonly main: readonly IndicatorLegendRow[]
+  /** Pane-indicator rows (`pane > 0`), in config order: one legend per indicator pane. */
+  readonly panes: readonly IndicatorLegendRow[]
+}
+
+/** One partition per rows array (the manager memoises the rows, so this is once per state). */
+const legendPartitions = new WeakMap<readonly IndicatorLegendRow[], LegendRowPartition>()
+
+/**
+ * Split legend rows into main-legend rows (`pane === 0`) and pane-legend rows (`pane > 0`) in one
+ * pass, keeping order. Cached by the identity of `rows`: the same array always returns the same
+ * partition (and the same two arrays), so memo'd legend components skip re-rendering.
+ */
+export function partitionLegendRows(rows: readonly IndicatorLegendRow[]): LegendRowPartition {
+  const cached = legendPartitions.get(rows)
+  if (cached !== undefined) return cached
+  const main: IndicatorLegendRow[] = []
+  const panes: IndicatorLegendRow[] = []
+  for (const row of rows) {
+    if (row.pane === 0) main.push(row)
+    else if (row.pane > 0) panes.push(row)
+  }
+  const partition: LegendRowPartition = { main, panes }
+  legendPartitions.set(rows, partition)
+  return partition
+}
+
 /* ------------------------------------------------------------------------------------------ */
 /* Series manager                                                                              */
 /* ------------------------------------------------------------------------------------------ */
@@ -717,6 +747,14 @@ export class IndicatorSeriesManager {
       rows,
     }
     return rows
+  }
+
+  /**
+   * `legendRows` split once into main-legend (pane 0) and pane-legend (pane > 0) rows. Same
+   * memo keys as `legendRows`: unchanged state returns the same partition object and arrays.
+   */
+  legendPartition(hoveredTime: number | undefined, intervalSeconds?: number): LegendRowPartition {
+    return partitionLegendRows(this.legendRows(hoveredTime, intervalSeconds))
   }
 
   private buildLegendRows(

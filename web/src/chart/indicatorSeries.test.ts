@@ -27,6 +27,8 @@ import {
   SESSION_DAILY_NOTE,
   sessionAlignmentNote,
   paneIndicatorUids,
+  partitionLegendRows,
+  type IndicatorLegendRow,
 } from './indicatorSeries'
 import { planSeriesSync } from './seriesSync'
 
@@ -1217,5 +1219,149 @@ describe('IndicatorSeriesManager legendRows memo', () => {
     const hidden = manager.legendRows(undefined)
     expect(hidden).not.toBe(before)
     expect(hidden[0].visible).toBe(false)
+  })
+})
+
+describe('partitionLegendRows (main legend vs pane legends, split once)', () => {
+  /** Deterministic PRNG (mulberry32) so the randomised cases are reproducible. */
+  function rng(seed: number): () => number {
+    let a = seed >>> 0
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0
+      let t = a
+      t = Math.imul(t ^ (t >>> 15), t | 1)
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+  }
+
+  function randomRows(rand: () => number): IndicatorLegendRow[] {
+    const n = Math.floor(rand() * 12)
+    return Array.from({ length: n }, (_, i) => {
+      // Mostly 0..4; now and then a negative pane, which neither old filter kept.
+      const pane = rand() < 0.05 ? -1 : Math.floor(rand() * 5)
+      return {
+        uid: `u${i}`,
+        title: `T${i}`,
+        placement: pane === 0 ? 'overlay' : 'pane',
+        pane,
+        visible: rand() < 0.8,
+        values: [],
+      }
+    })
+  }
+
+  it('matches the two old filters (same rows, same order) for randomised panes', () => {
+    const rand = rng(19)
+    for (let trial = 0; trial < 500; trial++) {
+      const rows = randomRows(rand)
+      const { main, panes } = partitionLegendRows(rows)
+      const wantMain = rows.filter((r) => r.pane === 0)
+      const wantPanes = rows.filter((r) => r.pane > 0)
+      expect(main).toEqual(wantMain)
+      expect(panes).toEqual(wantPanes)
+      // The very same row objects, not copies.
+      main.forEach((row, i) => expect(row).toBe(wantMain[i]))
+      panes.forEach((row, i) => expect(row).toBe(wantPanes[i]))
+    }
+  })
+
+  it('the same rows array returns the same partition and arrays; a new array a new one', () => {
+    const rows = randomRows(rng(7))
+    const a = partitionLegendRows(rows)
+    const b = partitionLegendRows(rows)
+    expect(b).toBe(a)
+    expect(b.main).toBe(a.main)
+    expect(b.panes).toBe(a.panes)
+    const copy = [...rows]
+    const c = partitionLegendRows(copy)
+    expect(c).not.toBe(a)
+    expect(c).toEqual(a)
+  })
+
+  it('empty rows: two empty arrays', () => {
+    expect(partitionLegendRows([])).toEqual({ main: [], panes: [] })
+  })
+})
+
+describe('IndicatorSeriesManager legendPartition', () => {
+  const candles = makeCandles(80)
+
+  it('equals the old filters over legendRows, and is stable while nothing changes', () => {
+    const { manager } = setup(
+      [cfg('ema', 'e'), cfg('rsi', 'r'), cfg('volma', 'v'), cfg('macd', 'm')],
+      candles,
+    )
+    const p = manager.legendPartition(undefined, 3_600)
+    const rows = manager.legendRows(undefined, 3_600)
+    expect(p.main).toEqual(rows.filter((r) => r.pane === 0))
+    expect(p.panes).toEqual(rows.filter((r) => r.pane > 0))
+    expect(p.main.map((r) => r.uid)).toEqual(['e', 'v'])
+    expect(p.panes.map((r) => [r.uid, r.pane])).toEqual([
+      ['r', 1],
+      ['m', 2],
+    ])
+    // Main legend and pane legends asking in one render get the very same arrays.
+    const again = manager.legendPartition(undefined, 3_600)
+    expect(again).toBe(p)
+    expect(again.main).toBe(p.main)
+    expect(again.panes).toBe(p.panes)
+  })
+
+  it("still current after a forming-bar tick ('update' plan)", () => {
+    const ema = cfg('ema', 'e')
+    const rsi = cfg('rsi', 'r')
+    const { manager } = setup([ema, rsi], candles)
+    const before = manager.legendPartition(undefined)
+    const ticked = [...candles.slice(0, -1), { ...candles[candles.length - 1], close: 250 }]
+    const plan = planSeriesSync(candles, ticked)
+    expect(plan.kind).toBe('update')
+    manager.applyPlan(plan, ticked)
+    const after = manager.legendPartition(undefined)
+    expect(after).not.toBe(before)
+    const wantEma = computeIndicator(def('ema'), ticked, { period: 20 }, 'close').ema.at(-1)
+    const wantRsi = computeIndicator(def('rsi'), ticked, rsi.inputs, 'close').rsi.at(-1)
+    expect(after.main[0].values[0].text).toBe(wantEma?.value.toFixed(2))
+    expect(after.panes[0].values[0].text).toBe(wantRsi?.value.toFixed(2))
+    expect(after.main).toEqual(manager.legendRows(undefined).filter((r) => r.pane === 0))
+    expect(after.panes).toEqual(manager.legendRows(undefined).filter((r) => r.pane > 0))
+  })
+
+  it('follows the hovered bar', () => {
+    const { manager } = setup([cfg('ema', 'e'), cfg('rsi', 'r')], candles)
+    const last = manager.legendPartition(undefined)
+    const hoverTime = candles[40].time
+    const hovered = manager.legendPartition(hoverTime)
+    expect(hovered).not.toBe(last)
+    const wantEma = computeIndicator(def('ema'), candles, { period: 20 }, 'close').ema.find(
+      (p) => p.time === hoverTime,
+    )
+    expect(hovered.main[0].values[0].text).toBe(wantEma?.value.toFixed(2))
+    expect(hovered.main[0].values[0].text).toBe(manager.legendRows(hoverTime)[0].values[0].text)
+    expect(manager.legendPartition(hoverTime)).toBe(hovered)
+    expect(manager.legendPartition(undefined).main[0].values[0].text).toBe(
+      last.main[0].values[0].text,
+    )
+  })
+
+  it('follows a config change (visibility, a new pane indicator, a removal)', () => {
+    const ema = cfg('ema', 'e')
+    const rsi = cfg('rsi', 'r')
+    const { manager } = setup([ema], candles)
+    const p0 = manager.legendPartition(undefined)
+    expect(p0.main.map((r) => r.uid)).toEqual(['e'])
+    expect(p0.panes).toEqual([])
+    manager.sync([{ ...ema, visible: false }], candles)
+    const p1 = manager.legendPartition(undefined)
+    expect(p1).not.toBe(p0)
+    expect(p1.main[0].visible).toBe(false)
+    manager.sync([{ ...ema, visible: false }, rsi], candles)
+    const p2 = manager.legendPartition(undefined)
+    expect(p2.main.map((r) => r.uid)).toEqual(['e'])
+    expect(p2.panes.map((r) => [r.uid, r.pane])).toEqual([['r', 1]])
+    manager.sync([rsi], candles)
+    const p3 = manager.legendPartition(undefined)
+    expect(p3.main).toEqual([])
+    expect(p3.panes.map((r) => r.uid)).toEqual(['r'])
   })
 })

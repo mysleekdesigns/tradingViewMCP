@@ -16,6 +16,7 @@
 
 import type {
   AutoscaleInfo,
+  IChartApi,
   IChartApiBase,
   IPrimitivePaneRenderer,
   IPrimitivePaneView,
@@ -47,6 +48,7 @@ import type { IndicatorConfig } from '../state/indicators'
 import type { Candle } from '../types'
 import { BarLineage } from './structureBars'
 import type { ChartPalette } from './theme'
+import { barSpacingOf, sameViewSignature, viewSignature, type ViewSignature } from './viewSignature'
 
 type RenderTarget = Parameters<IPrimitivePaneRenderer['draw']>[0]
 type BitmapScope = Parameters<Parameters<RenderTarget['useBitmapCoordinateSpace']>[0]>[0]
@@ -163,40 +165,78 @@ export function isValueAreaRow(
   return row.low >= profile.val - eps && row.high <= profile.vah + eps
 }
 
-/** Screen geometry of a profile, or null when the chart cannot place it (no data). */
-export function profileGeometry(
-  profile: VolumeProfile,
-  coords: ProfileCoords,
-): ProfileGeometry | null {
-  if (profile.rows.length === 0) return null
-  const xFrom = coords.xOfTime(profile.from)
-  const xTo = coords.xOfTime(profile.to)
-  if (xFrom === null || xTo === null) return null
-  const half = Math.max(0, coords.barSpacing) / 2
+/**
+ * Per-profile constants of the geometry: the largest row volume and each row's value-area flag.
+ * They depend only on the (immutable) profile, so the primitive computes them once per
+ * `setProfile` instead of once per frame.
+ */
+export interface ProfileStats {
+  maxVolume: number
+  /** `isValueAreaRow(profile.rows[i], profile)`, by row index. */
+  inValueArea: readonly boolean[]
+}
+
+export function profileStats(profile: VolumeProfile): ProfileStats {
+  let maxVolume = 0
+  const inValueArea: boolean[] = []
+  for (const r of profile.rows) {
+    if (r.volume > maxVolume) maxVolume = r.volume
+    inValueArea.push(isValueAreaRow(r, profile))
+  }
+  return { maxVolume, inValueArea }
+}
+
+/** Horizontal extent of a profile: everything `profileOffscreen` needs, before any row. */
+export interface ProfileSpan {
+  x0: number
+  x1: number
+  /** Rows start at `x0` (the geometry's `barX`). */
+  maxBarLength: number
+}
+
+/** Span of a range whose `from` / `to` bars sit at `xFrom` / `xTo`. */
+export function profileSpan(xFrom: number, xTo: number, barSpacing: number): ProfileSpan {
+  const half = Math.max(0, barSpacing) / 2
   const x0 = Math.min(xFrom, xTo) - half
   const x1 = Math.max(xFrom, xTo) + half
-  const maxBarLength = profileMaxBarLength(x1 - x0)
-  let maxVolume = 0
-  for (const r of profile.rows) if (r.volume > maxVolume) maxVolume = r.volume
+  return { x0, x1, maxBarLength: profileMaxBarLength(x1 - x0) }
+}
+
+/** `profileOffscreen` of the geometry this span would give (rows start at `x0`). */
+export function spanOffscreen(span: ProfileSpan, width: number): boolean {
+  const right = Math.max(span.x1, span.x0 + span.maxBarLength)
+  return right < 0 || span.x0 > width
+}
+
+/** Rows and price lines of a profile laid out in `span`; null when a price cannot be placed. */
+function geometryInSpan(
+  profile: VolumeProfile,
+  span: ProfileSpan,
+  yOfPrice: (price: number) => number | null,
+  stats: ProfileStats,
+): ProfileGeometry | null {
+  const { x0, x1, maxBarLength } = span
+  const maxVolume = stats.maxVolume
   const rows: ProfileRowGeometry[] = []
-  for (const r of profile.rows) {
-    const yHigh = coords.yOfPrice(r.high)
-    const yLow = coords.yOfPrice(r.low)
+  let top = Number.POSITIVE_INFINITY
+  let bottom = Number.NEGATIVE_INFINITY
+  const source = profile.rows
+  for (let i = 0; i < source.length; i++) {
+    const r = source[i]
+    const yHigh = yOfPrice(r.high)
+    const yLow = yOfPrice(r.low)
     if (yHigh === null || yLow === null) return null
     const { up, down } = rowBarLengths(r, maxVolume, maxBarLength)
-    rows.push({
+    const row: ProfileRowGeometry = {
       top: Math.min(yHigh, yLow),
       bottom: Math.max(yHigh, yLow),
       upLength: up,
       downLength: down,
-      inValueArea: isValueAreaRow(r, profile),
-    })
-  }
-  let top = Number.POSITIVE_INFINITY
-  let bottom = Number.NEGATIVE_INFINITY
-  for (const r of rows) {
-    if (r.top < top) top = r.top
-    if (r.bottom > bottom) bottom = r.bottom
+      inValueArea: stats.inValueArea[i],
+    }
+    if (row.top < top) top = row.top
+    if (row.bottom > bottom) bottom = row.bottom
+    rows.push(row)
   }
   return {
     x0,
@@ -206,10 +246,27 @@ export function profileGeometry(
     barX: x0,
     maxBarLength,
     rows,
-    pocY: coords.yOfPrice(profile.poc),
-    vahY: coords.yOfPrice(profile.vah),
-    valY: coords.yOfPrice(profile.val),
+    pocY: yOfPrice(profile.poc),
+    vahY: yOfPrice(profile.vah),
+    valY: yOfPrice(profile.val),
   }
+}
+
+/**
+ * Screen geometry of a profile, or null when the chart cannot place it (no data). `stats`
+ * defaults to `profileStats(profile)`; pass the cached one to skip that pass.
+ */
+export function profileGeometry(
+  profile: VolumeProfile,
+  coords: ProfileCoords,
+  stats?: ProfileStats,
+): ProfileGeometry | null {
+  if (profile.rows.length === 0) return null
+  const xFrom = coords.xOfTime(profile.from)
+  const xTo = coords.xOfTime(profile.to)
+  if (xFrom === null || xTo === null) return null
+  const span = profileSpan(xFrom, xTo, coords.barSpacing)
+  return geometryInSpan(profile, span, coords.yOfPrice, stats ?? profileStats(profile))
 }
 
 /** True when no part of the profile (range or its rows) is inside a pane `width` px wide. */
@@ -450,6 +507,104 @@ function hLine(scope: BitmapScope, x0: number, x1: number, y: number, width: num
   ctx.stroke()
 }
 
+/** `setLineDash` copies its argument, so one empty pattern serves every call. */
+const NO_DASH: number[] = []
+let vaDashRatio = Number.NaN
+let vaDash: number[] = NO_DASH
+
+/** The value-area lines' dotted pattern at `ratio` (bitmap px), rebuilt only when it changes. */
+export function valueAreaDash(ratio: number): number[] {
+  if (ratio !== vaDashRatio) {
+    vaDashRatio = ratio
+    vaDash = [Math.max(1, Math.round(2 * ratio)), Math.max(2, Math.round(3 * ratio))]
+  }
+  return vaDash
+}
+
+/** Fields per drawn row in `BitmapRows.data`: y, height, left, up end, end, value-area flag. */
+const ROW_FIELDS = 6
+
+/**
+ * The integer bitmap rects of a geometry's rows at one pixel ratio (rows with no volume left
+ * out), computed once per geometry and ratio, so a repaint of an unchanged view only issues
+ * canvas calls.
+ */
+interface BitmapRows {
+  hr: number
+  vr: number
+  count: number
+  data: Float64Array
+}
+
+const bitmapRowsCache = new WeakMap<ProfileGeometry, BitmapRows>()
+
+function bitmapRowsOf(geom: ProfileGeometry, hr: number, vr: number): BitmapRows {
+  const cached = bitmapRowsCache.get(geom)
+  if (cached !== undefined && cached.hr === hr && cached.vr === vr) return cached
+  const data = new Float64Array(geom.rows.length * ROW_FIELDS)
+  let count = 0
+  for (const row of geom.rows) {
+    const len = row.upLength + row.downLength
+    if (!(len > 0)) continue
+    const ys = bitmapSpan(row.top, row.bottom, vr, true)
+    const left = Math.round(geom.barX * hr)
+    const o = count * ROW_FIELDS
+    data[o] = ys.position
+    data[o + 1] = ys.length
+    data[o + 2] = left
+    data[o + 3] = Math.round((geom.barX + row.upLength) * hr)
+    data[o + 4] = Math.max(left + 1, Math.round((geom.barX + len) * hr))
+    data[o + 5] = row.inValueArea ? 1 : 0
+    count++
+  }
+  const rows: BitmapRows = { hr, vr, count, data }
+  bitmapRowsCache.set(geom, rows)
+  return rows
+}
+
+/**
+ * Row fills in profile order (paint order is kept: thin rows can share a device pixel, and
+ * translucent fills composite in order). A style is set only when it differs from the one set
+ * just before, which leaves every fill with the same alpha and colour as setting it per row.
+ */
+function fillRows(
+  ctx: BitmapScope['context'],
+  rows: BitmapRows,
+  colors: VolumeProfileColors,
+): void {
+  const d = rows.data
+  let alpha = Number.NaN
+  let style: string | null = null
+  for (let i = 0; i < rows.count; i++) {
+    const o = i * ROW_FIELDS
+    const y = d[o]
+    const h = d[o + 1]
+    const left = d[o + 2]
+    const upEnd = d[o + 3]
+    const end = d[o + 4]
+    const a = d[o + 5] === 1 ? VALUE_AREA_ALPHA : OUTSIDE_VALUE_AREA_ALPHA
+    if (a !== alpha) {
+      ctx.globalAlpha = a
+      alpha = a
+    }
+    if (upEnd > left) {
+      if (style !== colors.up) {
+        ctx.fillStyle = colors.up
+        style = colors.up
+      }
+      ctx.fillRect(left, y, upEnd - left, h)
+    }
+    const downStart = Math.max(left, upEnd)
+    if (end > downStart) {
+      if (style !== colors.down) {
+        ctx.fillStyle = colors.down
+        style = colors.down
+      }
+      ctx.fillRect(downStart, y, end - downStart, h)
+    }
+  }
+}
+
 /** Draws one profile in bitmap space; exported for tests with a fake canvas. */
 export function drawProfile(
   scope: BitmapScope,
@@ -471,40 +626,22 @@ export function drawProfile(
   ctx.globalAlpha = OUTLINE_ALPHA
   ctx.strokeStyle = colors.text
   ctx.lineWidth = outline
-  ctx.setLineDash([])
+  ctx.setLineDash(NO_DASH)
   const o = outline % 2 ? 0.5 : 0
   ctx.strokeRect(box.position + o, boxY.position + o, box.length - 1, boxY.length - 1)
 
   // Rows: up volume then down volume, from the range's left edge.
-  for (const row of geom.rows) {
-    const len = row.upLength + row.downLength
-    if (!(len > 0)) continue
-    const ys = bitmapSpan(row.top, row.bottom, vr, true)
-    const left = Math.round(geom.barX * hr)
-    const upEnd = Math.round((geom.barX + row.upLength) * hr)
-    const end = Math.max(left + 1, Math.round((geom.barX + len) * hr))
-    ctx.globalAlpha = row.inValueArea ? VALUE_AREA_ALPHA : OUTSIDE_VALUE_AREA_ALPHA
-    if (upEnd > left) {
-      ctx.fillStyle = colors.up
-      ctx.fillRect(left, ys.position, upEnd - left, ys.length)
-    }
-    const downStart = Math.max(left, upEnd)
-    if (end > downStart) {
-      ctx.fillStyle = colors.down
-      ctx.fillRect(downStart, ys.position, end - downStart, ys.length)
-    }
-  }
+  fillRows(ctx, bitmapRowsOf(geom, hr, vr), colors)
 
   // Value-area high / low (dotted) and the point of control (solid), across the range.
   const lineWidth = Math.max(1, Math.floor(vr))
   ctx.lineWidth = lineWidth
   ctx.globalAlpha = VA_LINE_ALPHA
   ctx.strokeStyle = colors.valueArea
-  ctx.setLineDash([Math.max(1, Math.round(2 * hr)), Math.max(2, Math.round(3 * hr))])
-  for (const y of [geom.vahY, geom.valY]) {
-    if (y !== null) hLine(scope, geom.x0, geom.x1, y, lineWidth)
-  }
-  ctx.setLineDash([])
+  ctx.setLineDash(valueAreaDash(hr))
+  if (geom.vahY !== null) hLine(scope, geom.x0, geom.x1, geom.vahY, lineWidth)
+  if (geom.valY !== null) hLine(scope, geom.x0, geom.x1, geom.valY, lineWidth)
+  ctx.setLineDash(NO_DASH)
   if (geom.pocY !== null) {
     ctx.globalAlpha = 1
     ctx.strokeStyle = colors.poc
@@ -538,14 +675,37 @@ class ProfilePaneView implements IPrimitivePaneView {
 
 type AttachedParam = Pick<SeriesAttachedParameter<Time>, 'chart' | 'series' | 'requestUpdate'>
 
+/**
+ * What the last frame's geometry was built from. `sig` covers scroll, bar spacing, pane width,
+ * the y of the profile's lowest and highest prices and the primitive's `version`; `xFrom` / `xTo`
+ * are the range edges themselves (their bar index can move without the view moving, e.g. a
+ * no-trade edge bar snapping to a new neighbour) and `pocY` a third price, so a change of
+ * price-scale mode that kept both extremes in place still rebuilds.
+ */
+interface FrameCache {
+  sig: ViewSignature
+  xFrom: number
+  xTo: number
+  pocY: number | null
+  geom: ProfileGeometry | null
+}
+
 /** One indicator instance's profile on the main series. */
 export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
   readonly uid: string
   private profile: VolumeProfile | null = null
+  /** `profileStats(profile)`, computed on `setProfile`. */
+  private stats: ProfileStats | null = null
   private visible = true
   private chart: IChartApiBase<Time> | null = null
   private series: ISeriesApi<SeriesType, Time> | null = null
   private requestUpdate: (() => void) | null = null
+  /** Bumped on every change the view signature cannot see: profile, colours, visibility, host. */
+  private version = 0
+  private frame: FrameCache | null = null
+  private builds = 0
+  private readonly yOfPrice = (price: number): number | null =>
+    this.series === null ? null : this.series.priceToCoordinate(price)
   private readonly paneView = new ProfilePaneView()
   private readonly paneViewList: readonly IPrimitivePaneView[] = [this.paneView]
 
@@ -558,6 +718,7 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
     this.chart = param.chart
     this.series = param.series
     this.requestUpdate = param.requestUpdate
+    this.invalidate()
   }
 
   detached(): void {
@@ -565,6 +726,7 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
     this.series = null
     this.requestUpdate = null
     this.paneView.renderer_.geom = null
+    this.invalidate()
   }
 
   getProfile(): VolumeProfile | null {
@@ -574,17 +736,21 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
   setProfile(profile: VolumeProfile | null): void {
     if (profile === this.profile) return
     this.profile = profile
+    this.stats = profile !== null && profile.rows.length > 0 ? profileStats(profile) : null
+    this.invalidate()
     this.requestUpdate?.()
   }
 
   setVisible(visible: boolean): void {
     if (visible === this.visible) return
     this.visible = visible
+    this.invalidate()
     this.requestUpdate?.()
   }
 
   setColors(colors: VolumeProfileColors): void {
     this.paneView.renderer_.colors = colors
+    this.invalidate()
     this.requestUpdate?.()
   }
 
@@ -593,34 +759,69 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
     return this.paneView.renderer_.geom
   }
 
-  private coords(): ProfileCoords | null {
-    const chart = this.chart
-    const series = this.series
-    if (chart === null || series === null) return null
-    const ts = chart.timeScale()
-    return {
-      // Nearest bar: the chart plots traded bars only, so a range edge on a no-trade bar
-      // snaps to its neighbour; logicalToCoordinate also places off-screen bars.
-      xOfTime: (time) => {
-        const index = ts.timeToIndex(time as Time, true)
-        return index === null ? null : ts.logicalToCoordinate(index as unknown as Logical)
-      },
-      yOfPrice: (price) => series.priceToCoordinate(price),
-      barSpacing: ts.options().barSpacing,
-    }
+  /** Geometry builds so far (tests: an unchanged view must not rebuild). */
+  buildCount(): number {
+    return this.builds
+  }
+
+  private invalidate(): void {
+    this.version++
+    this.frame = null
   }
 
   updateAllViews(): void {
-    const coords = this.visible && this.profile !== null ? this.coords() : null
-    let geom =
-      coords !== null && this.profile !== null ? profileGeometry(this.profile, coords) : null
-    if (
-      geom !== null &&
-      this.chart !== null &&
-      profileOffscreen(geom, this.chart.timeScale().width())
+    this.paneView.renderer_.geom = this.currentGeometry()
+  }
+
+  /**
+   * The geometry for the current view: the last frame's when nothing it depends on moved,
+   * else rebuilt. Culled (null) when wholly off-screen, decided from the range's horizontal
+   * span before any row is placed.
+   */
+  private currentGeometry(): ProfileGeometry | null {
+    const profile = this.profile
+    const stats = this.stats
+    const chart = this.chart
+    const series = this.series
+    if (!this.visible || profile === null || stats === null || chart === null || series === null)
+      return null
+    const ts = chart.timeScale()
+    // Nearest bar: the chart plots traded bars only, so a range edge on a no-trade bar
+    // snaps to its neighbour; logicalToCoordinate also places off-screen bars.
+    const iFrom = ts.timeToIndex(profile.from as Time, true)
+    const iTo = ts.timeToIndex(profile.to as Time, true)
+    const xFrom = iFrom === null ? null : ts.logicalToCoordinate(iFrom as unknown as Logical)
+    const xTo = iTo === null ? null : ts.logicalToCoordinate(iTo as unknown as Logical)
+    if (xFrom === null || xTo === null) {
+      this.frame = null
+      return null
+    }
+    const rows = profile.rows
+    const sig = viewSignature(
+      chart as IChartApi,
+      series,
+      [rows[0].low, rows[rows.length - 1].high],
+      this.version,
     )
-      geom = null
-    this.paneView.renderer_.geom = geom
+    const pocY = series.priceToCoordinate(profile.poc)
+    const last = this.frame
+    if (
+      last !== null &&
+      sameViewSignature(last.sig, sig) &&
+      last.xFrom === xFrom &&
+      last.xTo === xTo &&
+      last.pocY === pocY
+    )
+      return last.geom
+
+    this.builds++
+    const span = profileSpan(xFrom, xTo, sig !== null ? sig.barSpacing : barSpacingOf(ts))
+    const width = sig !== null ? sig.width : ts.width()
+    const geom = spanOffscreen(span, width)
+      ? null
+      : geometryInSpan(profile, span, this.yOfPrice, stats)
+    this.frame = sig === null ? null : { sig, xFrom, xTo, pocY, geom }
+    return geom
   }
 
   paneViews(): readonly IPrimitivePaneView[] {

@@ -42,8 +42,14 @@ import {
   type FocusPlan,
   type OverlayChart,
 } from './backtestOverlay'
-import { IndicatorSeriesManager, type IndicatorLegendRow } from './indicatorSeries'
-import { buildLegend, firstVisibleBarTime, selectLegendIndex, type LegendValues } from './legend.ts'
+import { IndicatorSeriesManager, type LegendRowPartition } from './indicatorSeries'
+import {
+  buildLegend,
+  firstVisibleBarTime,
+  formatAsOfDate,
+  selectLegendIndex,
+  type LegendValues,
+} from './legend.ts'
 import {
   DEFAULT_APPEARANCE,
   alertLineOptions,
@@ -1295,9 +1301,9 @@ export function Chart({
           manager={indicatorManager}
           hoveredTime={hoveredTime}
           intervalSeconds={intervalSeconds}
-          render={(rows) => (
+          render={(partition) => (
             <IndicatorLegendRows
-              rows={rows.filter((r) => r.pane === 0)}
+              rows={partition.main}
               highlightedUid={highlightedUid}
               {...legendActions}
             />
@@ -1308,9 +1314,9 @@ export function Chart({
         manager={indicatorManager}
         hoveredTime={hoveredTime}
         intervalSeconds={intervalSeconds}
-        render={(rows) => (
+        render={(partition) => (
           <PaneLegends
-            rows={rows.filter((r) => r.pane > 0)}
+            rows={partition.panes}
             paneTops={paneTops}
             highlightedUid={highlightedUid}
             {...legendActions}
@@ -1366,8 +1372,9 @@ export function Chart({
 /**
  * Indicator legend rows, read from the indicator store's full grain: a live tick's tail update
  * re-renders only this (after the data effect applied the bar), so the rows always show the
- * values of the bar just pushed while Chart itself renders once per tick. Cheap: a binary
- * search per line. Also re-renders with Chart (hover, configs, highlight).
+ * values of the bar just pushed while Chart itself renders once per tick. Also re-renders with
+ * Chart (hover, configs, highlight). The rows are built and split into main / pane rows once per
+ * state (`legendPartition`), so both instances share one build and get stable arrays.
  */
 function LiveIndicatorRows({
   manager,
@@ -1378,10 +1385,10 @@ function LiveIndicatorRows({
   manager: IndicatorSeriesManager
   hoveredTime: number | undefined
   intervalSeconds: number
-  render: (rows: IndicatorLegendRow[]) => ReactNode
+  render: (partition: LegendRowPartition) => ReactNode
 }) {
   useSyncExternalStore(manager.subscribe, manager.getSnapshot)
-  return render(manager.legendRows(hoveredTime, intervalSeconds))
+  return render(manager.legendPartition(hoveredTime, intervalSeconds))
 }
 
 /**
@@ -1419,11 +1426,7 @@ function DerivativesPaneLegend({
       : derivativesValueAt(points, hoveredTime, undefined)
   const asOf =
     latest !== null && lastPlotted !== undefined && latest.time < lastPlotted
-      ? new Date(latest.time * 1000).toLocaleDateString('en-US', {
-          month: 'short',
-          day: 'numeric',
-          timeZone: 'UTC',
-        })
+      ? formatAsOfDate(latest.time)
       : null
   return (
     <div className="bt-pane-legend bt-pane-legend--chip" style={{ top: top + 6 }} aria-live="off">
@@ -1459,7 +1462,22 @@ interface LegendProps {
   children?: ReactNode
 }
 
-function Legend({ symbol, interval, source, values, timezone, children }: LegendProps) {
+/** Main (top-left) legend: symbol, OHLC and change, volume and bar time. Exported for tests. */
+export function Legend({ symbol, interval, source, values, timezone, children }: LegendProps) {
+  // The bar time only moves on a hover or a new bar: a forming-bar tick (same bar, new values)
+  // reuses the formatted date and zone label instead of redoing the Intl work per tick.
+  const time = values?.time
+  const seconds = isSecondsTimeframe(interval)
+  const timeText = useMemo(
+    () =>
+      time === undefined
+        ? null
+        : {
+            date: formatDateTime(time, timezone, { seconds }),
+            zone: timezoneLabel(timezone, time),
+          },
+    [time, timezone, seconds],
+  )
   return (
     <div className="chart-legend" aria-live="off">
       <div className="chart-legend__row">
@@ -1476,12 +1494,11 @@ function Legend({ symbol, interval, source, values, timezone, children }: Legend
           </span>
         )}
       </div>
-      {values && (
+      {values && timeText && (
         <div className="chart-legend__row chart-legend__row--secondary">
           <Field label="Vol" value={values.volume} />
           <span className="chart-legend__time">
-            {formatDateTime(values.time, timezone, { seconds: isSecondsTimeframe(interval) })}{' '}
-            {timezoneLabel(timezone, values.time)}
+            {timeText.date} {timeText.zone}
           </span>
         </div>
       )}

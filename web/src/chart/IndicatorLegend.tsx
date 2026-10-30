@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import type { IndicatorLegendRow } from './indicatorSeries'
 import './indicators.css'
 
@@ -19,8 +20,16 @@ interface RowsProps extends IndicatorLegendActions, HighlightProps {
   rows: readonly IndicatorLegendRow[]
 }
 
-/** Overlay and volume indicator rows; rendered inside the main (top-left) legend. */
-export function IndicatorLegendRows({ rows, highlightedUid = null, ...actions }: RowsProps) {
+/**
+ * Overlay and volume indicator rows; rendered inside the main (top-left) legend. Memo'd: the rows
+ * array is stable per indicator state (`partitionLegendRows`) and the actions are stable
+ * callbacks, so a chart render that changes neither skips this.
+ */
+export const IndicatorLegendRows = memo(function IndicatorLegendRows({
+  rows,
+  highlightedUid = null,
+  ...actions
+}: RowsProps) {
   return (
     <>
       {rows.map((row) => (
@@ -33,7 +42,7 @@ export function IndicatorLegendRows({ rows, highlightedUid = null, ...actions }:
       ))}
     </>
   )
-}
+})
 
 interface PaneLegendsProps extends IndicatorLegendActions, HighlightProps {
   /** Pane-indicator rows (row.pane >= 1). */
@@ -42,8 +51,11 @@ interface PaneLegendsProps extends IndicatorLegendActions, HighlightProps {
   paneTops: readonly (number | null)[]
 }
 
-/** One legend at the top-left of each indicator pane. Hidden until the pane has been measured. */
-export function PaneLegends({
+/**
+ * One legend at the top-left of each indicator pane. Hidden until the pane has been measured.
+ * Memo'd like `IndicatorLegendRows` (`paneTops` keeps its identity while the tops are unchanged).
+ */
+export const PaneLegends = memo(function PaneLegends({
   rows,
   paneTops,
   highlightedUid = null,
@@ -62,7 +74,7 @@ export function PaneLegends({
       })}
     </>
   )
-}
+})
 
 interface ItemProps extends IndicatorLegendActions {
   row: IndicatorLegendRow

@@ -116,3 +116,19 @@ export function firstVisibleBarTime(bars: readonly Candle[] | null, from: number
   const index = Math.max(0, Math.ceil(from))
   return index < bars.length ? bars[index].time : null
 }
+
+/** Cached: constructing an Intl formatter per call (what `toLocaleDateString` does) is costly. */
+const AS_OF_FORMAT = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  timeZone: 'UTC',
+})
+
+/**
+ * "Oct 3": the UTC date of `time` (UNIX seconds), as a derivatives pane legend dates a value older
+ * than the last plotted bar. Same text as `toLocaleDateString('en-US', { month: 'short', day:
+ * 'numeric', timeZone: 'UTC' })`, from one cached formatter.
+ */
+export function formatAsOfDate(time: number): string {
+  return AS_OF_FORMAT.format(new Date(time * 1000))
+}

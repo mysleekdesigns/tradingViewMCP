@@ -107,6 +107,8 @@ export function snapLogicalToTime(
 export class TimeIndex {
   private bars: readonly TimedBar[]
   private step: number
+  private changes = 0
+  private seenLength = 0
 
   constructor(bars: readonly TimedBar[] = [], stepSeconds: number = 60) {
     this.bars = bars
@@ -115,10 +117,24 @@ export class TimeIndex {
 
   setBars(bars: readonly TimedBar[]): void {
     this.bars = bars
+    this.changes++
   }
 
   setStep(stepSeconds: number): void {
     this.step = stepSeconds
+    this.changes++
+  }
+
+  /**
+   * Increases whenever the mapping may have changed: every setBars / setStep, and a length
+   * change of the held array (in case it was grown in place).
+   */
+  version(): number {
+    if (this.bars.length !== this.seenLength) {
+      this.seenLength = this.bars.length
+      this.changes++
+    }
+    return this.changes
   }
 
   get length(): number {

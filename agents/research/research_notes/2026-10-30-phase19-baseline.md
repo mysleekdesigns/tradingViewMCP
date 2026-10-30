@@ -91,3 +91,21 @@ Memory note: the lineage registry keeps up to two earlier full-history arrays al
 
 Behaviour note: Coinbase paper limit fills see the coalesced forming bar (at most 10 closes per
 second); a price touched only mid-window by a non-final trade no longer reaches `onPrice`.
+
+## After Wave 2 (terminal)
+
+- Volume profile, unchanged view: 3 `priceToCoordinate` calls per `updateAllViews` instead of
+  2 x rows + 3 (up to ~803); off-screen profiles build no rows; no `timeScale().options()`.
+- Market structure and sessions: 100 `updateAllViews` with no view change = 1 geometry build.
+- Drawings: a repeat `draw()` does no `withAlpha`, `toLocaleString`, `Intl.NumberFormat` or dash
+  allocation; a mouse move over an unchanged view makes zero `timeToLogical` calls in the hit test.
+- LWC 5.2.1 calls `updateAllViews` on drags, ticks, hover-id changes, scroll and zoom, but not on
+  a crosshair-only move (that repaints the top canvas with `draw()` only). So the layer caches pay
+  off on drag/tick frames; the drawings' `draw()` cleanup is what the crosshair trace shows.
+- Known exceptions (owner to accept or reject):
+  - No layer batches strokes by colour: regrouping translucent/overlapping shapes changes pixels.
+    Each layer keeps paint order and skips only redundant style sets.
+  - Volume profile bar spacing from `|x(1) - x(0)|` differs from `options().barSpacing` by up to
+    ~1e-9 px; only a coordinate within ~5e-10 of a half-pixel tie could move one device pixel.
+  - hline/hray price-axis label text is still formatted per `updateAllViews` (drag/tick frames,
+    not per paint).

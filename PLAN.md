@@ -1138,8 +1138,8 @@ Wave 1 — per-tick waste (highest payoff)
 
 Wave 2 — per-frame path (crosshair, scroll, zoom, drawing drag)
 - [ ] Drawings primitive (`chart/drawings/primitives.ts`): rgba strings, scaled dash arrays, fib label strings and handle points precomputed into `RenderItem` in `updateAllViews`; `draw()` is canvas calls only; trace with the mouse moving shows no string or `Intl` work per paint
-- [ ] Geometry signature cache for market structure, volume profile and session layers (visible logical range, width, barSpacing, two reference `priceToCoordinate` values, view version); unchanged view returns cached geometry; volume profile culls off-screen before building rows, caches `maxVolume` and value-area flags on `setProfile`, and derives barSpacing from `logicalToCoordinate` instead of `timeScale().options()`
-- [ ] Drawings hit test uses the frame's cached shapes instead of re-projecting every drawing per mouse move; selected drawing projected once
+- [x] Geometry signature cache for market structure, volume profile and session layers (visible logical range, width, barSpacing, two reference `priceToCoordinate` values, view version); unchanged view returns cached geometry; volume profile culls off-screen before building rows, caches `maxVolume` and value-area flags on `setProfile`, and derives barSpacing from `logicalToCoordinate` instead of `timeScale().options()`
+- [x] Drawings hit test uses the frame's cached shapes instead of re-projecting every drawing per mouse move; selected drawing projected once
 - [ ] Legend rows memoised on `[indicatorSnapshot.version, hoveredTime, lastBarTime]` and partitioned once; dash arrays hoisted once per draw and strokes batched by colour in the three layers
 
 Wave 3 — history load, bar close, network

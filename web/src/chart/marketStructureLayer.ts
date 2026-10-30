@@ -22,8 +22,10 @@ import type {
   IChartApiBase,
   IPrimitivePaneRenderer,
   IPrimitivePaneView,
+  IRange,
   ISeriesApi,
   ISeriesPrimitive,
+  ITimeScaleApi,
   Logical,
   SeriesAttachedParameter,
   SeriesType,
@@ -49,6 +51,7 @@ import type { MarkersHandle } from './backtestOverlay'
 import type { ChartMarker } from './seriesMarkers'
 import { BarLineage, closedBarCount } from './structureBars'
 import type { ChartPalette } from './theme'
+import { sameViewSignature, viewSignature, type ViewSignature } from './viewSignature'
 
 type RenderTarget = Parameters<IPrimitivePaneRenderer['draw']>[0]
 type BitmapScope = Parameters<Parameters<RenderTarget['useBitmapCoordinateSpace']>[0]>[0]
@@ -492,13 +495,43 @@ const LIGHT_FILL_SCALE = 0.8
 const LINE_ALPHA: Record<SwingLineState, number> = { active: 0.9, broken: 0.75, superseded: 0.35 }
 const DOT_RADIUS_PX = 2.25
 
-function setDash(ctx: CanvasRenderingContext2D, state: SwingLineState, ratio: number): void {
-  if (state === 'active') ctx.setLineDash([Math.round(4 * ratio), Math.round(3 * ratio)])
-  else if (state === 'superseded') ctx.setLineDash([Math.round(1 * ratio), Math.round(3 * ratio)])
-  else ctx.setLineDash([])
+/** Solid lines. `setLineDash` copies its argument, so shared arrays are safe (never mutated). */
+const NO_DASH: number[] = []
+
+/** Dash patterns in device pixels for one horizontal pixel ratio. */
+interface DashSet {
+  ratio: number
+  /** Running zone edges and active levels. */
+  dashed: number[]
+  /** Superseded levels. */
+  dotted: number[]
 }
 
-/** Draws one instance in bitmap space; exported for tests with a fake canvas. */
+let dashCache: DashSet | null = null
+
+/** The dash patterns for `ratio`, built once per ratio (a repeat draw allocates none). */
+function dashesFor(ratio: number): DashSet {
+  const c = dashCache
+  if (c !== null && c.ratio === ratio) return c
+  const next: DashSet = {
+    ratio,
+    dashed: [Math.round(4 * ratio), Math.round(3 * ratio)],
+    dotted: [Math.round(1 * ratio), Math.round(3 * ratio)],
+  }
+  dashCache = next
+  return next
+}
+
+function lineDash(dashes: DashSet, state: SwingLineState): number[] {
+  return state === 'active' ? dashes.dashed : state === 'superseded' ? dashes.dotted : NO_DASH
+}
+
+/**
+ * Draws one instance in bitmap space; exported for tests with a fake canvas. Paint order is the
+ * geometry order (zones, then levels, then dots): translucent shapes of different colours overlap,
+ * so they are never regrouped by colour. Only state sets that would not change anything (the same
+ * colour, alpha or dash as the previous shape) are skipped, and the dash arrays are shared.
+ */
 export function drawStructure(
   scope: BitmapScope,
   geom: StructureGeometry,
@@ -510,7 +543,16 @@ export function drawStructure(
   const fillScale = colors.light ? LIGHT_FILL_SCALE : 1
   const lineWidth = Math.max(1, Math.floor(vr))
   const half = lineWidth % 2 ? 0.5 : 0
+  const dashes = dashesFor(hr)
+  const fillAlpha = ZONE_FILL_ALPHA * fillScale
+  const retestedAlpha = ZONE_RETESTED_FILL_ALPHA * fillScale
+  // What this draw last set (null / NaN: not set yet, the inherited value is unknown).
+  let fill: string | null = null
+  let stroke: string | null = null
+  let alpha = Number.NaN
+  let dash: number[] | null = null
   ctx.save()
+  ctx.lineWidth = lineWidth
 
   for (const z of geom.zones) {
     const color = z.side === 'support' ? colors.up : colors.down
@@ -518,22 +560,22 @@ export function drawStructure(
     const right = Math.max(left + 1, Math.round(z.x1 * hr))
     const top = Math.round(z.top * vr)
     const bottom = Math.max(top + 1, Math.round(z.bottom * vr))
-    ctx.fillStyle = color
+    if (fill !== color) ctx.fillStyle = fill = color
     const split =
       z.retestX === null ? right : Math.min(right, Math.max(left, Math.round(z.retestX * hr)))
     if (split > left) {
-      ctx.globalAlpha = ZONE_FILL_ALPHA * fillScale
+      if (alpha !== fillAlpha) ctx.globalAlpha = alpha = fillAlpha
       ctx.fillRect(left, top, split - left, bottom - top)
     }
     if (right > split) {
-      ctx.globalAlpha = ZONE_RETESTED_FILL_ALPHA * fillScale
+      if (alpha !== retestedAlpha) ctx.globalAlpha = alpha = retestedAlpha
       ctx.fillRect(split, top, right - split, bottom - top)
     }
     // Top and bottom edges; a running zone's edges are dashed toward the right edge.
-    ctx.globalAlpha = ZONE_EDGE_ALPHA
-    ctx.strokeStyle = color
-    ctx.lineWidth = lineWidth
-    ctx.setLineDash(z.active ? [Math.round(4 * hr), Math.round(3 * hr)] : [])
+    if (alpha !== ZONE_EDGE_ALPHA) ctx.globalAlpha = alpha = ZONE_EDGE_ALPHA
+    if (stroke !== color) ctx.strokeStyle = stroke = color
+    const zoneDash = z.active ? dashes.dashed : NO_DASH
+    if (dash !== zoneDash) ctx.setLineDash((dash = zoneDash))
     ctx.beginPath()
     ctx.moveTo(left, top + half)
     ctx.lineTo(right, top + half)
@@ -542,22 +584,24 @@ export function drawStructure(
     ctx.stroke()
   }
 
-  ctx.lineWidth = lineWidth
   for (const l of geom.lines) {
     const color = l.broke === 'up' ? colors.up : l.broke === 'down' ? colors.down : colors.neutral
-    ctx.globalAlpha = LINE_ALPHA[l.state]
-    ctx.strokeStyle = color
-    setDash(ctx, l.state, hr)
+    const a = LINE_ALPHA[l.state]
+    if (alpha !== a) ctx.globalAlpha = alpha = a
+    if (stroke !== color) ctx.strokeStyle = stroke = color
+    const d = lineDash(dashes, l.state)
+    if (dash !== d) ctx.setLineDash((dash = d))
     const y = Math.round(l.y * vr) + half
+    const x0 = Math.round(l.x0 * hr)
     ctx.beginPath()
-    ctx.moveTo(Math.round(l.x0 * hr), y)
-    ctx.lineTo(Math.max(Math.round(l.x0 * hr) + 1, Math.round(l.x1 * hr)), y)
+    ctx.moveTo(x0, y)
+    ctx.lineTo(Math.max(x0 + 1, Math.round(l.x1 * hr)), y)
     ctx.stroke()
   }
 
-  ctx.setLineDash([])
-  ctx.globalAlpha = 0.9
-  ctx.fillStyle = colors.neutral
+  if (dash !== NO_DASH) ctx.setLineDash(NO_DASH)
+  if (alpha !== 0.9) ctx.globalAlpha = 0.9
+  if (fill !== colors.neutral) ctx.fillStyle = colors.neutral
   const r = DOT_RADIUS_PX * Math.max(hr, vr)
   for (const d of geom.dots) {
     ctx.beginPath()
@@ -594,6 +638,47 @@ class StructurePaneView implements IPrimitivePaneView {
 type AttachedParam = Pick<SeriesAttachedParameter<Time>, 'chart' | 'series' | 'requestUpdate'>
 
 /**
+ * Reference prices of the geometry cache's signature: positive (valid on a log scale) and
+ * distinct; every price scale mode maps prices through a function fixed by two points.
+ */
+const REF_PRICES: readonly [number, number] = [1, 2]
+
+/** A visible time range in UNIX seconds. */
+type TimeRange = { readonly from: number; readonly to: number }
+
+/** True when the chart's visible range is in UNIX seconds (not null, not business days). */
+function isTimestampRange(r: IRange<Time> | null): r is IRange<UTCTimestamp> {
+  return r !== null && typeof r.from === 'number' && typeof r.to === 'number'
+}
+
+/**
+ * `StructureCoords` over the chart, one per primitive (no closures per frame): `updateAllViews`
+ * points it at the time scale and series and sets the range and width it already read.
+ */
+class ChartStructureCoords implements StructureCoords {
+  ts: ITimeScaleApi<Time> | null = null
+  series: ISeriesApi<SeriesType, Time> | null = null
+  range: TimeRange | null = null
+  width = 0
+
+  visibleRange(): TimeRange | null {
+    return this.range
+  }
+
+  // Nearest plotted bar; logicalToCoordinate also places off-screen bars.
+  xOfTime(time: number): number | null {
+    const ts = this.ts
+    if (ts === null) return null
+    const index = ts.timeToIndex(time as Time, true)
+    return index === null ? null : ts.logicalToCoordinate(index as unknown as Logical)
+  }
+
+  yOfPrice(price: number): number | null {
+    return this.series === null ? null : this.series.priceToCoordinate(price)
+  }
+}
+
+/**
  * One instance's swing levels and flip zones on the main series. No `autoscaleInfo`, so old
  * zones and levels never stretch the price scale. No hit test: it never takes clicks from the
  * candles or the drawings.
@@ -607,6 +692,17 @@ export class MarketStructurePrimitive implements ISeriesPrimitive<Time> {
   private requestUpdate: (() => void) | null = null
   private readonly paneView = new StructurePaneView()
   private readonly paneViewList: readonly IPrimitivePaneView[] = [this.paneView]
+  /**
+   * Bumped whenever what the geometry is built from changes (view, visibility, colours,
+   * attach / detach); part of the geometry cache's signature.
+   */
+  private version = 0
+  /** The view signature and time range the current geometry was built for (null = none). */
+  private cachedSig: ViewSignature | null = null
+  private cachedRange: TimeRange | null = null
+  private readonly coordsAdapter = new ChartStructureCoords()
+  /** Geometry builds so far (tests: an unchanged view must not rebuild). */
+  private builds = 0
 
   constructor(uid: string, colors: MarketStructureColors) {
     this.uid = uid
@@ -617,6 +713,7 @@ export class MarketStructurePrimitive implements ISeriesPrimitive<Time> {
     this.chart = param.chart
     this.series = param.series
     this.requestUpdate = param.requestUpdate
+    this.version += 1
   }
 
   detached(): void {
@@ -624,6 +721,9 @@ export class MarketStructurePrimitive implements ISeriesPrimitive<Time> {
     this.series = null
     this.requestUpdate = null
     this.paneView.renderer_.geom = null
+    this.coordsAdapter.ts = null
+    this.coordsAdapter.series = null
+    this.version += 1
   }
 
   /** What the primitive draws (the same object until the result or the toggles change). */
@@ -638,17 +738,20 @@ export class MarketStructurePrimitive implements ISeriesPrimitive<Time> {
   setView(view: StructureView | null): void {
     if (view === this.viewData) return
     this.viewData = view
+    this.version += 1
     this.requestUpdate?.()
   }
 
   setVisible(visible: boolean): void {
     if (visible === this.visible) return
     this.visible = visible
+    this.version += 1
     this.requestUpdate?.()
   }
 
   setColors(colors: MarketStructureColors): void {
     this.paneView.renderer_.colors = colors
+    this.version += 1
     this.requestUpdate?.()
   }
 
@@ -657,32 +760,56 @@ export class MarketStructurePrimitive implements ISeriesPrimitive<Time> {
     return this.paneView.renderer_.geom
   }
 
-  private coords(): StructureCoords | null {
-    const chart = this.chart
-    const series = this.series
-    if (chart === null || series === null) return null
-    const ts = chart.timeScale()
-    return {
-      visibleRange: () => {
-        const r = ts.getVisibleRange()
-        if (r === null || typeof r.from !== 'number' || typeof r.to !== 'number') return null
-        return { from: r.from, to: r.to }
-      },
-      // Nearest plotted bar; logicalToCoordinate also places off-screen bars.
-      xOfTime: (time) => {
-        const index = ts.timeToIndex(time as Time, true)
-        return index === null ? null : ts.logicalToCoordinate(index as unknown as Logical)
-      },
-      yOfPrice: (price) => series.priceToCoordinate(price),
-      width: ts.width(),
-    }
+  /** Geometry builds so far (tests, debugging). */
+  buildCount(): number {
+    return this.builds
   }
 
+  /**
+   * Rebuilds the geometry only when the view moved: a drawing drag, a live tick or a hover
+   * change asks every primitive to update (a crosshair-only move repaints without calling
+   * this), and an unchanged signature (scroll position, bar
+   * spacing, width, two price coordinates, `version`) plus an unchanged visible time range
+   * means every coordinate the geometry reads is unchanged too.
+   */
   updateAllViews(): void {
     const view = this.viewData
-    const coords = this.visible && view !== null ? this.coords() : null
-    this.paneView.renderer_.geom =
-      coords !== null && view !== null ? structureGeometry(view, coords) : null
+    const chart = this.chart
+    const series = this.series
+    const renderer = this.paneView.renderer_
+    if (!this.visible || view === null || chart === null || series === null) {
+      renderer.geom = null
+      this.cachedSig = null
+      return
+    }
+    const ts = chart.timeScale()
+    const r = ts.getVisibleRange()
+    // LWC returns a fresh range object per call; it is kept as is (read-only here).
+    if (!isTimestampRange(r)) {
+      // No bar in view: nothing to draw, nothing to build.
+      renderer.geom = null
+      this.cachedSig = null
+      return
+    }
+    const range: TimeRange = r
+    const sig = viewSignature(chart, series, REF_PRICES, this.version)
+    const prev = this.cachedRange
+    if (
+      prev !== null &&
+      range.from === prev.from &&
+      range.to === prev.to &&
+      sameViewSignature(sig, this.cachedSig)
+    )
+      return
+    const coords = this.coordsAdapter
+    coords.ts = ts
+    coords.series = series
+    coords.range = range
+    coords.width = sig?.width ?? ts.width()
+    renderer.geom = structureGeometry(view, coords)
+    this.builds += 1
+    this.cachedSig = sig
+    this.cachedRange = range
   }
 
   paneViews(): readonly IPrimitivePaneView[] {

@@ -18,6 +18,11 @@ export interface CoordinateAdapter {
   yToPrice(y: number): number | null
   /** Width of the main pane in CSS px (where full-width lines end). */
   paneWidth(): number
+  /**
+   * Changes whenever the time <-> logical mapping may have changed (bars or bar step replaced,
+   * chart or series rebound). Optional: without it, projections are never cached (shapeCache.ts).
+   */
+  viewVersion?(): number
 }
 
 /** Stroke hit tolerance in px. */

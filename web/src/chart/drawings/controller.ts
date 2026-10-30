@@ -14,13 +14,13 @@ import {
   hitTestHandles,
   moveHandle,
   pointToAnchor,
-  projectDrawing,
   shiftAnchors,
   xToSnappedTime,
   type CoordinateAdapter,
   type HitPart,
   type Point,
 } from './geometry'
+import { ShapeCache, type ShapesFrame } from './shapeCache'
 import {
   ANCHOR_COUNT,
   DEFAULT_DRAWING_STYLE,
@@ -159,6 +159,8 @@ export class DrawingController {
   private pendingMove: { id: string; anchors: Anchor[] } | null = null
   private pendingCreated: Drawing | null = null
   private viewCache: DrawingsView | null = null
+  /** Projections for the current view, shared with the renderer through frame(). */
+  private readonly shapes: ShapeCache
 
   constructor(
     adapter: CoordinateAdapter,
@@ -171,6 +173,7 @@ export class DrawingController {
     this.symbol = options.symbol ?? ''
     this.style = options.style ?? DEFAULT_DRAWING_STYLE
     this.toolMode = options.tool ?? 'cursor'
+    this.shapes = new ShapeCache(adapter)
   }
 
   /* ---------------------------------------------------------------------------------------- */
@@ -291,6 +294,14 @@ export class DrawingController {
     return this.viewCache
   }
 
+  /**
+   * view().drawings projected for the chart's current view. The renderer builds its frame from
+   * this in updateAllViews, and hitTest reuses the same shapes while the view is unchanged.
+   */
+  frame(): ShapesFrame {
+    return this.shapes.frame(this.view().drawings)
+  }
+
   /** Cursor to show at p when no button is held. */
   cursorAt(p: Point): CursorStyle | null {
     return this.hoverAt(p)?.cursor ?? null
@@ -315,21 +326,22 @@ export class DrawingController {
 
   /** Topmost drawing at p: the selected drawing's handles first, then the nearest stroke/fill. */
   hitTest(p: Point): { id: string; part: HitPart; distance: number } | null {
-    const { drawings } = this.view()
-    const width = this.adapter.paneWidth()
+    // The frame's shapes: projected once per view (the selected drawing included), not per move.
+    const { drawings, shapes, width } = this.frame()
     const previewId = this.state.kind === 'creating' ? this.state.id : null
     if (this.selected) {
-      const sel = drawings.find((d) => d.id === this.selected)
-      const shape = sel && projectDrawing(sel, this.adapter)
+      const selected = this.selected
+      const i = drawings.findIndex((d) => d.id === selected)
+      const shape = i >= 0 ? shapes[i] : null
       const h = shape ? hitTestHandles(shape, p, width) : null
-      if (sel && h) return { id: sel.id, part: h, distance: h.distance }
+      if (h) return { id: drawings[i].id, part: h, distance: h.distance }
     }
     let best: { id: string; part: HitPart; distance: number } | null = null
     // Later drawings draw on top, so walk backwards and only replace on a strictly closer hit.
     for (let i = drawings.length - 1; i >= 0; i--) {
       const d = drawings[i]
       if (d.id === previewId) continue
-      const shape = projectDrawing(d, this.adapter)
+      const shape = shapes[i]
       if (!shape) continue
       const distance = hitTestBody(shape, p, width, HIT_TOLERANCE)
       if (distance !== null && (best === null || distance < best.distance)) {

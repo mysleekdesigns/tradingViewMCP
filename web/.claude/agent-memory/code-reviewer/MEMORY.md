@@ -5,3 +5,4 @@
 - [Phase 14 chart upgrades review](phase14-chart-upgrades-review.md) — round 2: W1-W3 fixed; notes = per-bar VP rebuild, per-load unreachable, future-anchor note; a11y/hover conventions
 - [Phase 16 market structure review](phase16-market-structure-review.md) — round 3: give-up stall closed; open: repairPending blocks recovery, provisional lost in aggregation
 - [Phase 18 session ranges review](phase18-session-ranges-review.md) — rounds 1-3 sound; layer = structure template, BarLineage plan-prefix proof, interval/culling/order proofs
+- [Phase 19 perf review](phase19-perf-review.md) — wave 2 sound; LWC 5.2.1 invalidation/coordinate facts, signature-cache proof, open nits

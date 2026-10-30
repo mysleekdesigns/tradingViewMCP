@@ -22,12 +22,14 @@ import type {
   IChartApiBase,
   IPrimitivePaneRenderer,
   IPrimitivePaneView,
+  IRange,
   ISeriesApi,
   ISeriesPrimitive,
-  Logical,
+  ITimeScaleApi,
   SeriesAttachedParameter,
   SeriesType,
   Time,
+  UTCTimestamp,
 } from 'lightweight-charts'
 import { INDICATOR_BY_ID } from '../indicators/registry'
 import {
@@ -51,6 +53,7 @@ import type { IndicatorConfig } from '../state/indicators'
 import type { Candle } from '../types'
 import { BarLineage, closedBarCount } from './structureBars'
 import { fontFamily, type ChartPalette } from './theme'
+import { barSpacingOf, sameViewSignature, viewSignature, type ViewSignature } from './viewSignature'
 
 type RenderTarget = Parameters<IPrimitivePaneRenderer['draw']>[0]
 type BitmapScope = Parameters<Parameters<RenderTarget['useBitmapCoordinateSpace']>[0]>[0]
@@ -303,7 +306,39 @@ export const SESSION_BORDER_ALPHA = 0.55
 const LIGHT_FILL_SCALE = 0.8
 const LABEL_ALPHA = 0.9
 
-/** Draws one instance in bitmap space; exported for tests with a fake canvas. */
+/** Solid borders. `setLineDash` copies its argument, so shared arrays are safe (never mutated). */
+const NO_DASH: number[] = []
+
+/** The opening range's dash and the label font for one pair of pixel ratios. */
+interface FrameConstants {
+  hr: number
+  vr: number
+  dashed: number[]
+  font: string
+}
+
+let frameCache: FrameConstants | null = null
+
+/** Built once per pixel ratio pair, so a repeat draw allocates no dash array or font string. */
+function frameConstants(hr: number, vr: number): FrameConstants {
+  const c = frameCache
+  if (c !== null && c.hr === hr && c.vr === vr) return c
+  const next: FrameConstants = {
+    hr,
+    vr,
+    dashed: [Math.round(4 * hr), Math.round(3 * hr)],
+    font: `${Math.round(LABEL_FONT_PX * vr)}px ${fontFamily}`,
+  }
+  frameCache = next
+  return next
+}
+
+/**
+ * Draws one instance in bitmap space; exported for tests with a fake canvas. Boxes paint in
+ * geometry order (translucent boxes of different sessions overlap, so they are never regrouped
+ * by colour); only state sets that would change nothing (the same colour, dash or baseline as
+ * the previous box or label) are skipped.
+ */
 export function drawSessions(
   scope: BitmapScope,
   geom: readonly SessionBoxGeometry[],
@@ -313,9 +348,14 @@ export function drawSessions(
   const ctx = scope.context
   const hr = scope.horizontalPixelRatio
   const vr = scope.verticalPixelRatio
+  const frame = frameConstants(hr, vr)
   const lineWidth = Math.max(1, Math.floor(hr))
   const half = lineWidth % 2 ? 0.5 : 0
   const fillAlpha = SESSION_FILL_ALPHA * (colors.light ? LIGHT_FILL_SCALE : 1)
+  // What this draw last set (null: not set yet, the inherited value is unknown).
+  let fill: string | null = null
+  let stroke: string | null = null
+  let dash: number[] | null = null
   ctx.save()
   ctx.lineWidth = lineWidth
   for (const g of geom) {
@@ -325,11 +365,12 @@ export function drawSessions(
     const top = Math.round(g.top * vr)
     const bottom = Math.max(top + 1, Math.round(g.bottom * vr))
     ctx.globalAlpha = fillAlpha
-    ctx.fillStyle = color
+    if (fill !== color) ctx.fillStyle = fill = color
     ctx.fillRect(left, top, right - left, bottom - top)
     ctx.globalAlpha = SESSION_BORDER_ALPHA
-    ctx.strokeStyle = color
-    ctx.setLineDash(g.session === 'opening' ? [Math.round(4 * hr), Math.round(3 * hr)] : [])
+    if (stroke !== color) ctx.strokeStyle = stroke = color
+    const boxDash = g.session === 'opening' ? frame.dashed : NO_DASH
+    if (dash !== boxDash) ctx.setLineDash((dash = boxDash))
     ctx.strokeRect(
       left + half,
       top + half,
@@ -338,15 +379,17 @@ export function drawSessions(
     )
   }
   // Labels after every box, so a neighbour's fill never covers them.
-  ctx.setLineDash([])
+  if (dash !== NO_DASH) ctx.setLineDash(NO_DASH)
   ctx.globalAlpha = LABEL_ALPHA
-  ctx.font = `${Math.round(LABEL_FONT_PX * vr)}px ${fontFamily}`
+  ctx.font = frame.font
   ctx.textAlign = 'left'
+  let baseline: SessionLabelGeometry['baseline'] | null = null
   for (const g of geom) {
     const l = g.label
     if (l === null) continue
-    ctx.fillStyle = colors[g.session]
-    ctx.textBaseline = l.baseline
+    const color = colors[g.session]
+    if (fill !== color) ctx.fillStyle = fill = color
+    if (baseline !== l.baseline) ctx.textBaseline = baseline = l.baseline
     ctx.fillText(l.text, Math.round(l.x * hr), Math.round(l.y * vr))
   }
   ctx.restore()
@@ -379,6 +422,46 @@ class SessionPaneView implements IPrimitivePaneView {
 type AttachedParam = Pick<SeriesAttachedParameter<Time>, 'chart' | 'series' | 'requestUpdate'>
 
 /**
+ * Reference prices of the geometry cache's signature: positive (valid on a log scale) and
+ * distinct; every price scale mode maps prices through a function fixed by two points.
+ */
+const REF_PRICES: readonly [number, number] = [1, 2]
+
+/** A visible time range in UNIX seconds. */
+type TimeRange = { readonly from: number; readonly to: number }
+
+/** True when the chart's visible range is in UNIX seconds (not null, not business days). */
+function isTimestampRange(r: IRange<Time> | null): r is IRange<UTCTimestamp> {
+  return r !== null && typeof r.from === 'number' && typeof r.to === 'number'
+}
+
+/**
+ * `SessionCoords` over the chart, one per primitive (no closures per frame): `updateAllViews`
+ * points it at the time scale and series and sets the range, spacing and width it already read.
+ */
+class ChartSessionCoords implements SessionCoords {
+  ts: ITimeScaleApi<Time> | null = null
+  series: ISeriesApi<SeriesType, Time> | null = null
+  range: TimeRange | null = null
+  barSpacing = 0
+  width = 0
+
+  visibleRange(): TimeRange | null {
+    return this.range
+  }
+
+  // Box edges are plotted bars (first / last bar of the session), so the exact lookup works;
+  // it also places bars outside the view.
+  xOfTime(time: number): number | null {
+    return this.ts === null ? null : this.ts.timeToCoordinate(time as Time)
+  }
+
+  yOfPrice(price: number): number | null {
+    return this.series === null ? null : this.series.priceToCoordinate(price)
+  }
+}
+
+/**
  * One instance's session boxes on the main series. No `autoscaleInfo` (old boxes never stretch
  * the price scale) and no hit test (it never takes clicks from the candles or the drawings).
  */
@@ -391,6 +474,17 @@ export class SessionRangesPrimitive implements ISeriesPrimitive<Time> {
   private requestUpdate: (() => void) | null = null
   private readonly paneView = new SessionPaneView()
   private readonly paneViewList: readonly IPrimitivePaneView[] = [this.paneView]
+  /**
+   * Bumped whenever what the geometry is built from changes (view, visibility, colours,
+   * attach / detach); part of the geometry cache's signature.
+   */
+  private version = 0
+  /** The view signature and time range the current geometry was built for (null = none). */
+  private cachedSig: ViewSignature | null = null
+  private cachedRange: TimeRange | null = null
+  private readonly coordsAdapter = new ChartSessionCoords()
+  /** Geometry builds so far (tests: an unchanged view must not rebuild). */
+  private builds = 0
 
   constructor(uid: string, colors: SessionRangesColors) {
     this.uid = uid
@@ -401,6 +495,7 @@ export class SessionRangesPrimitive implements ISeriesPrimitive<Time> {
     this.chart = param.chart
     this.series = param.series
     this.requestUpdate = param.requestUpdate
+    this.version += 1
   }
 
   detached(): void {
@@ -408,6 +503,9 @@ export class SessionRangesPrimitive implements ISeriesPrimitive<Time> {
     this.series = null
     this.requestUpdate = null
     this.paneView.renderer_.geom = null
+    this.coordsAdapter.ts = null
+    this.coordsAdapter.series = null
+    this.version += 1
   }
 
   /** What the primitive draws (the same object until the boxes or the toggles change). */
@@ -422,17 +520,20 @@ export class SessionRangesPrimitive implements ISeriesPrimitive<Time> {
   setView(view: SessionView | null): void {
     if (view === this.viewData) return
     this.viewData = view
+    this.version += 1
     this.requestUpdate?.()
   }
 
   setVisible(visible: boolean): void {
     if (visible === this.visible) return
     this.visible = visible
+    this.version += 1
     this.requestUpdate?.()
   }
 
   setColors(colors: SessionRangesColors): void {
     this.paneView.renderer_.colors = colors
+    this.version += 1
     this.requestUpdate?.()
   }
 
@@ -445,33 +546,57 @@ export class SessionRangesPrimitive implements ISeriesPrimitive<Time> {
     return this.paneView.renderer_.geom
   }
 
-  private coords(): SessionCoords | null {
-    const chart = this.chart
-    const series = this.series
-    if (chart === null || series === null) return null
-    const ts = chart.timeScale()
-    const c0 = ts.logicalToCoordinate(0 as Logical)
-    const c1 = ts.logicalToCoordinate(1 as Logical)
-    return {
-      visibleRange: () => {
-        const r = ts.getVisibleRange()
-        if (r === null || typeof r.from !== 'number' || typeof r.to !== 'number') return null
-        return { from: r.from, to: r.to }
-      },
-      // Box edges are plotted bars (first / last bar of the session), so the exact lookup
-      // works; it also places bars outside the view.
-      xOfTime: (time) => ts.timeToCoordinate(time as Time),
-      yOfPrice: (price) => series.priceToCoordinate(price),
-      barSpacing: c0 !== null && c1 !== null ? Math.abs(c1 - c0) : 0,
-      width: ts.width(),
-    }
+  /** Geometry builds so far (tests, debugging). */
+  buildCount(): number {
+    return this.builds
   }
 
+  /**
+   * Rebuilds the geometry only when the view moved: a drawing drag, a live tick or a hover
+   * change asks every primitive to update (a crosshair-only move repaints without calling
+   * this), and an unchanged signature (scroll position, bar
+   * spacing, width, two price coordinates, `version`) plus an unchanged visible time range
+   * means every coordinate the geometry reads is unchanged too.
+   */
   updateAllViews(): void {
     const view = this.viewData
-    const coords = this.visible && view !== null ? this.coords() : null
-    this.paneView.renderer_.geom =
-      coords !== null && view !== null ? sessionGeometry(view, coords) : null
+    const chart = this.chart
+    const series = this.series
+    const renderer = this.paneView.renderer_
+    if (!this.visible || view === null || chart === null || series === null) {
+      renderer.geom = null
+      this.cachedSig = null
+      return
+    }
+    const ts = chart.timeScale()
+    const r = ts.getVisibleRange()
+    // LWC returns a fresh range object per call; it is kept as is (read-only here).
+    if (!isTimestampRange(r)) {
+      // No bar in view: nothing to draw, nothing to build.
+      renderer.geom = null
+      this.cachedSig = null
+      return
+    }
+    const range: TimeRange = r
+    const sig = viewSignature(chart, series, REF_PRICES, this.version)
+    const prev = this.cachedRange
+    if (
+      prev !== null &&
+      range.from === prev.from &&
+      range.to === prev.to &&
+      sameViewSignature(sig, this.cachedSig)
+    )
+      return
+    const coords = this.coordsAdapter
+    coords.ts = ts
+    coords.series = series
+    coords.range = range
+    coords.barSpacing = sig === null ? barSpacingOf(ts) : sig.barSpacing
+    coords.width = sig === null ? ts.width() : sig.width
+    renderer.geom = sessionGeometry(view, coords)
+    this.builds += 1
+    this.cachedSig = sig
+    this.cachedRange = range
   }
 
   paneViews(): readonly IPrimitivePaneView[] {
