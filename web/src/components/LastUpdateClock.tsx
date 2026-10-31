@@ -14,6 +14,7 @@ export const LastUpdateText = memo(function LastUpdateText({
   lastUpdate,
   timezoneName,
 }: LastUpdateTextProps) {
+  'use memo'
   if (lastUpdate === null) return null
   return (
     // Not a live region: it changes on every tick.
@@ -43,6 +44,7 @@ export const LastUpdateClock = memo(function LastUpdateClock({
   timezone,
   timezoneName,
 }: LastUpdateClockProps) {
+  'use memo'
   const select = useMemo(() => lastUpdateSelector(panel, timezone), [panel, timezone])
   const lastUpdate = useLiveSelector(liveStore, select)
   return <LastUpdateText lastUpdate={lastUpdate} timezoneName={timezoneName} />

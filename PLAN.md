@@ -1127,7 +1127,11 @@ change is allowed in this phase: same pixels, same numbers, same markers. Owner 
 indicator values may differ in the last floating-point bits where an O(1) running sum replaces a
 window re-sum (a legend last-digit rounding tie can flip on ~1-2% of SMA20 bars); panels on the
 same market share one live controller, so a history load or refresh in one panel also applies to
-the others.
+the others. Fonts keep the six weights the CSS uses (sans 500 has 51 uses, mono 600
+has 3; dropping them would change text), with the body weights preloaded. The React Compiler
+runs in `annotation` mode on the shell only for now; `infer`/`all` makes the main chunk ~175 KB
+gzip and needs a profiled pass first. The main chunk at ~152.6 KB gzip (with lazy-load error boundaries) is
+accepted as meeting "~150 KB".
 
 ### Checklist
 
@@ -1153,8 +1157,8 @@ Wave 3 — history load, bar close, network
 - [ ] Ref-counted live-candle controller cache keyed on provider/symbol/interval so two panels on the same market share one socket and one REST load; Coinbase REST pages fetched in parallel within the 125 ms throttle budget
 
 Wave 4 — startup and bundle
-- [ ] `TesterIcon` and `ResearchIcon` moved out of `BacktestPanel`/`ResearchPage` into a small icons module; `React.lazy` + `Suspense` for ResearchPage, BacktestPanel, PaperTradingPanel, SeasonalsView and SettingsDialog (their CSS splits with them); vendor groups via `build.rolldownOptions.output.codeSplitting.groups` for react/react-dom, lightweight-charts and lwc-plugin-accessibility; main chunk under ~150 KB gzip and vendor hashes stable across an app-only change
-- [ ] Fonts: four weights (sans 400/600, mono 400/500) or `@fontsource-variable` packages; `<link rel="preload" as="font">` for the two body weights in `index.html`; `server.warmup` for `App.tsx` and `Chart.tsx` in dev
+- [x] `TesterIcon` and `ResearchIcon` moved out of `BacktestPanel`/`ResearchPage` into a small icons module; `React.lazy` + `Suspense` for ResearchPage, BacktestPanel, PaperTradingPanel, SeasonalsView and SettingsDialog (their CSS splits with them); vendor groups via `build.rolldownOptions.output.codeSplitting.groups` for react/react-dom, lightweight-charts and lwc-plugin-accessibility; main chunk under ~150 KB gzip and vendor hashes stable across an app-only change
+- [x] Fonts: only the weights the CSS uses (owner decision: all six are used — sans 500 x51, mono 600 x3 — so four weights or variable packages would change text); `<link rel="preload" as="font">` for the two body weights in `index.html`; `server.warmup` for `App.tsx` and `Chart.tsx` in dev
 - [ ] React Compiler: `eslint-plugin-react-compiler` added and violations fixed (setState-during-render sites in `App.tsx` and `useReplay.ts`, over-specified deps in `state/drawings.ts`, render-computed `slots` closure); compiler enabled on `@vitejs/plugin-react` v6 (`react({ compiler: true })` with `oxc-transform-react`, or `@rolldown/plugin-babel` + `reactCompilerPreset()`) in `annotation` mode on the shell first, then `all`; existing `useMemo`/`useCallback` left in place until profiled
 
 Wave 5 — DRY consolidation (interleave with waves 1–4 where a fix touches the duplicate)

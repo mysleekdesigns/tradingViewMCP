@@ -6,6 +6,7 @@ import {
   useReducer,
   useRef,
   useState,
+  Suspense,
   type ComponentProps,
   type CSSProperties,
   type ErrorInfo,
@@ -24,10 +25,10 @@ import {
   type DrawingStyle,
   type ToolMode,
 } from './chart/drawings/types'
-import { AlertDialog, type AlertDialogValues } from './components/AlertDialog'
+import type { AlertDialogProps, AlertDialogValues } from './components/AlertDialog'
 import { AlertsPanel } from './components/AlertsPanel'
 import { AlertToasts, type AlertToast } from './components/AlertToasts'
-import { BacktestPanel, type BacktestChartLink } from './components/BacktestPanel'
+import type { BacktestChartLink } from './components/BacktestPanel'
 import {
   clampDockHeight,
   describeLabError,
@@ -59,14 +60,26 @@ import { DrawingToolbar } from './components/DrawingToolbar'
 import { shortcutCommand } from './components/drawingTools'
 import { Header } from './components/Header'
 import { IndicatorMenu } from './components/IndicatorMenu'
-import { IndicatorSettings } from './components/IndicatorSettings'
+import {
+  AlertDialog,
+  BacktestPanel,
+  IndicatorSettings,
+  InertWhile,
+  LazyBoundary,
+  PaperTradingPanel,
+  PanelLoading,
+  ResearchPage,
+  SeasonalsView,
+  SettingsDialog,
+  ShortcutsDialog,
+} from './components/lazyPanels'
 import { LayoutMenu } from './components/LayoutMenu'
-import { PaperTradingPanel } from './components/PaperTradingPanel'
+import type { PaperTradingPanelProps } from './components/PaperTradingPanel'
 import { ReplayBar } from './components/ReplayBar'
 import { LastUpdateClock } from './components/LastUpdateClock'
 import { QuoteReadout } from './components/QuoteReadout'
 import { ErrorBoundary } from './components/ErrorBoundary'
-import { ResearchFallback, ResearchPage } from './components/ResearchPage'
+import { ResearchFallback } from './components/ResearchFallback'
 import {
   loadPlanRestore,
   planRestoreAfterLoad,
@@ -78,9 +91,6 @@ import {
 } from './components/researchView'
 import { SidebarRail, type SidebarPanel } from './components/SidebarRail'
 import { StatusBar } from './components/StatusBar'
-import { SeasonalsView } from './components/SeasonalsView'
-import { SettingsDialog } from './components/SettingsDialog'
-import { ShortcutsDialog } from './components/ShortcutsDialog'
 import { SymbolSearch } from './components/SymbolSearch'
 import { Watchlist } from './components/Watchlist'
 import type { Alert, AlertEvent, NotifyPermission } from './data/alertTypes'
@@ -252,6 +262,16 @@ const COLOR_APPLY_MS = 100
 const SETTINGS_SAVE_MS = 400
 
 /**
+ * The viewport height as of this render (no resize subscription: the dock re-clamps on the next
+ * render, as before). A hook so the React Compiler sees a render input: read inline,
+ * `window.innerHeight` is a global it leaves out of the dock-height memo, which would then keep
+ * the height clamped to the viewport of an earlier render.
+ */
+function useViewportHeight(): number {
+  return window.innerHeight
+}
+
+/**
  * `value`, updated at most once per `ms` (leading and trailing): the first change shows at once,
  * a burst of changes (a colour picker fires `input` continuously) shows its latest value at the
  * next slot, and the last value always lands. Compare by value (strings), not identity.
@@ -396,6 +416,7 @@ const LiveHeader = memo(function LiveHeader({
   replayCandles,
   ...rest
 }: LiveHeaderProps) {
+  'use memo'
   const selectLive = useMemo(() => headerLiveSelector(panel), [panel])
   const headerLive = useLiveSelector(liveStore, selectLive, shallowEqual)
   const quoteSlot = useMemo(
@@ -419,6 +440,7 @@ const LiveStatusBar = memo(function LiveStatusBar({
   panel: PanelKey
   timezone: string
 }) {
+  'use memo'
   const select = useMemo(
     () => statusBarSelector(panel, () => timezoneLabel(timezone)),
     [panel, timezone],
@@ -451,7 +473,7 @@ const LiveStatusBar = memo(function LiveStatusBar({
 })
 
 type LivePaperPanelProps = Omit<
-  ComponentProps<typeof PaperTradingPanel>,
+  PaperTradingPanelProps,
   'price' | 'time' | 'marks' | 'offlineReason'
 > & {
   liveStore: LiveStore
@@ -517,7 +539,7 @@ function sameMarks(
   return a === b || (a !== undefined && b !== undefined && shallowEqual(a, b))
 }
 
-type LiveAlertDialogProps = Omit<ComponentProps<typeof AlertDialog>, 'lastPrice'> & {
+type LiveAlertDialogProps = Omit<AlertDialogProps, 'lastPrice'> & {
   liveStore: LiveStore
   /** The panel on the dialog's symbol (its last price is shown), or null. */
   panel: PanelKey | null
@@ -1388,14 +1410,8 @@ function App() {
   const closeResearch = useCallback(() => setResearchOpen(false), [])
 
   // While Research covers them, the chart, the tester dock and the sidebar leave the tab order
-  // (`inert`). The dock is BacktestPanel's own root, so it is marked through the DOM.
-  const dockOpen = dock.open
-  useEffect(() => {
-    if (!researchOpen || !dockOpen) return
-    const dockEl = appRef.current?.querySelector<HTMLElement>(':scope > .tester') ?? null
-    dockEl?.setAttribute('inert', '')
-    return () => dockEl?.removeAttribute('inert')
-  }, [researchOpen, dockOpen])
+  // (`inert`). The dock is BacktestPanel's own root, so it is marked through the DOM, by
+  // <InertWhile> inside the dock's Suspense boundary (it runs once the lazy panel has mounted).
 
   // When Research closes (Esc, Back, a candidate click, the rail), focus would fall to <body>
   // with the unmounted view: hand it to the rail's Research button instead.
@@ -1420,6 +1436,9 @@ function App() {
     setDock((d) => ({ ...d, height: clampDockHeight(height, window.innerHeight) }))
   }, [])
   const closeDock = useCallback(() => setDock((d) => ({ ...d, open: false })), [])
+  // Close on a sidebar panel that failed to load (LazyBoundary): collapse the sidebar, as its rail
+  // button does.
+  const closeSidebar = useCallback(() => setPanel(null), [])
   const toggleDock = useCallback(() => setDock((d) => ({ ...d, open: !d.open })), [])
 
   // The persisted symbol may not exist on this provider (e.g. SUIUSDT after switching to
@@ -1860,7 +1879,8 @@ function App() {
   const venuePending = venue === null && provider.getVenue !== undefined
 
   const sidebarOpen = panel !== null
-  const dockHeight = clampDockHeight(dock.height, window.innerHeight)
+  const viewportHeight = useViewportHeight()
+  const dockHeight = clampDockHeight(dock.height, viewportHeight)
   const appClass = `app${sidebarOpen ? ' app--with-sidebar' : ''}${
     dock.open ? ' app--with-tester' : ''
   }`
@@ -1990,19 +2010,28 @@ function App() {
               onAdd={openSearchBlank}
             />
           ) : panel === 'paper' ? (
-            <LivePaperPanel
-              liveStore={liveStore}
-              panel={activeP}
-              visible={visible}
-              replayBar={replayBar}
-              symbol={symbol}
-              scope={activePaperReplay ? 'replay' : 'live'}
-              paper={activePaperReplay ? paperReplay : paperLive}
-              pausedReason={paperPaused}
-              quoteAsset={info?.quoteAsset ?? null}
-              formatPrice={formatSymbolPrice}
-              onSelectSymbol={selectSymbol}
-            />
+            <Suspense fallback={<PanelLoading variant="sidebar" label="Loading paper trading…" />}>
+              <LazyBoundary
+                variant="sidebar"
+                name="paper trading"
+                retry={PaperTradingPanel.retry}
+                onClose={closeSidebar}
+              >
+                <LivePaperPanel
+                  liveStore={liveStore}
+                  panel={activeP}
+                  visible={visible}
+                  replayBar={replayBar}
+                  symbol={symbol}
+                  scope={activePaperReplay ? 'replay' : 'live'}
+                  paper={activePaperReplay ? paperReplay : paperLive}
+                  pausedReason={paperPaused}
+                  quoteAsset={info?.quoteAsset ?? null}
+                  formatPrice={formatSymbolPrice}
+                  onSelectSymbol={selectSymbol}
+                />
+              </LazyBoundary>
+            </Suspense>
           ) : (
             <AlertsPanel
               alerts={alerts.alerts}
@@ -2023,24 +2052,34 @@ function App() {
         </div>
       )}
       {dock.open && (
-        <BacktestPanel
-          client={labClient}
-          state={tester}
-          dispatch={dispatchTester}
-          chartSymbol={btSymbol}
-          chartInterval={btInterval}
-          link={testerLink}
-          onShowOnChart={showBacktestOnChart}
-          onClearFromChart={clearBacktestFromChart}
-          onLoadHistory={loadBacktestHistory}
-          onStopHistory={stopBacktestHistory}
-          onFocusRange={focusChartRange}
-          onClose={closeDock}
-          height={dockHeight}
-          onResize={resizeDock}
-          formatPrice={formatSymbolPrice}
-          chartVenue={venue}
-        />
+        <Suspense fallback={<PanelLoading variant="dock" label="Loading Strategy Tester…" />}>
+          <LazyBoundary
+            variant="dock"
+            name="the Strategy Tester"
+            retry={BacktestPanel.retry}
+            onClose={closeDock}
+          >
+            <BacktestPanel
+              client={labClient}
+              state={tester}
+              dispatch={dispatchTester}
+              chartSymbol={btSymbol}
+              chartInterval={btInterval}
+              link={testerLink}
+              onShowOnChart={showBacktestOnChart}
+              onClearFromChart={clearBacktestFromChart}
+              onLoadHistory={loadBacktestHistory}
+              onStopHistory={stopBacktestHistory}
+              onFocusRange={focusChartRange}
+              onClose={closeDock}
+              height={dockHeight}
+              onResize={resizeDock}
+              formatPrice={formatSymbolPrice}
+              chartVenue={venue}
+            />
+          </LazyBoundary>
+          <InertWhile rootRef={appRef} selector=":scope > .tester" active={researchOpen} />
+        </Suspense>
       )}
       {researchOpen && (
         <ErrorBoundary
@@ -2057,14 +2096,24 @@ function App() {
             />
           )}
         >
-          <ResearchPage
-            client={researchClient}
-            labClient={labClient}
-            onClose={closeResearch}
-            onShowCandidate={showCandidate}
-            onLoadPlan={loadCandidatePlan}
-            testerBusy={testerRunning}
-          />
+          <Suspense fallback={<PanelLoading variant="overlay" label="Loading Research…" />}>
+            {/* A failed download shows here; a render error passes on to the ErrorBoundary. */}
+            <LazyBoundary
+              variant="overlay"
+              name="Research"
+              retry={ResearchPage.retry}
+              onClose={closeResearch}
+            >
+              <ResearchPage
+                client={researchClient}
+                labClient={labClient}
+                onClose={closeResearch}
+                onShowCandidate={showCandidate}
+                onLoadPlan={loadCandidatePlan}
+                testerBusy={testerRunning}
+              />
+            </LazyBoundary>
+          </Suspense>
         </ErrorBoundary>
       )}
       <SidebarRail
@@ -2158,24 +2207,54 @@ function App() {
         <IndicatorMenu items={indicators.items} onAdd={addIndicator} onClose={closeIndicatorMenu} />
       )}
       {settingsOpen && (
-        <SettingsDialog
-          settings={settings}
-          onChange={changeSettings}
-          onClose={closeSettingsDialog}
-          providerNeedsReload={needsReload}
-        />
+        <Suspense
+          fallback={
+            <PanelLoading
+              variant="dialog"
+              label="Loading Settings…"
+              onClose={closeSettingsDialog}
+            />
+          }
+        >
+          <LazyBoundary
+            variant="dialog"
+            name="Settings"
+            retry={SettingsDialog.retry}
+            onClose={closeSettingsDialog}
+          >
+            <SettingsDialog
+              settings={settings}
+              onChange={changeSettings}
+              onClose={closeSettingsDialog}
+              providerNeedsReload={needsReload}
+            />
+          </LazyBoundary>
+        </Suspense>
       )}
       {shortcutsKey !== null && (
         <ShortcutsDialog key={shortcutsKey} isMac={IS_MAC} onClose={closeShortcuts} />
       )}
       {seasonalsKey !== null && (
-        <SeasonalsView
-          key={seasonalsKey}
-          symbol={symbol}
-          provider={provider}
-          venueName={EXCHANGE}
-          onClose={closeSeasonals}
-        />
+        <Suspense
+          fallback={
+            <PanelLoading variant="dialog" label="Loading Seasonals…" onClose={closeSeasonals} />
+          }
+        >
+          <LazyBoundary
+            variant="dialog"
+            name="Seasonals"
+            retry={SeasonalsView.retry}
+            onClose={closeSeasonals}
+          >
+            <SeasonalsView
+              key={seasonalsKey}
+              symbol={symbol}
+              provider={provider}
+              venueName={EXCHANGE}
+              onClose={closeSeasonals}
+            />
+          </LazyBoundary>
+        </Suspense>
       )}
       {settingsConfig && settingsDef && (
         <IndicatorSettings

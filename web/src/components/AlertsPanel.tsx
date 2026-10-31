@@ -60,6 +60,7 @@ export const AlertsPanel = memo(function AlertsPanel({
   onClearLog,
   formatPrice,
 }: AlertsPanelProps) {
+  'use memo'
   const [tab, setTab] = useState<Tab>('alerts')
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)

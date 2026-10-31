@@ -28,6 +28,7 @@ export const StatusBar = memo(function StatusBar({
   timezoneName,
   refreshError,
 }: StatusBarProps) {
+  'use memo'
   return (
     <footer className="statusbar">
       <span

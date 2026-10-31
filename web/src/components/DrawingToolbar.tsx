@@ -23,6 +23,7 @@ export const DrawingToolbar = memo(function DrawingToolbar({
   drawingCount,
   onClearAll,
 }: DrawingToolbarProps) {
+  'use memo'
   const [confirmOpen, setConfirmOpen] = useState(false)
   const clearRef = useRef<HTMLButtonElement>(null)
   const popRef = useRef<HTMLDivElement>(null)

@@ -6,6 +6,27 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0f121a" />
     <title>BTCUSDT · tradingView</title>
+    <!--
+      The two body faces (IBM Plex Sans 400 for the UI, IBM Plex Mono 400 for prices) start
+      downloading with this page instead of after the script has rendered text. They are the same
+      files the @fontsource stylesheets in src/main.tsx point at, so Vite emits one hashed asset
+      for each and the stylesheet reuses the preloaded response (fonts are CORS fetches, hence
+      `crossorigin`).
+    -->
+    <link
+      rel="preload"
+      href="/node_modules/@fontsource/ibm-plex-sans/files/ibm-plex-sans-latin-400-normal.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link
+      rel="preload"
+      href="/node_modules/@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-400-normal.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
     <script>
       // Apply the saved theme before the stylesheet paints, so a light-theme user never sees a
       // dark frame. main.tsx re-applies it from state/settings.ts (the source of truth).

@@ -130,3 +130,24 @@ second); a price touched only mid-window by a non-final trade no longer reaches 
   served br-compressed. Closed pages carry `&venue=<id>` and get `immutable` + a venue-tagged ETag.
 - Coinbase multi-page loads: requests start 125 ms apart and overlap; completion ~2L + (pages-1)
   x 125 ms instead of ~pages x (L + 125 ms).
+
+## After Wave 4 (terminal)
+
+`npx vite build`:
+
+| Chunk | Baseline gzip | After Wave 4 gzip |
+|---|---|---|
+| main JS | 310.45 KB (single chunk) | 152.70 KB |
+| react (+ react-dom, scheduler) | in main | 68.35 KB |
+| lightweight-charts | in main | 58.84 KB |
+| lwc-accessibility | in main | 14.15 KB |
+| lazy panels/dialogs (8 chunks) | in main | 1.2-9.6 KB each |
+| main CSS | 23.31 KB | 13.15 KB (+ 6 lazy CSS files) |
+
+- Vendor chunk hashes unchanged across an app-only change (checked twice).
+- Fonts: all six used weights kept (owner); sans 400 and mono 400 woff2 preloaded, rewritten to
+  the hashed assets in the build.
+- React Compiler: `annotation` mode; exactly the 13 shell functions compiled, 0 bailouts; costs
+  ~6 KB gzip on main. `infer` would be ~175 KB main (owner deferred).
+- Failed lazy loads show an in-slot "Couldn't load ..." card with Retry/Close; hover preloads
+  never reload; a real open after a rebuild reloads at most once per 60 s.

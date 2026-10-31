@@ -113,6 +113,17 @@ export function readMirror(
   }
 }
 
+/**
+ * `readMirror` for the hook: the mirror as of a (symbol, client) pair. The client takes no part
+ * in the read; it is an argument so the hook's memo (and the React Compiler's, which keys on
+ * what the callback uses) re-reads the mirror when the client changes, without an
+ * over-specified dependency list.
+ */
+export function readMirrorForClient(symbol: string, client: DrawingsClient | null): Drawing[] {
+  void client
+  return readMirror(symbol)
+}
+
 /** Persist the symbol's drawings (an empty list removes the key). Failures are ignored. */
 export function writeMirror(
   symbol: string,
@@ -819,10 +830,9 @@ export function useDrawings(symbol: string, client: DrawingsClient | null): Draw
     return () => window.removeEventListener('storage', onStorage)
   }, [sym])
 
-  // Before this symbol's store has emitted, show its mirror synchronously.
-  // `client` is a dependency on purpose: a client change re-reads the (possibly edited) mirror.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const mirror = useMemo(() => readMirror(sym), [sym, client])
+  // Before this symbol's store has emitted, show its mirror synchronously. A client change
+  // re-reads the (possibly edited) mirror, so `client` is a real input of the read.
+  const mirror = useMemo(() => readMirrorForClient(sym, client), [sym, client])
   const current = snap !== null && snap.symbol === sym && snap.client === client ? snap : null
   const items = current?.items ?? mirror
   const status: DrawingsSyncStatus = current?.status ?? (client === null ? 'local-only' : 'loading')

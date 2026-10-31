@@ -24,7 +24,7 @@ import {
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts'
-import '../components/Backtest.css'
+import '../components/BacktestShell.css'
 import { BarTimesMemo, barsKeyOf } from '../data/candleStore'
 import type { RegimePoint } from '../data/labTypes'
 import { isSecondsTimeframe, timeframeLabel, timeframeSeconds } from '../data/timeframes'

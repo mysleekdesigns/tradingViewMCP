@@ -1,7 +1,6 @@
 import { memo } from 'react'
 import { badgeText } from './alertsView'
-import { TesterIcon } from './BacktestPanel'
-import { ResearchIcon } from './ResearchPage'
+import { ResearchIcon, TesterIcon } from './icons'
 import './SidebarRail.css'
 
 export type SidebarPanel = 'watchlist' | 'alerts' | 'paper'
@@ -25,6 +24,38 @@ const PANELS: readonly { id: SidebarPanel; label: string }[] = [
 ]
 
 /**
+ * Paper trading, the Strategy Tester and Research load on first open (`lazyPanels.tsx`).
+ * Pointing at or focusing their rail button starts that download, so the click usually finds the
+ * code ready. Same specifiers as `lazyPanels.tsx`: the module cache shares one request.
+ */
+const PRELOAD = {
+  paper: () => import('./PaperTradingPanel'),
+  tester: () => import('./BacktestPanel'),
+  research: () => import('./ResearchPage'),
+} as const
+
+type PreloadTarget = keyof typeof PRELOAD
+
+/**
+ * Hover (mouse, pen, touch) and keyboard focus both come before the click. Only a head start, so
+ * a failure is swallowed: it surfaces, and is handled, when the panel really opens. Calling
+ * `import()` directly (not the lazyPanels loaders) keeps it speculative: main.tsx reloads the page
+ * after a failed chunk only while a real open is in flight (`panelLoadInFlight`), never for this.
+ */
+function preloadHandlers(target: PreloadTarget) {
+  const start = () => {
+    PRELOAD[target]().catch(() => {})
+  }
+  return { onPointerEnter: start, onFocus: start }
+}
+
+const PRELOAD_HANDLERS: Record<PreloadTarget, ReturnType<typeof preloadHandlers>> = {
+  paper: preloadHandlers('paper'),
+  tester: preloadHandlers('tester'),
+  research: preloadHandlers('research'),
+}
+
+/**
  * Far-right icon rail (TradingView style). Picks the sidebar panel; clicking the open panel's
  * button collapses the sidebar.
  */
@@ -37,6 +68,7 @@ export const SidebarRail = memo(function SidebarRail({
   researchOpen,
   onToggleResearch,
 }: SidebarRailProps) {
+  'use memo'
   const badge = badgeText(alertBadge)
   return (
     <nav className="side-rail" aria-label="Sidebar panels">
@@ -52,6 +84,7 @@ export const SidebarRail = memo(function SidebarRail({
             aria-label={withBadge ? `${p.label} (${badge})` : p.label}
             title={pressed ? `Hide ${p.label.toLowerCase()}` : p.label}
             onClick={() => onSelect(pressed ? null : p.id)}
+            {...(p.id === 'paper' ? PRELOAD_HANDLERS.paper : null)}
           >
             {p.id === 'watchlist' ? (
               <ListIcon />
@@ -76,6 +109,7 @@ export const SidebarRail = memo(function SidebarRail({
         aria-label="Strategy Tester"
         title={testerOpen ? 'Hide Strategy Tester' : 'Strategy Tester (backtest a plan)'}
         onClick={onToggleTester}
+        {...PRELOAD_HANDLERS.tester}
       >
         <TesterIcon size={22} />
       </button>
@@ -86,6 +120,7 @@ export const SidebarRail = memo(function SidebarRail({
         aria-label="Research"
         title={researchOpen ? 'Back to chart' : 'Research (runs, ideas, journal, candidates)'}
         onClick={onToggleResearch}
+        {...PRELOAD_HANDLERS.research}
       >
         <ResearchIcon size={22} />
       </button>

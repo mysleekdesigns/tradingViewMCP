@@ -5,6 +5,7 @@ import { liveQuoteSelector, NO_QUOTE, sameQuote, summarizeQuote, type Quote } fr
 
 /** The header quote: last price, change and its basis (or an empty placeholder). */
 export const QuoteView = memo(function QuoteView({ quote }: { quote: Quote | null }) {
+  'use memo'
   return (
     // No aria-live: once prices stream, it would announce every tick.
     <div className={`quote quote--${quote?.direction ?? 'flat'}`}>
@@ -40,6 +41,7 @@ export const QuoteReadout = memo(function QuoteReadout({
   panel,
   replayCandles,
 }: QuoteReadoutProps) {
+  'use memo'
   const replaying = replayCandles !== null
   // In replay the live candles are hidden: do not follow them.
   const select = useMemo(

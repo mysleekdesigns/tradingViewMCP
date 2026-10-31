@@ -1,0 +1,105 @@
+/*
+ * The Strategy Tester rules the app needs before the panel's code has loaded: the grid row the
+ * dock opens in, the dock frame (`.tester`, also the frame of its loading and "Couldn't load"
+ * placeholders in lazyPanels.tsx), and the equity / derivatives pane legends Chart.tsx draws.
+ * Imported by Chart.tsx where Backtest.css used to be, so these rules keep their place in the
+ * main stylesheet; everything else in Backtest.css ships with the lazily loaded panel.
+ */
+
+/* ---------- Shell: an extra grid row under the chart ---------- */
+
+.app.app--with-tester {
+  grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--tester-h, 340px) var(--statusbar-h);
+  grid-template-areas:
+    'top top top'
+    'tools main rail'
+    'tools tester rail'
+    'status status status';
+}
+
+.app.app--with-tester.app--with-sidebar {
+  grid-template-areas:
+    'top top top top'
+    'tools main side rail'
+    'tools tester side rail'
+    'status status status status';
+}
+
+.app > .tester {
+  grid-area: tester;
+  margin-top: 4px;
+}
+
+.app--with-tester.app--with-sidebar > .tester {
+  margin-right: 4px;
+}
+
+/* ---------- Dock ---------- */
+
+.tester {
+  --t-pad: 12px;
+
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  overflow: hidden;
+}
+
+/* ---------- Equity pane legend (inside the chart) ---------- */
+
+.bt-pane-legend {
+  position: absolute;
+  left: 10px;
+  z-index: 2;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 12px;
+  max-width: calc(100% - 90px);
+  min-height: 20px;
+  color: var(--text-muted);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.bt-pane-legend__title {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.bt-pane-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.bt-pane-legend__swatch {
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+.bt-pane-legend__value {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Funding bars at the usual 0.01% fill a short pane to its top edge; a backing keeps the
+   derivatives legend readable over them in both themes. */
+.bt-pane-legend--chip {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
+}
+
+/* "as of" date when the newest derivatives value is older than the last bar (archive end). */
+.bt-pane-legend__asof {
+  color: var(--text-muted);
+}

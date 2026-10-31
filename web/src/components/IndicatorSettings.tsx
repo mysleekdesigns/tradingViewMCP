@@ -35,7 +35,7 @@ const ALL_TABS: readonly { id: Tab; label: string }[] = [
 /** Inputs only: defs drawn by a primitive (`lines: []`) have no line colours to edit. */
 const INPUTS_ONLY = ALL_TABS.filter((t) => t.id === 'inputs')
 
-interface IndicatorSettingsProps {
+export interface IndicatorSettingsProps {
   def: IndicatorDef
   config: IndicatorConfig
   /** Called once on OK with the validated values; the dialog then closes. */

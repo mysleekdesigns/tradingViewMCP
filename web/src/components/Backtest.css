@@ -1,35 +1,11 @@
 /*
- * Strategy Tester: a dock under the chart (TradingView style), the equity-pane legend, and the
- * grid rows that make room for the dock. Palette and fonts from index.css.
+ * Strategy Tester: the dock under the chart (TradingView style). Imported by BacktestPanel.tsx
+ * only, so it ships with the panel's lazily loaded chunk. The grid row, the dock frame (`.tester`)
+ * and the equity-pane legend, which the app needs before the panel loads, are in
+ * BacktestShell.css. Palette and fonts from index.css.
  */
 
-/* ---------- Shell: an extra grid row under the chart ---------- */
-
-.app.app--with-tester {
-  grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--tester-h, 340px) var(--statusbar-h);
-  grid-template-areas:
-    'top top top'
-    'tools main rail'
-    'tools tester rail'
-    'status status status';
-}
-
-.app.app--with-tester.app--with-sidebar {
-  grid-template-areas:
-    'top top top top'
-    'tools main side rail'
-    'tools tester side rail'
-    'status status status status';
-}
-
-.app > .tester {
-  grid-area: tester;
-  margin-top: 4px;
-}
-
-.app--with-tester.app--with-sidebar > .tester {
-  margin-right: 4px;
-}
+/* ---------- While the dock's top edge is dragged (BacktestPanel sets the class) ---------- */
 
 body.tester-resizing,
 body.tester-resizing * {
@@ -38,22 +14,6 @@ body.tester-resizing * {
 }
 
 /* ---------- Dock ---------- */
-
-.tester {
-  --t-pad: 12px;
-
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  border: 1px solid var(--border-soft);
-  border-radius: 4px;
-  background: var(--bg);
-  color: var(--text);
-  font-size: 12px;
-  overflow: hidden;
-}
 
 .tester__resize {
   position: absolute;
@@ -1269,58 +1229,6 @@ body.tester-resizing * {
     border-right: 0;
     border-bottom: 1px solid var(--border-soft);
   }
-}
-
-/* ---------- Equity pane legend (inside the chart) ---------- */
-
-.bt-pane-legend {
-  position: absolute;
-  left: 10px;
-  z-index: 2;
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 2px 12px;
-  max-width: calc(100% - 90px);
-  min-height: 20px;
-  color: var(--text-muted);
-  font-size: 12px;
-  pointer-events: none;
-}
-
-.bt-pane-legend__title {
-  color: var(--text);
-  font-weight: 500;
-}
-
-.bt-pane-legend__item {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.bt-pane-legend__swatch {
-  width: 10px;
-  height: 2px;
-  border-radius: 1px;
-}
-
-.bt-pane-legend__value {
-  font-family: var(--font-num);
-  font-variant-numeric: tabular-nums;
-}
-
-/* Funding bars at the usual 0.01% fill a short pane to its top edge; a backing keeps the
-   derivatives legend readable over them in both themes. */
-.bt-pane-legend--chip {
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--bg) 85%, transparent);
-}
-
-/* "as of" date when the newest derivatives value is older than the last bar (archive end). */
-.bt-pane-legend__asof {
-  color: var(--text-muted);
 }
 
 /* History notes in the report bar that need more room or a tone. */

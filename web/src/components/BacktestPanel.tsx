@@ -9,7 +9,6 @@ import {
   type Dispatch,
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
-  type ReactNode,
 } from 'react'
 import { DEFAULT_DISCLAIMER, LEDGER_PAGE_SIZE, type LabClient } from '../data/labApi'
 import type { VenueInfo } from '../data/venue'
@@ -70,6 +69,7 @@ import {
   type TesterAction,
   type TesterState,
 } from './backtestView'
+import { TesterIcon } from './icons'
 import './Backtest.css'
 
 /** How the current report relates to the chart (computed by App). */
@@ -1514,15 +1514,6 @@ const STROKE = {
   strokeLinejoin: 'round',
   'aria-hidden': true,
 } as const
-
-export function TesterIcon({ size = 16 }: { size?: number }): ReactNode {
-  return (
-    <svg width={size} height={size} viewBox="0 0 22 22" {...STROKE}>
-      <path d="M3.5 17.5h15M5 14.5l3.5-4 3 2.5 5-6.5" />
-      <path d="M14 6.5h2.5V9" />
-    </svg>
-  )
-}
 
 function CloseIcon() {
   return (

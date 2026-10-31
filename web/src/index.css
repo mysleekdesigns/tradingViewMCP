@@ -639,6 +639,99 @@ body,
   color: var(--text-muted);
 }
 
+/* Placeholder while a lazily loaded panel's code downloads (components/lazyPanels.tsx). Only the
+   dock's frame shows at once; the caption appears after PANEL_LOADING_DELAY_MS. */
+.lazy-panel {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+}
+
+.app > .lazy-panel--overlay {
+  /* The Research view's slot: chart row to the status bar, drawing rail to the icon rail. */
+  grid-row: 2 / -2;
+  grid-column: 2 / -2;
+  z-index: 25;
+}
+
+.lazy-panel--overlay {
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--bg);
+  box-shadow: 0 10px 30px var(--shadow);
+}
+
+.lazy-panel--card {
+  flex: none;
+  padding: 18px 22px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 24px 64px var(--shadow-strong);
+}
+
+.lazy-panel__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  animation: fade-in 140ms ease-out;
+}
+
+.lazy-panel__spinner {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* The same slot when the panel's code did not arrive (LazyBoundary): the chart error card's icon
+   and buttons at panel-caption size, so it fits a short dock or a narrow sidebar. */
+.lazy-panel__error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  max-width: 340px;
+  padding: 16px;
+  text-align: center;
+  animation: fade-in 140ms ease-out;
+}
+
+.lazy-panel--card .lazy-panel__error {
+  padding: 0;
+}
+
+.lazy-panel__error-icon {
+  color: var(--down);
+}
+
+.lazy-panel__error-title {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.lazy-panel__error-text {
+  margin: 0 0 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.lazy-panel__actions {
+  display: flex;
+  gap: 8px;
+}
+
 .error-card {
   display: flex;
   flex-direction: column;
@@ -1185,6 +1278,41 @@ kbd {
 }
 
 .app-notice__close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* "Restore previous plan" notice (App, after a candidate replaced the tester plan). Here, not in
+   Research.css, because it can show at startup before the lazily loaded Research view. */
+
+.app-notice--restore {
+  border-left-color: var(--accent);
+}
+
+/* Both notices up at once: stack the restore offer above the other one. */
+.app-notice + .app-notice--restore {
+  bottom: calc(var(--statusbar-h) + 64px);
+}
+
+.app-notice__action {
+  flex: none;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.app-notice__action:hover {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+.app-notice__action:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }

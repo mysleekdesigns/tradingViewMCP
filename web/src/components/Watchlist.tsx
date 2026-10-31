@@ -55,6 +55,7 @@ export const Watchlist = memo(function Watchlist({
   onMove,
   onAdd,
 }: WatchlistProps) {
+  'use memo'
   const { tickers, moves, status } = useTickers(provider, items)
   const helpId = useId()
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
@@ -287,6 +288,7 @@ const WatchlistRow = memo(function WatchlistRow({
   dropEdge,
   handlers,
 }: RowProps) {
+  'use memo'
   const rowRef = useCallback(
     (el: HTMLDivElement | null) => handlers.rowRef(symbol, el),
     [handlers, symbol],

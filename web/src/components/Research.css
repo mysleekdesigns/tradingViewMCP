@@ -1359,40 +1359,6 @@
   }
 }
 
-/* ---------- "Restore previous plan" notice (App, after a candidate replaced the tester plan) ---------- */
-
-.app-notice--restore {
-  border-left-color: var(--accent);
-}
-
-/* Both notices up at once: stack the restore offer above the other one. */
-.app-notice + .app-notice--restore {
-  bottom: calc(var(--statusbar-h) + 64px);
-}
-
-.app-notice__action {
-  flex: none;
-  height: 24px;
-  padding: 0 10px;
-  border: 1px solid var(--accent);
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: var(--text);
-  font: inherit;
-  font-weight: 500;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.app-notice__action:hover {
-  background: color-mix(in srgb, var(--accent) 26%, transparent);
-}
-
-.app-notice__action:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
 /* ---------- Runs tab: list refresh bar ---------- */
 
 .research__runs {

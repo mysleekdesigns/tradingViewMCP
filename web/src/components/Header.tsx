@@ -106,6 +106,7 @@ export const Header = memo(function Header({
   isMac,
   layoutControl,
 }: HeaderProps) {
+  'use memo'
   const nextTheme = theme === 'dark' ? 'light' : 'dark'
   // "Binance · local server": the transport part can hide on narrow windows (the tooltip keeps it).
   const split = source.indexOf(' · ')
