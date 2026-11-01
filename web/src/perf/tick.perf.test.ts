@@ -7,6 +7,7 @@ import type { Candle } from '../types'
 import { applyLiveCandle } from '../data/candleStore'
 import { plottableCandles } from '../data/plottable'
 import { planSeriesSync } from '../chart/seriesSync'
+import { mainSeriesData, mainSeriesTail } from '../chart/chartTypes'
 import { aggregateBucket } from '../data/aggregate'
 import { parseMiniTickerMessage } from '../data/binanceTicker'
 
@@ -59,6 +60,41 @@ describe.skipIf(!import.meta.env.PERF)('phase 19 per-tick timings', () => {
         plotted = nextPlotted
       }, 200)
       rows.push(`tick ${n} bars: ${us.toFixed(1)} us`)
+    }
+    console.log(rows.join('\n'))
+  })
+
+  test('forming-bar tick split: raw copy, thin venue (untraded bars), Heikin-Ashi tail', () => {
+    const rows: string[] = []
+    for (const n of [1_000, 10_000, 150_000]) {
+      let k = 0
+      const nextTick = (bars: readonly Candle[]): Candle => {
+        const last = bars[bars.length - 1]
+        k++
+        return { ...last, close: last.close + (k % 2 === 0 ? 0.01 : -0.01) }
+      }
+      // applyLiveCandle alone: the one pointer copy left per tick.
+      let raw = history(n)
+      const copy = timeUs(() => {
+        raw = applyLiveCandle(raw, nextTick(raw))
+      }, 200)
+      // Thin venue: one untraded bar in history makes plotted a separate array (second copy).
+      let thin = history(n).map((c, i) => (i === 10 ? { ...c, volume: 0 } : c))
+      let thinPlotted = plottableCandles(thin)
+      const thinUs = timeUs(() => {
+        thin = applyLiveCandle(thin, nextTick(thin))
+        thinPlotted = plottableCandles(thin, thinPlotted)
+      }, 200)
+      // Heikin-Ashi tail on the chart's owned HA cache (in place: no prefix copy).
+      const bars = history(n)
+      let ha = mainSeriesData('heikin-ashi', bars).ha
+      const haUs = timeUs(() => {
+        bars[bars.length - 1] = nextTick(bars)
+        ha = mainSeriesTail('heikin-ashi', bars, bars.length - 1, ha).ha
+      }, 200)
+      rows.push(
+        `${n} bars: applyLiveCandle ${copy.toFixed(1)} us, thin venue ${thinUs.toFixed(1)} us, HA tail ${haUs.toFixed(2)} us`,
+      )
     }
     console.log(rows.join('\n'))
   })

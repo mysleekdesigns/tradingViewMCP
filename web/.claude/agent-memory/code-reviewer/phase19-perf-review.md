@@ -50,3 +50,15 @@ Conventions now in place (do not re-flag):
   primitives, then look for equal-specificity competitors on co-occurring classes that sat BEFORE
   the old position (only those can flip). None found in wave 5.
 Nit left: data/, state/ and indicators/ import chart/util/search (layering inversion).
+
+Post-wave-5 tick tweaks review 2026-11-01 (HA in place, spliceTail, rememberPlotted): sound.
+Fuzzed plottableCandles vs raw.filter (stale prev, older/sibling raws, merges, double ticks) and
+heikinAshiFromInPlace vs heikinAshi: 0 mismatches. Facts to reuse:
+- haRef (Chart.tsx) is the ONLY holder of HA arrays; every assignment is a fresh heikinAshi() or
+  the in-place tail. 'update' plans have from >= prev.length-1, so series.update never throws.
+- plottedOf is read only via filteredFromLineage (parent of raw); plottableCandles is called only
+  from liveCandles ready(), once per new raw, in order -> grandparent pruning never hits the
+  common path. Bursts (pending ticks after REST) always missed, pre-existing.
+- Aliasing pitfall: tests that compare `tail.ha[i]` to `prev.ha[i]` after an in-place call are
+  vacuous (same array). Save the element before the call.
+Method that worked: bundle a scratch fuzz with web/node_modules/.bin/rolldown (no esbuild/tsx).

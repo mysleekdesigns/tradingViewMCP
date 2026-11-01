@@ -29,6 +29,20 @@ const tradedInfo = new WeakMap<readonly Candle[], TradedInfo>()
 const plottedOf = new WeakMap<readonly Candle[], readonly Candle[]>()
 
 /**
+ * Remember `plotted` for `raw`, and forget the entry two lineage steps back (only `raw`'s
+ * parent is ever read through lineage). An entry whose value is a large array that is never
+ * deleted keeps V8's ephemeron tables busy until a full GC: on a 150k-bar history that cost
+ * ~110 us per live tick (tick.perf.test.ts), more than the array copy itself. Forgetting an
+ * entry only costs a cache miss (the full filter path), never a wrong result.
+ */
+function rememberPlotted(raw: readonly Candle[], plotted: readonly Candle[]): void {
+  plottedOf.set(raw, plotted)
+  const parent = lineageOf(raw)?.parent
+  const grandparent = parent === undefined ? undefined : lineageOf(parent)?.parent
+  if (grandparent !== undefined) plottedOf.delete(grandparent)
+}
+
+/**
  * Index of the first untraded bar of `raw` (raw.length if none). With a recorded lineage to an
  * array already seen, only the bars after the kept prefix are read (a live tick: O(1)).
  */
@@ -96,7 +110,7 @@ export function plottableCandles(
   prev?: readonly Candle[] | null,
 ): readonly Candle[] {
   if (firstUntradedOf(raw) === raw.length) {
-    plottedOf.set(raw, raw)
+    rememberPlotted(raw, raw)
     return raw
   }
   const fast = filteredFromLineage(raw)
@@ -106,25 +120,41 @@ export function plottableCandles(
     const unchanged = same === plotted.length && keep + tail.length === plotted.length
     if (prev === plotted) {
       if (unchanged) {
-        plottedOf.set(raw, prev)
+        rememberPlotted(raw, prev)
         return prev
       }
       // Differs from prev by construction: no need for the element-wise comparison below.
-      out = plotted.slice(0, keep)
-      for (const c of tail) out.push(c)
+      out = spliceTail(plotted, keep, tail)
       recordLineage(out, plotted, same)
-      plottedOf.set(raw, out)
+      rememberPlotted(raw, out)
       return out
     }
-    out = plotted.slice(0, keep)
-    for (const c of tail) out.push(c)
+    out = spliceTail(plotted, keep, tail)
     recordLineage(out, plotted, same)
   } else {
     out = raw.filter(isTradedBar)
   }
   const result = prev != null && sameBars(prev, out) ? prev : out
-  plottedOf.set(raw, result)
+  rememberPlotted(raw, result)
   return result
+}
+
+/**
+ * `plotted[0..keep)` followed by `tail`, as a new array. When the result is no longer than
+ * `plotted` (a forming-bar tick replaces the last bar), it is one exact-size copy with the tail
+ * slots overwritten; `slice(0, keep)` + `push` would copy, then grow (copy again) on the push.
+ */
+function spliceTail(plotted: readonly Candle[], keep: number, tail: readonly Candle[]): Candle[] {
+  const length = keep + tail.length
+  let out: Candle[]
+  if (length <= plotted.length) {
+    out = plotted.slice(0, length)
+    for (let i = 0; i < tail.length; i++) out[keep + i] = tail[i]
+  } else {
+    out = plotted.slice(0, keep)
+    for (const c of tail) out.push(c)
+  }
+  return out
 }
 
 function sameBars(a: readonly Candle[], b: readonly Candle[]): boolean {

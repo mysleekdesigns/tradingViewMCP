@@ -1131,7 +1131,15 @@ the others. Fonts keep the six weights the CSS uses (sans 500 has 51 uses, mono 
 has 3; dropping them would change text), with the body weights preloaded. The React Compiler
 runs in `annotation` mode on the shell only for now; `infer`/`all` makes the main chunk ~175 KB
 gzip and needs a profiled pass first. The main chunk at ~152.6 KB gzip (with lazy-load error boundaries) is
-accepted as meeting "~150 KB".
+accepted as meeting "~150 KB". Owner decision (2026-11-01): one O(n) pointer copy per live tick
+stays (`applyLiveCandle` returns a new array because every consumer uses "new array = changed").
+Removing it needs a history + forming-bar split across ~15 files and an in-place frame in
+`Chart.tsx`, which the owner declined. Measured with `PERF=1 npx vitest run src/perf`, the whole
+tick path is ~3 µs at 1k bars, ~4 µs at 10k and ~82 µs at the 150k cap. Thin venues (any untraded
+bar in history) pay a second copy for the plotted array: ~164 µs at 150k. For the "per-tick
+scripting time that does not grow with history length" check, this copy is the accepted residual.
+Everything else on the tick path must stay flat. The Heikin-Ashi tail is flat (~0.13 µs) and the
+plotted-array cache no longer adds ~110 µs of GC per tick.
 
 ### Checklist
 

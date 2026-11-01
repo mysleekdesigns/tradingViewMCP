@@ -91,9 +91,12 @@ describe('mainSeriesTail', () => {
 
   it('heikin-ashi reuses the unchanged HA prefix', () => {
     const prev = mainSeriesData('heikin-ashi', candles)
+    // Captured before the call: mainSeriesTail extends prev.ha in place.
+    const [p0, p1] = [prev.ha?.[0], prev.ha?.[1]]
     const tail = mainSeriesTail('heikin-ashi', ticked, 2, prev.ha)
-    expect(tail.ha?.[0]).toBe(prev.ha?.[0])
-    expect(tail.ha?.[1]).toBe(prev.ha?.[1])
+    expect(tail.ha).toBe(prev.ha)
+    expect(tail.ha?.[0]).toBe(p0)
+    expect(tail.ha?.[1]).toBe(p1)
   })
 
   it('heikin-ashi falls back to a full compute without previous HA bars', () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Candle } from '../types'
-import { heikinAshi, heikinAshiBar, heikinAshiFrom } from './heikinAshi'
+import { heikinAshi, heikinAshiBar, heikinAshiFrom, heikinAshiFromInPlace } from './heikinAshi'
 
 const H = 3600
 const c = (i: number, open: number, high: number, low: number, close: number): Candle => ({
@@ -62,6 +62,27 @@ describe('heikinAshi', () => {
     // Prefix bars are reused, not recomputed.
     expect(tail[0]).toBe(before[0])
     expect(tail[2]).toBe(before[2])
+  })
+
+  it('heikinAshiFromInPlace extends the owned array in place and agrees with a full recompute', () => {
+    const owned = heikinAshi(candles)
+    const first = owned[0]
+    // A forming-bar tick on the last bar, then a new bar, then a correction two bars back.
+    const ticked = [...candles.slice(0, -1), { ...candles[candles.length - 1], close: 99 }]
+    const grown = [...ticked, c(candles.length, 99, 101, 98, 100)]
+    const corrected = grown.map((x, i) => (i === 2 ? { ...x, close: x.close + 1 } : x))
+    let out = heikinAshiFromInPlace(owned, ticked, ticked.length - 1)
+    expect(out).toBe(owned)
+    expect(out).toEqual(heikinAshi(ticked))
+    out = heikinAshiFromInPlace(out, grown, grown.length - 1)
+    expect(out).toEqual(heikinAshi(grown))
+    out = heikinAshiFromInPlace(out, corrected, 2)
+    expect(out).toEqual(heikinAshi(corrected))
+    expect(out[0]).toBe(first)
+    // A shorter candle array truncates the owned bars.
+    expect(heikinAshiFromInPlace(out, corrected.slice(0, 3), 3)).toEqual(
+      heikinAshi(corrected.slice(0, 3)),
+    )
   })
 
   it('is causal: perturbing a future candle never changes earlier HA bars', () => {

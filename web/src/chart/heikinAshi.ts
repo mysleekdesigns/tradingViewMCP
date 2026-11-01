@@ -46,7 +46,30 @@ export function heikinAshiFrom(
   from: number,
 ): HeikinAshiBar[] {
   const start = Math.max(0, Math.min(from, prev.length, candles.length))
-  const out = prev.slice(0, start)
+  return extendFrom(prev.slice(0, start), candles, start)
+}
+
+/**
+ * `heikinAshiFrom` without the prefix copy: truncates `owned` to `from` bars and appends the
+ * recomputed tail IN PLACE, returning `owned`. O(tail) per live tick instead of O(n). Only for
+ * an array the caller owns outright (the chart's private HA cache); never pass an array anyone
+ * else may still read.
+ */
+export function heikinAshiFromInPlace(
+  owned: HeikinAshiBar[],
+  candles: readonly Candle[],
+  from: number,
+): HeikinAshiBar[] {
+  const start = Math.max(0, Math.min(from, owned.length, candles.length))
+  owned.length = start
+  return extendFrom(owned, candles, start)
+}
+
+function extendFrom(
+  out: HeikinAshiBar[],
+  candles: readonly Candle[],
+  start: number,
+): HeikinAshiBar[] {
   for (let i = start; i < candles.length; i++) {
     out.push(heikinAshiBar(candles[i], out[i - 1]))
   }

@@ -5,7 +5,7 @@ import type {
   LineData,
 } from 'lightweight-charts'
 import type { Candle, ChartType } from '../types'
-import { heikinAshi, heikinAshiFrom, type HeikinAshiBar } from './heikinAshi'
+import { heikinAshi, heikinAshiFromInPlace, type HeikinAshiBar } from './heikinAshi'
 import { colors, mainSeriesOptionsFor, realPriceLineOptions, type ChartPalette } from './theme'
 import { toCandlestickPoint, toCloseLinePoint } from './points'
 
@@ -64,16 +64,20 @@ export function mainSeriesData(type: ChartType, candles: readonly Candle[]): Mai
  * Points for `candles[from..]` only, for `series.update()` on live ticks.
  * `prevHa` must be the HA bars for the previously applied candles (whose first `from` bars are
  * unchanged); only the tail is recomputed. A missing/short `prevHa` falls back to a full compute.
+ * Takes ownership of `prevHa`: it is extended in place (no O(n) prefix copy per tick) and
+ * returned as `ha`, so the caller must not keep reading the old reference as the old bars.
  */
 export function mainSeriesTail(
   type: ChartType,
   candles: readonly Candle[],
   from: number,
-  prevHa: readonly HeikinAshiBar[] | null,
+  prevHa: HeikinAshiBar[] | null,
 ): MainSeriesData {
   if (type === 'heikin-ashi') {
     const ha =
-      prevHa && prevHa.length >= from ? heikinAshiFrom(prevHa, candles, from) : heikinAshi(candles)
+      prevHa && prevHa.length >= from
+        ? heikinAshiFromInPlace(prevHa, candles, from)
+        : heikinAshi(candles)
     return { points: ha.slice(from).map(toCandlestickPoint), ha }
   }
   const tail = candles.slice(from)
