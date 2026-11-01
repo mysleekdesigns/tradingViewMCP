@@ -1197,6 +1197,109 @@ typecheck and lint stays green with no visual change.
 
 ---
 
+## Phase 20 — Regime Model, Persistence & Paper-Trading Risk Controls
+
+Why: the 2026-11-01 review of "How To Actually Build a Trading Bot With Claude Code (Fully
+Automated)" (AI Pathways, April 2026, 34 min, [youtube.com/watch?v=y_bsjZThP0o](https://www.youtube.com/watch?v=y_bsjZThP0o))
+found one idea this project has never tested and several cheap safety and reporting gaps. The
+video builds a Hidden Markov Model (HMM) regime engine (3–7 states sorted by mean return into
+crash/bear/neutral/bull/euphoria, forward algorithm only, a 3-bar stability filter), sizes by
+regime and volatility, walk-forward tests against buy-and-hold / 200-day SMA / random allocation,
+and wraps everything in circuit breakers (2% daily loss cuts size, 3% daily loss or 10% drawdown
+closes all, a lock file that needs a manual restart) and correlation checks. It shows no trading
+results. The transcript could not be fetched; the review used the video's chapter list and two
+third-party summaries, so treat the details as second-hand.
+
+What is already covered and stays out: walk-forward, benchmarks and random nulls (Phase 7, stricter
+here); Markov regime features (`regime_state`, `regime_signal`; run r-20261026-142915-4bdd2b, idea 13:
+no edge, DD 74%); volatility targeting (run r-20261025-125744-12221d: no edge); volatility and SMA200
+overlays (Phase 15: no overlay benefit). The untested piece is the **causal HMM**, left out of the
+registry because hedgeFund's `hmm_walk_forward_from_close` takes ~75 s per 15k-bar 4h series
+(`lab/lab/registry/regime.py`). The prior is weak: an HMM fitted on returns and volatility is mostly
+a volatility-regime classifier, close to the `vol_rank` overlay that already failed. The likely
+outcome is "no overlay benefit", and that is a correct result.
+
+Rules for this phase:
+- **Regime model = filter, never a direction signal.** It may only gate exposure (overlay
+  `flat_when`, or an `and` conjunct beside a price signal). Idea 13 already killed the
+  regime-as-signal family.
+- **No look-ahead.** Only filtered probabilities (forward algorithm on rows at or before t). Never a
+  smoothed (Viterbi or forward-backward) or full-sample fit. State labels come from each fit's own
+  training window. Every feature ships with the perturbation test.
+- **Nothing tuned on the result.** Number of states, refit cadence, training window and persistence
+  length are fixed in config before the first backtest, each with a one-line source or
+  justification. No BIC sweep over the design window feeds a plan.
+- **Frozen tests stay frozen.** The seven HC exploratory paper tests (2026-10-30 to 2026-12-25) and
+  the Phase 17 shadow judge are not changed. New risk controls apply only to paper tests started
+  after this phase.
+- **Paper only.** No Alpaca, no leverage, no live orders, no 5-minute HMM, no 252-day windows.
+
+Parts A, E and part of H are open to Claude. Parts B, C, D and G touch `lab/lab/registry/`,
+`lab/lab/research/` or `lab/config/`, which are read-only under the lab lock, so they are **(owner)**
+items: Claude writes the proposal, the owner applies it. Needs Phase 13 (paper protocol) and Phase 15
+(overlay question).
+
+### Checklist
+
+Part A — Research record
+- [ ] Save the video review as `agents/research/reports/Claude Code regime trading bot video research.md` (sources, what is covered, what is new, what is rejected and why), with the source text in an "untrusted" callout
+- [ ] Confirm the HMM overlay's literature source and published parameters through the `researcher` agent, e.g. Kritzman, Page & Turkington (2012) "Regime Shifts" or Nystrup, Madsen & Lindström (2015/2017) on HMM regime allocation; record the states, inputs and cadence they used; no parameter is picked by looking at our data
+
+Part B — Causal HMM regime features (owner, lab lock)
+- [ ] `[regime.hmm]` in `lab.toml`, fixed before any backtest: number of states (3, from the source), inputs (bar log return and realised volatility over a fixed window), training window in bars, refit cadence (e.g. every 42 bars = weekly on 4h), random seed, restarts; each with a one-line justification
+- [ ] Fast causal fit: refit on rows at or before the refit bar, forward-filter bar by bar until the next refit; states ordered by mean return inside each fit's training window so labels do not switch between refits; hedgeFund checked for 252-day or daily-bar assumptions and wrapped where needed
+- [ ] Registry features `hmm_state` (ordered state id) and `hmm_bear_prob` (filtered probability of the lowest-mean-return state); usable in overlay `flat_when` and as an `and` gate only, never alone or in `long_exit` (validator error names the rule)
+- [ ] Per-run cache keyed on the frozen archive sha256 + `[regime.hmm]` settings, so agents read the series instead of refitting; a 15k-bar 4h series costs ≤ 75 s once per run and milliseconds after
+- [ ] Tests: perturbation test (change prices after bar t, every output up to t bit-identical); matches hedgeFund's `hmm_walk_forward_from_close` at each refit bar on a fixture; no smoothed-probability import anywhere in the module (static check); label order stable across refits on a synthetic two-regime series; NaN during warm-up, never forward-filled across gaps
+
+Part C — Persistence filter (owner, lab lock)
+- [ ] Plan construct `persist(<condition>, k)`: true at bar t only when the condition held on each of the last k closed bars (the video's 3-bar stability rule, generalised); `k` counts as a tunable parameter toward the ≤6 limit and the literal-lineage rules
+- [ ] Tests: perturbation test; `persist(c, 1)` equals `c`; known values on a hand-built series; validator rejects k < 1 and k above a configured maximum
+- [ ] `get_report` shows turnover (trades per year and traded value per year) next to the persistence setting, so its effect on cost drag can be read directly
+
+Part D — One pre-registered HMM overlay run (owner criteria unchanged)
+- [ ] Overlay journal written before the first backtest: question `risk_overlay`, the frozen `overlay_criteria.toml` sha256, a slate of at most 2 overlays with the Part A source and parameters (e.g. flat while `persist(hmm_bear_prob > 0.5, 3)`; flat while `hmm_state` is the highest-volatility state), family links to idea 13 and the Phase 15 `vol_rank` overlay, and the expected outcome ("no overlay benefit")
+- [ ] Family check before scoring: an overlay whose design-window returns correlate ≥ `family_return_corr` with the abandoned `vol_rank` overlay is the same hypothesis and is reported as already abandoned, not re-tested
+- [ ] Run through the normal pipeline (BTCUSDT 4h, untuned, `run_adversarial`, `run_crosscheck`, `get_report`, `strategy-critic`); N_overlay and the edge DSR's N are counted across every run; holdout only if `get_report` says `pre_holdout_passed`, and only with the owner's approval
+- [ ] Outcome written in the journal whatever it is, with the `honest-backtesting` report; `docs(phase-20)` commit
+
+Part E — Paper-trading risk controls (future paper tests only)
+- [ ] Paper protocol template gains a pre-registered `risk_controls` block fixed before start: Freqtrade protections (`MaxDrawdown`, `StoplossGuard`, `CooldownPeriod`) with their values, plus portfolio circuit-breaker thresholds (daily loss and drawdown from peak); the HC protocols and strategy files are not touched (test: byte-identical before and after)
+- [ ] `compare` runs the backtest side with `--enable-protections` whenever the protocol has them, so paper and backtest trade under the same rules (test: a protocol with protections and a backtest without them is refused)
+- [ ] Circuit breaker in `paper_trade.py`: when a threshold trips, stop that dry-run process and write `agents/data/paper/<test>/halt.lock` (reason, threshold, value, time); `prepare`/`start` refuse while the lock exists; only the owner deletes it, outside Claude Code; the halt is logged in the test's journal
+- [ ] Tests on fixture dry-run DBs: each threshold trips at the right bar and not before; the lock blocks restart; dry-run only (no live mode reachable, hooks unchanged)
+
+Part F — Correlation-aware paper evaluation
+- [ ] `paper_trade.py compare --portfolio` (information only): pairwise daily-return correlations across concurrent paper tests and the effective number of independent bets, N_eff = (Σλ)² / Σλ² over the correlation matrix's eigenvalues, with the window and method stated
+- [ ] Rule added to `.claude/rules/research-agents.md` and the `honest-backtesting` checklist: confirmations across correlated coins are one piece of evidence, not N; the 2026-12-25 HC write-up reports N_eff next to the per-coin verdicts without changing any frozen verdict
+
+Part G — Named crash-episode table (owner, lab lock)
+- [ ] `[episodes]` in `lab.toml`: named UTC date ranges fixed before use (e.g. 2020-03 COVID crash, 2021-05 deleveraging, 2022-05 LUNA, 2022-11 FTX, 2024-08 carry unwind); any episode overlapping the locked holdout is dropped automatically, never read
+- [ ] `get_report` (edge and overlay runs) adds a per-episode table: strategy vs buy-and-hold return and max drawdown, exposure, trades; information only, not a criterion, not a trial
+- [ ] `strategy-critic` prompt reads the table ("does it only survive by being flat in one episode?"); tests: episode clipping at the holdout boundary, a golden report fixture
+
+Part H — Chart and paper monitor (web/, server/)
+- [ ] Regime ribbon shows how sure the model is: opacity from the filtered probability of the current state, and the legend shows the state and "bars in regime"; closed bars only, never back-dated (perturbation test on the ribbon data); visual only
+- [ ] (after Part B) Ribbon source picker Markov / HMM: `POST /lab/regime` gains `model = "hmm"` using the Part B code and cache; the chart shows a loading state until the slow first fit finishes; no change to how the Markov ribbon is labelled
+- [ ] Paper monitor in `PaperTradingPanel`: per paper test, net P&L, drawdown from peak, protection and circuit-breaker state, `halt.lock` status, and the backtest-expected range from `compare`; read-only server endpoint over the dry-run DBs and protocol files
+- [ ] Code review (`code-reviewer`; `quant-reviewer` for the ribbon data), `npx tsc -b`, `npx vitest run`, `npm run lint` in `web/`; `npx tsc --noEmit`, `npx vitest run` in `server/`; browser checks run by Claude (owner preference) and recorded under `agents/research/research_notes/`
+
+Part I — Review and gate
+- [ ] Quant review of Parts B–G (look-ahead, label switching, cache invalidation, pre-registration, holdout untouched); `uv run pytest -q` and `uv run ruff check .` in `lab/` and `agents/`; then `/run-gate 20`
+
+Not in this phase: any live or Alpaca order path, leverage, regime-scaled position sizing beyond
+0/1 exposure (needs an engine change), HMM on intraday bars below 1h, a regime model as an entry
+signal, and choosing the number of states by searching the design window.
+
+**Done when:** `hmm_state` and `hmm_bear_prob` pass the perturbation test and the hedgeFund
+cross-check; `persist(c, k)` is in the plan language with its tests; one pre-registered HMM overlay
+run is in the journal with its outcome; a new paper test can carry pre-registered protections and a
+circuit breaker whose `halt.lock` blocks restart, with `compare` using the same protections; `compare
+--portfolio` reports N_eff; `get_report` shows the crash-episode table; the HC tests and the Phase 17
+shadow judge are byte-identical; and every test, typecheck and lint stays green.
+
+---
+
 ## Testing Strategy
 
 - **Unit (Vitest):** indicator math, data mappers (Binance kline → Candle).
@@ -1226,6 +1329,8 @@ typecheck and lint stays green with no visual change.
 | LLM trade judge "backtested" on history it memorized | Forward-only shadow test with a blind snapshot, verdicts logged before the fill (Phase 17) |
 | Equity-style assumptions on crypto (252-day year, survivorship, forward-filled gaps) | 365-day annualization, point-in-time universe, gaps marked untradeable |
 | hedgeFund code assumes daily bars | Audit before reuse; wrap or extend for intraday |
+| Regime model fitted with future data (smoothed HMM, full-sample fit, label switching) | Forward-filtered probabilities only, refit on past rows, labels ordered inside each fit window, perturbation test (Phase 20) |
+| Paper results counted as N confirmations across correlated coins | Report N_eff from the return correlation matrix beside per-coin verdicts (Phase 20) |
 
 ---
 
@@ -1253,5 +1358,6 @@ typecheck and lint stays green with no visual change.
 | 17 | Jev trade-time judge (forward-only shadow judge on the HC paper bots, hash-chained decision log, pre-registered take-vs-skip test; optional decision panel) | Medium |
 | 18 | Session ranges overlay (Asia/London/New York boxes and UTC opening range; visual only, no lab changes) | Small |
 | 19 | Web performance & DRY (per-tick scans and root re-renders removed, primitive frame path cleaned, forming bar from the hub + compression, code splitting + React Compiler, ~1.7–2k duplicate lines consolidated; no visual change) | Large |
+| 20 | Regime model, persistence & paper risk controls (causal HMM features, `persist(c, k)`, one pre-registered HMM overlay run, paper protections + circuit breaker, N_eff, crash-episode table, ribbon confidence + paper monitor; owner parts under the lab lock) | Large |
 
 **First usable version = end of Phase 3.**
