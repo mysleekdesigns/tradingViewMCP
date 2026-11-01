@@ -18,6 +18,7 @@ import {
   type AlertFormDraft,
 } from './alertForm'
 import { FREQUENCY_LABELS } from './alertsView'
+import { useModalKeys } from './useModalKeys'
 import './Alerts.css'
 
 export type { AlertDialogValues } from './alertForm'
@@ -142,31 +143,12 @@ export function AlertDialog({
     }
   }
 
-  const onDialogKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    // Keep keys away from global chart shortcuts while the dialog is open.
-    e.stopPropagation()
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      onClose()
-      return
-    }
-    if (e.key !== 'Tab' || !dialogRef.current) return
-    const focusables = Array.from(
-      dialogRef.current.querySelectorAll<HTMLElement>(
-        'button:not([disabled]):not([tabindex="-1"]), input:not([readonly]), select, textarea',
-      ),
-    )
-    if (focusables.length === 0) return
-    const first = focusables[0]
-    const last = focusables[focusables.length - 1]
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault()
-      last.focus()
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault()
-      first.focus()
-    }
-  }
+  // Keep keys away from global chart shortcuts while the dialog is open.
+  const onDialogKeyDown = useModalKeys(dialogRef, onClose, {
+    listen: 'element',
+    stop: 'all',
+    trap: 'button:not([disabled]):not([tabindex="-1"]), input:not([readonly]), select, textarea',
+  })
 
   const onFrequencyKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return

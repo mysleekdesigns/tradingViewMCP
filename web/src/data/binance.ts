@@ -3,6 +3,7 @@ import {
   DEFAULT_STALE_TIMEOUT_MS,
   openReconnectingSocket,
   parseKlineMessage,
+  resolveWebSocket,
 } from './binanceStream'
 import {
   MINI_TICKER_STREAM,
@@ -11,6 +12,15 @@ import {
   parseSymbolInfo,
   parseTicker24hr,
 } from './binanceTicker'
+import { dedupeByTime, isRecord, toFiniteNumber, type FiniteFieldWording } from './guards'
+import {
+  SharedLoad,
+  bodyString,
+  clampLimit,
+  exchangeError,
+  requestMarketJson,
+  type ExchangeErrorRules,
+} from './http'
 import {
   MarketDataError,
   type MarketDataProvider,
@@ -26,41 +36,26 @@ import { BINANCE_REST, BINANCE_WS, DIRECT_VENUE, type VenueInfo } from './venue'
  */
 const EXCHANGE_INFO_QUERY = 'showPermissionSets=false'
 
-const MAX_LIMIT = 1000
 const DEFAULT_TIMEOUT_MS = 10_000
 /** Binance error code for "Invalid symbol." */
 const INVALID_SYMBOL_CODE = -1121
 
-/** `Retry-After` in seconds (Binance sends delta-seconds); undefined when absent or invalid. */
-function parseRetryAfter(res: Response): number | undefined {
-  const raw = res.headers.get('Retry-After')
-  if (raw === null || raw.trim() === '') return undefined
-  const n = Number(raw)
-  return Number.isFinite(n) && n >= 0 ? n : undefined
+/** Error wording of kline row fields. */
+const KLINE_FIELD: FiniteFieldWording = {
+  prefix: 'kline',
+  wrongType: 'expected string or number',
+  notFinite: 'not a finite number',
 }
 
-/** Keep one candle per time (the later row wins); input must be sorted ascending. */
-function dedupeByTime(sorted: Candle[]): Candle[] {
-  const out: Candle[] = []
-  for (const c of sorted) {
-    if (out.length > 0 && out[out.length - 1].time === c.time) out[out.length - 1] = c
-    else out.push(c)
+/** Binance error answers: `{ code, msg }`; 400 with code -1121 is an unknown symbol. */
+function binanceErrorRules(what: string): ExchangeErrorRules {
+  return {
+    detail: (body) => bodyString(body, 'msg'),
+    badSymbol: (status, body) =>
+      status === 400 && isRecord(body) && body.code === INVALID_SYMBOL_CODE
+        ? `Unknown symbol in request for ${what}`
+        : null,
   }
-  return out
-}
-
-function toFiniteNumber(value: unknown, field: string): number {
-  if (typeof value !== 'string' && typeof value !== 'number') {
-    throw new MarketDataError('parse', `kline ${field}: expected string or number`)
-  }
-  if (typeof value === 'string' && value.trim() === '') {
-    throw new MarketDataError('parse', `kline ${field}: empty value`)
-  }
-  const n = Number(value)
-  if (!Number.isFinite(n)) {
-    throw new MarketDataError('parse', `kline ${field}: not a finite number`)
-  }
-  return n
 }
 
 /**
@@ -72,57 +67,15 @@ export function parseKline(row: unknown): Candle {
   if (!Array.isArray(row) || row.length < 6) {
     throw new MarketDataError('parse', 'kline row: expected an array with at least 6 fields')
   }
-  const openTimeMs = toFiniteNumber(row[0], 'openTime')
+  const openTimeMs = toFiniteNumber(row[0], 'openTime', KLINE_FIELD)
   return {
     time: Math.floor(openTimeMs / 1000),
-    open: toFiniteNumber(row[1], 'open'),
-    high: toFiniteNumber(row[2], 'high'),
-    low: toFiniteNumber(row[3], 'low'),
-    close: toFiniteNumber(row[4], 'close'),
-    volume: toFiniteNumber(row[5], 'volume'),
+    open: toFiniteNumber(row[1], 'open', KLINE_FIELD),
+    high: toFiniteNumber(row[2], 'high', KLINE_FIELD),
+    low: toFiniteNumber(row[3], 'low', KLINE_FIELD),
+    close: toFiniteNumber(row[4], 'close', KLINE_FIELD),
+    volume: toFiniteNumber(row[5], 'volume', KLINE_FIELD),
   }
-}
-
-function clampLimit(limit: number): number {
-  if (!Number.isFinite(limit)) return 500
-  return Math.min(MAX_LIMIT, Math.max(1, Math.floor(limit)))
-}
-
-async function readErrorCode(res: Response): Promise<{ code?: number; msg?: string }> {
-  try {
-    const body: unknown = await res.json()
-    if (body !== null && typeof body === 'object') {
-      const { code, msg } = body as { code?: unknown; msg?: unknown }
-      return {
-        code: typeof code === 'number' ? code : undefined,
-        msg: typeof msg === 'string' ? msg : undefined,
-      }
-    }
-  } catch {
-    // Non-JSON error body; fall through.
-  }
-  return {}
-}
-
-/** Reject with kind 'aborted' when `signal` aborts before `p` settles. */
-function withAbort<T>(p: Promise<T>, signal: AbortSignal | undefined, what: string): Promise<T> {
-  if (!signal) return p
-  const aborted = () => new MarketDataError('aborted', `Request for ${what} was cancelled`)
-  if (signal.aborted) return Promise.reject(aborted())
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(aborted())
-    signal.addEventListener('abort', onAbort, { once: true })
-    p.then(
-      (v) => {
-        signal.removeEventListener('abort', onAbort)
-        resolve(v)
-      },
-      (e: unknown) => {
-        signal.removeEventListener('abort', onAbort)
-        reject(e instanceof Error ? e : new Error(String(e)))
-      },
-    )
-  })
 }
 
 export interface BinanceProviderOptions {
@@ -147,8 +100,8 @@ export class BinanceProvider implements MarketDataProvider {
   private readonly WebSocketImpl: typeof WebSocket | undefined
   private readonly staleTimeoutMs: number
   private readonly venue: VenueInfo
-  /** Memoized exchangeInfo; cleared when the fetch fails so the next call retries. */
-  private symbolsPromise: Promise<SymbolInfo[]> | null = null
+  /** Memoized exchangeInfo; forgotten when the fetch fails so the next call retries. */
+  private readonly symbols = new SharedLoad(() => this.fetchSymbols())
 
   constructor(opts?: BinanceProviderOptions) {
     this.venue = opts?.venue ?? DIRECT_VENUE
@@ -167,58 +120,21 @@ export class BinanceProvider implements MarketDataProvider {
    * 418 -> banned, 451 -> region-blocked, 400 with code -1121 -> bad-symbol, other non-2xx ->
    * http, unparseable body -> parse. `what` names the resource in messages.
    */
-  private async requestJson(
+  private requestJson(
     path: string,
     params: URLSearchParams | null,
     what: string,
     callerSignal?: AbortSignal,
   ): Promise<unknown> {
     const query = params ? `?${params.toString()}` : ''
-    const url = `${this.baseUrl}${path}${query}`
-    const timeout = AbortSignal.timeout(this.timeoutMs)
-    const signal = callerSignal ? AbortSignal.any([callerSignal, timeout]) : timeout
-
-    let res: Response
-    try {
-      res = await this.fetchFn(url, { signal })
-    } catch (err) {
-      if (callerSignal?.aborted) {
-        throw new MarketDataError('aborted', `Request for ${what} was cancelled`)
-      }
-      if (timeout.aborted) {
-        throw new MarketDataError(
-          'network',
-          `Timed out after ${this.timeoutMs} ms fetching ${what}`,
-        )
-      }
-      const detail = err instanceof Error ? err.message : String(err)
-      throw new MarketDataError('network', `Network error fetching ${what}: ${detail}`)
-    }
-
-    if (!res.ok) {
-      const retryAfter = parseRetryAfter(res)
-      if (res.status === 429) {
-        throw new MarketDataError('rate-limited', `Rate limited fetching ${what}`, 429, retryAfter)
-      }
-      if (res.status === 418) {
-        throw new MarketDataError('banned', `IP banned by provider`, 418, retryAfter)
-      }
-      if (res.status === 451) {
-        throw new MarketDataError('region-blocked', `Provider unavailable in this region`, 451)
-      }
-      const { code, msg } = await readErrorCode(res)
-      if (res.status === 400 && code === INVALID_SYMBOL_CODE) {
-        throw new MarketDataError('bad-symbol', `Unknown symbol in request for ${what}`, res.status)
-      }
-      const suffix = msg ? `: ${msg}` : ''
-      throw new MarketDataError('http', `HTTP ${res.status} fetching ${what}${suffix}`, res.status)
-    }
-
-    try {
-      return (await res.json()) as unknown
-    } catch {
-      throw new MarketDataError('parse', `Invalid JSON in ${what} response`)
-    }
+    return requestMarketJson({
+      fetchFn: this.fetchFn,
+      url: `${this.baseUrl}${path}${query}`,
+      what,
+      timeoutMs: this.timeoutMs,
+      signal: callerSignal,
+      toError: (res) => exchangeError(res, what, binanceErrorRules(what)),
+    })
   }
 
   getCandles(
@@ -279,14 +195,6 @@ export class BinanceProvider implements MarketDataProvider {
     return dedupeByTime(candles)
   }
 
-  private resolveWebSocket(caller: string): typeof WebSocket {
-    const WS = this.WebSocketImpl ?? globalThis.WebSocket
-    if (typeof WS !== 'function') {
-      throw new Error(`${caller}: WebSocket is not available in this environment`)
-    }
-    return WS
-  }
-
   subscribeCandles(
     symbol: string,
     interval: Interval,
@@ -302,7 +210,7 @@ export class BinanceProvider implements MarketDataProvider {
     onCandle: (c: Candle, closed: boolean) => void,
     opts: SubscribeOptions | undefined,
   ): () => void {
-    const WS = this.resolveWebSocket('subscribeCandles')
+    const WS = resolveWebSocket(this.WebSocketImpl, 'subscribeCandles')
     const sym = symbol.trim().toUpperCase()
     const expected = { symbol: sym, interval }
     return openReconnectingSocket({
@@ -334,17 +242,7 @@ export class BinanceProvider implements MarketDataProvider {
   }
 
   getSymbols(opts?: { signal?: AbortSignal }): Promise<SymbolInfo[]> {
-    if (opts?.signal?.aborted) {
-      return Promise.reject(new MarketDataError('aborted', 'Request for symbols was cancelled'))
-    }
-    if (this.symbolsPromise === null) {
-      const p = this.fetchSymbols()
-      this.symbolsPromise = p
-      p.catch(() => {
-        if (this.symbolsPromise === p) this.symbolsPromise = null
-      })
-    }
-    return withAbort(this.symbolsPromise, opts?.signal, 'symbols')
+    return this.symbols.join(opts?.signal, 'symbols')
   }
 
   private async fetchSymbols(): Promise<SymbolInfo[]> {
@@ -353,10 +251,8 @@ export class BinanceProvider implements MarketDataProvider {
       new URLSearchParams(EXCHANGE_INFO_QUERY),
       'exchange info',
     )
-    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
-      throw new MarketDataError('parse', 'Expected an exchangeInfo object')
-    }
-    const raw = (body as { symbols?: unknown }).symbols
+    if (!isRecord(body)) throw new MarketDataError('parse', 'Expected an exchangeInfo object')
+    const raw = body.symbols
     if (!Array.isArray(raw)) {
       throw new MarketDataError('parse', 'exchangeInfo has no symbols array')
     }
@@ -437,7 +333,7 @@ export class BinanceProvider implements MarketDataProvider {
     onTickers: (tickers: Ticker[]) => void,
     opts?: TickerSubscribeOptions,
   ): () => void {
-    const WS = this.resolveWebSocket('subscribeTickers')
+    const WS = resolveWebSocket(this.WebSocketImpl, 'subscribeTickers')
     const watched = opts?.symbols
     return openReconnectingSocket({
       WebSocketImpl: WS,

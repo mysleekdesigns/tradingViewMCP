@@ -23,6 +23,7 @@ import type {
   RunState,
 } from '../data/researchTypes'
 import type { Interval } from '../types'
+import { storedValue } from '../state/storedValue'
 import { EMPTY, fmtInt, fmtPct, fmtRatio, isChartInterval } from './backtestView'
 
 // ---------------------------------------------------------------------------------------------
@@ -46,39 +47,27 @@ export interface TabStorage {
   setItem(key: string, value: string): void
 }
 
-function defaultStorage(): TabStorage | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage
-  } catch {
-    return null
-  }
+/** The tab id, stored as plain text (not JSON); anything else reads as 'runs'. */
+export const researchTabStored = storedValue<ResearchTab>(RESEARCH_TAB_KEY, {
+  decode: (text) => text,
+  parse: (raw) => (RESEARCH_TABS.some((t) => t.id === raw) ? (raw as ResearchTab) : 'runs'),
+  fallback: () => 'runs',
+  serialize: (tab) => tab,
+})
+
+export function loadResearchTab(storage?: TabStorage | null): ResearchTab {
+  return researchTabStored.load(storage)
 }
 
-export function loadResearchTab(storage: TabStorage | null = defaultStorage()): ResearchTab {
-  try {
-    const v = storage?.getItem(RESEARCH_TAB_KEY)
-    return RESEARCH_TABS.some((t) => t.id === v) ? (v as ResearchTab) : 'runs'
-  } catch {
-    return 'runs'
-  }
-}
-
-export function saveResearchTab(
-  tab: ResearchTab,
-  storage: TabStorage | null = defaultStorage(),
-): void {
-  try {
-    storage?.setItem(RESEARCH_TAB_KEY, tab)
-  } catch {
-    // Private mode / quota: the tab simply is not remembered.
-  }
+export function saveResearchTab(tab: ResearchTab, storage?: TabStorage | null): void {
+  researchTabStored.save(tab, storage)
 }
 
 /**
  * A tab (or the whole view) failed to render: remember Runs instead, so reopening the view or
  * pressing Reload never lands on the tab that just threw.
  */
-export function resetResearchTab(storage: TabStorage | null = defaultStorage()): void {
+export function resetResearchTab(storage?: TabStorage | null): void {
   saveResearchTab('runs', storage)
 }
 

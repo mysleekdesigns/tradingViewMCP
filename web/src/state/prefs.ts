@@ -1,5 +1,6 @@
 import { parseTimeframe } from '../data/timeframes'
 import { CHART_TYPES, type ChartType, type Timeframe } from '../types'
+import { storedValue, type ValueStorage } from './storedValue'
 
 /** What the app remembers across reloads. */
 export interface Prefs {
@@ -17,16 +18,7 @@ export const DEFAULT_PREFS: Readonly<Prefs> = Object.freeze({
 })
 
 /** Minimal storage surface, so tests can pass a fake (or one that throws). */
-export type PrefsStorage = Pick<Storage, 'getItem' | 'setItem'>
-
-function defaultStorage(): PrefsStorage | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage
-  } catch {
-    // Accessing localStorage itself throws when storage is disabled.
-    return null
-  }
-}
+export type PrefsStorage = ValueStorage
 
 const SYMBOL_RE = /^[A-Z0-9]{2,30}$/
 
@@ -57,24 +49,18 @@ export function parsePrefs(raw: unknown): Prefs {
   }
 }
 
-export function loadPrefs(storage: PrefsStorage | null = defaultStorage()): Prefs {
-  if (!storage) return { ...DEFAULT_PREFS }
-  try {
-    const text = storage.getItem(PREFS_KEY)
-    if (text === null) return { ...DEFAULT_PREFS }
-    return parsePrefs(JSON.parse(text))
-  } catch {
-    return { ...DEFAULT_PREFS }
-  }
+/** `tv.prefs.v1`; saved cleaned (parsePrefs), so an invalid field is written as its default. */
+export const prefsStored = storedValue<Prefs>(PREFS_KEY, {
+  parse: parsePrefs,
+  fallback: () => ({ ...DEFAULT_PREFS }),
+  serialize: (prefs) => JSON.stringify(parsePrefs(prefs)),
+})
+
+export function loadPrefs(storage?: PrefsStorage | null): Prefs {
+  return prefsStored.load(storage)
 }
 
 /** Best effort: a full or disabled storage must never break the app. */
-export function savePrefs(prefs: Prefs, storage: PrefsStorage | null = defaultStorage()): void {
-  if (!storage) return
-  try {
-    const clean = parsePrefs(prefs)
-    storage.setItem(PREFS_KEY, JSON.stringify(clean))
-  } catch {
-    // Quota exceeded or storage disabled: keep running without persistence.
-  }
+export function savePrefs(prefs: Prefs, storage?: PrefsStorage | null): void {
+  prefsStored.save(prefs, storage)
 }

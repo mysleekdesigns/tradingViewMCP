@@ -1,10 +1,10 @@
+import { lowerBoundByTime } from '../chart/util/search'
 import type { Candle } from '../types'
 import { emptyOutput, stepInto } from './compute'
 import type {
   IndicatorDef,
   IndicatorInputs,
   IndicatorOutput,
-  IndicatorPoint,
   IndicatorStepper,
   IndicatorValues,
   PriceSource,
@@ -25,18 +25,6 @@ export interface PrependResult {
   kind: 'splice' | 'reset'
   /** Full output over the new candles (the caller uses series.setData per line). */
   output: IndicatorOutput
-}
-
-/** Index of the first point with `time >= t` (points are ascending by time). */
-function lowerBound(points: readonly IndicatorPoint[], t: number): number {
-  let lo = 0
-  let hi = points.length
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (points[mid].time < t) lo = mid + 1
-    else hi = mid
-  }
-  return lo
 }
 
 /**
@@ -102,7 +90,7 @@ export class IndicatorRunner {
     let deleted = false
     for (const line of this.def.lines) {
       const points = this.out[line.key]
-      const cut = lowerBound(points, startTime)
+      const cut = lowerBoundByTime(points, startTime)
       const fresh = tail[line.key]
       if (!deleted && cut < points.length) {
         const kept = new Set(fresh.map((p) => p.time))
@@ -156,7 +144,7 @@ export class IndicatorRunner {
     const fromTime = candles[from].time
     for (const line of this.def.lines) {
       const points = this.out[line.key]
-      const kept = points.slice(lowerBound(points, fromTime))
+      const kept = points.slice(lowerBoundByTime(points, fromTime))
       this.out[line.key] = head[line.key].concat(kept)
     }
     this.cpIndex = c + count
@@ -177,7 +165,7 @@ export class IndicatorRunner {
     const values: IndicatorValues = {}
     for (const line of this.def.lines) {
       const points = this.out[line.key]
-      const i = lowerBound(points, time)
+      const i = lowerBoundByTime(points, time)
       if (i < points.length && points[i].time === time) values[line.key] = points[i].value
     }
     return values

@@ -1,4 +1,5 @@
 /* ---------- Timeframe picker (quick buttons + dropdown) ---------- */
+/* Shared chrome (icon button, tabs, dialog, focus ring, scrollbar, panel head): primitives.css. */
 
 .tfp {
   position: relative;
@@ -54,15 +55,6 @@
   color: var(--text-faint);
   cursor: not-allowed;
   opacity: 0.6;
-}
-
-.tfp__btn:focus-visible,
-.tfp__more:focus-visible,
-.tfp__apply:focus-visible,
-.tfp__input:focus-visible,
-.tfp__select:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 
 .tfp__panel {

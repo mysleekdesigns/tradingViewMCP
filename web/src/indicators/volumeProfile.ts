@@ -1,3 +1,4 @@
+import { lowerBoundByTime } from '../chart/util/search'
 import type { Candle } from '../types'
 import type {
   IndicatorDef,
@@ -34,18 +35,6 @@ function rowCountOf(rowCount: number): number {
   return Math.max(1, Math.round(Number.isFinite(rowCount) ? rowCount : 1))
 }
 
-/** Index of the first candle with time >= t (candles ascending). */
-function lowerBound(candles: readonly Candle[], t: number): number {
-  let lo = 0
-  let hi = candles.length
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (candles[mid].time < t) lo = mid + 1
-    else hi = mid
-  }
-  return lo
-}
-
 /**
  * In-range bars `candles[start .. start + count - 1]`: open time in [from, to] (`to` 0 = up to
  * the last candle). Two binary searches, nothing read outside the range.
@@ -55,8 +44,8 @@ export function profileRange(
   from: number,
   to: number,
 ): { start: number; count: number } {
-  const start = from > 0 ? lowerBound(candles, from) : 0
-  const end = Number.isFinite(to) && to > 0 ? lowerBound(candles, to + 1) : candles.length
+  const start = from > 0 ? lowerBoundByTime(candles, from) : 0
+  const end = Number.isFinite(to) && to > 0 ? lowerBoundByTime(candles, to + 1) : candles.length
   return { start, count: Math.max(0, end - start) }
 }
 

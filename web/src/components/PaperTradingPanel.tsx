@@ -29,6 +29,7 @@ import type { PaperAccountApi } from '../state/usePaperAccount'
 import { formatPriceByTick } from '../state/chartTools'
 import { fmtQty, orderFeedback, type Feedback } from './paperFeedback'
 import { formatUtc } from './quote'
+import { useModalKeys } from './useModalKeys'
 import './Paper.css'
 
 export interface PaperTradingPanelProps {
@@ -895,17 +896,14 @@ function ResetForm({
     if (!valid) return
     onReset({ startingBalance: b, feeRate: f / 100, slippageBps: s, quoteAsset })
   }
+  // Escape cancels without preventDefault (unlike the other Escape handlers).
+  const onFormKeyDown = useModalKeys(null, onCancel, { listen: 'element', preventDefault: false })
 
   return (
     <form
       className="paper-reset"
       onSubmit={submit}
-      onKeyDown={(e) => {
-        if (e.key === 'Escape') {
-          e.stopPropagation()
-          onCancel()
-        }
-      }}
+      onKeyDown={onFormKeyDown}
       aria-label="Reset paper account"
     >
       <p className="paper-reset__text">

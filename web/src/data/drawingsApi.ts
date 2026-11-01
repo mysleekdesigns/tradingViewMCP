@@ -17,7 +17,9 @@ import {
   type LineStyleName,
   type StoredDrawingData,
 } from '../chart/drawings/types'
-import { PERSISTENCE_TIMEOUT_MS, PersistenceError, type FetchLike } from './persistence'
+import { isFiniteNumber, isRecord } from './guards'
+import { fetchWithin, globalFetch, jsonInit, type FetchLike } from './http'
+import { PERSISTENCE_TIMEOUT_MS, PersistenceError } from './persistence'
 
 export const DRAWING_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
 /** Same rule as the server's drawing symbol check. */
@@ -48,14 +50,6 @@ export interface DrawingsClient {
   put(drawing: Drawing, opts?: DrawingWriteOptions): Promise<void>
   /** A 404 (already gone) counts as success. */
   remove(id: string, opts?: DrawingWriteOptions): Promise<void>
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
-}
-
-function isFiniteNumber(v: unknown): v is number {
-  return typeof v === 'number' && Number.isFinite(v)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -95,77 +89,67 @@ const NO_BODY_STATUSES = new Set([204, 205, 304])
 export function createLocalServerRequest(opts: LocalServerClientOptions = {}): LocalServerRequest {
   const baseUrl = (opts.baseUrl ?? '').replace(/\/+$/, '')
   const timeoutMs = opts.timeoutMs ?? PERSISTENCE_TIMEOUT_MS
-  const doFetch: FetchLike =
-    opts.fetchImpl ??
-    ((input, init) => {
-      if (typeof globalThis.fetch !== 'function') {
-        return Promise.reject(new Error('fetch is not available'))
-      }
-      return globalThis.fetch(input, init)
-    })
+  const doFetch: FetchLike = opts.fetchImpl ?? globalFetch
+  const cancelled = (): PersistenceError => new PersistenceError('network', 'request cancelled')
 
   return async (path, init) => {
-    if (init.signal?.aborted) throw new PersistenceError('network', 'request cancelled')
-    const controller = new AbortController()
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      controller.abort()
-    }, timeoutMs)
-    const onCallerAbort = (): void => controller.abort()
-    init.signal?.addEventListener('abort', onCallerAbort, { once: true })
-
-    const reqInit: RequestInit = { method: init.method, signal: controller.signal }
+    // Before the body is encoded, as the request always did.
+    if (init.signal?.aborted) throw cancelled()
+    const reqInit = jsonInit(init.method, init.body)
     if (init.keepalive === true) reqInit.keepalive = true
-    if (init.body !== undefined) {
-      reqInit.headers = { 'Content-Type': 'application/json' }
-      reqInit.body = JSON.stringify(init.body)
-    }
-    try {
-      let res: Response
-      try {
-        res = await doFetch(`${baseUrl}${path}`, reqInit)
-      } catch {
-        if (timedOut) throw new PersistenceError('network', 'The local server did not respond')
-        if (init.signal?.aborted) throw new PersistenceError('network', 'request cancelled')
-        throw new PersistenceError('network', 'Cannot reach the local server')
-      }
-      const allowed = init.okStatuses?.includes(res.status) === true
-      if (!res.ok && !allowed) {
-        let message = `Server error (HTTP ${res.status})`
-        try {
-          const errBody: unknown = await res.json()
-          if (isRecord(errBody) && typeof errBody.message === 'string' && errBody.message !== '') {
-            message = errBody.message
+    return fetchWithin(
+      {
+        fetchImpl: doFetch,
+        url: `${baseUrl}${path}`,
+        init: reqInit,
+        timeoutMs,
+        signal: init.signal,
+        failures: {
+          aborted: cancelled,
+          timeout: () => new PersistenceError('network', 'The local server did not respond'),
+          network: () => new PersistenceError('network', 'Cannot reach the local server'),
+        },
+      },
+      async (res) => {
+        const allowed = init.okStatuses?.includes(res.status) === true
+        if (!res.ok && !allowed) {
+          let message = `Server error (HTTP ${res.status})`
+          try {
+            const errBody: unknown = await res.json()
+            if (
+              isRecord(errBody) &&
+              typeof errBody.message === 'string' &&
+              errBody.message !== ''
+            ) {
+              message = errBody.message
+            }
+          } catch {
+            // Not JSON: keep the generic message.
           }
-        } catch {
-          // Not JSON: keep the generic message.
+          throw new PersistenceError('http', message, res.status)
         }
-        throw new PersistenceError('http', message, res.status)
-      }
-      if (!res.ok || NO_BODY_STATUSES.has(res.status))
-        return { status: res.status, body: undefined }
-      let text: string
-      try {
-        text = await res.text()
-      } catch {
-        if (init.signal?.aborted) throw new PersistenceError('network', 'request cancelled')
-        throw new PersistenceError('network', 'The local server response was cut off', res.status)
-      }
-      if (text.trim() === '') return { status: res.status, body: undefined }
-      try {
-        return { status: res.status, body: JSON.parse(text) as unknown }
-      } catch {
-        throw new PersistenceError(
-          'parse',
-          'The local server sent an unreadable response',
-          res.status,
-        )
-      }
-    } finally {
-      clearTimeout(timer)
-      init.signal?.removeEventListener('abort', onCallerAbort)
-    }
+        if (!res.ok || NO_BODY_STATUSES.has(res.status)) {
+          return { status: res.status, body: undefined }
+        }
+        let text: string
+        try {
+          text = await res.text()
+        } catch {
+          if (init.signal?.aborted) throw cancelled()
+          throw new PersistenceError('network', 'The local server response was cut off', res.status)
+        }
+        if (text.trim() === '') return { status: res.status, body: undefined }
+        try {
+          return { status: res.status, body: JSON.parse(text) as unknown }
+        } catch {
+          throw new PersistenceError(
+            'parse',
+            'The local server sent an unreadable response',
+            res.status,
+          )
+        }
+      },
+    )
   }
 }
 

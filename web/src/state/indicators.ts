@@ -6,9 +6,11 @@ import {
   type PersistenceClient,
   type ServerSync,
 } from '../data/persistence'
+import { isRecord } from '../data/guards'
 import { INDICATOR_BY_ID } from '../indicators/registry'
 import { PRICE_SOURCES } from '../indicators/sources'
 import type { IndicatorDef, IndicatorId, IndicatorInputs, PriceSource } from '../indicators/types'
+import { useController } from './useController'
 
 export const INDICATORS_STORAGE_KEY = 'tv.indicators.v1'
 
@@ -71,10 +73,6 @@ export type IndicatorsAction =
     }
   | { type: 'toggle'; uid: string }
   | { type: 'replace'; items: readonly IndicatorConfig[] }
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
-}
 
 /**
  * Every input key of `def`: finite numbers clamped to [min, max] (integers rounded), else default.
@@ -397,26 +395,20 @@ export function useIndicators(
   const [items, dispatch] = useReducer(indicatorsReducer, undefined, () => loadIndicators(defs))
   const itemsRef = useRef<readonly IndicatorConfig[]>(items)
   const defsRef = useRef(defs)
-  const syncRef = useRef<ServerSync<readonly IndicatorConfig[]> | null>(null)
-
-  useEffect(() => {
-    const sync = createIndicatorsSync(itemsRef.current, defsRef.current, (next) => {
-      itemsRef.current = next
-      dispatch({ type: 'replace', items: next })
-    })
-    syncRef.current = sync
-    sync.start()
-    return () => {
-      sync.dispose()
-      if (syncRef.current === sync) syncRef.current = null
-    }
-  }, [])
+  const { controllerRef: syncRef } = useController<ServerSync<readonly IndicatorConfig[]>>(
+    () =>
+      createIndicatorsSync(itemsRef.current, defsRef.current, (next) => {
+        itemsRef.current = next
+        dispatch({ type: 'replace', items: next })
+      }),
+    [],
+  )
 
   useEffect(() => {
     itemsRef.current = items
     saveIndicators(items)
     syncRef.current?.update(items)
-  }, [items])
+  }, [items, syncRef])
 
   useEffect(() => {
     defsRef.current = defs
@@ -435,7 +427,7 @@ export function useIndicators(
         dispatch({ type: 'replace', items: next })
       },
     )
-  }, [])
+  }, [syncRef])
 
   const add = useCallback((type: IndicatorId, inputs?: IndicatorInputs): string | null => {
     const def = defsRef.current.get(type)

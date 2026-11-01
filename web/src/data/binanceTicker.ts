@@ -1,4 +1,5 @@
 import type { SymbolInfo, Ticker } from '../types'
+import { finite, isRecord, nonEmptyString } from './guards'
 
 /**
  * Parsers for Binance 24h tickers (REST `/api/v3/ticker/24hr` and the
@@ -10,22 +11,6 @@ export const MINI_TICKER_STREAM = '!miniTicker@arr'
 
 /** Binance symbol syntax; anything else is rejected locally (it would fail the whole request). */
 const SYMBOL_RE = /^[A-Z0-9\-_.]{1,20}$/
-
-/** Strict numeric field: finite number or non-empty numeric string, else null. */
-function finite(value: unknown): number | null {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  if (typeof value !== 'string' || value.trim() === '') return null
-  const n = Number(value)
-  return Number.isFinite(n) ? n : null
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === 'object' && !Array.isArray(v)
-}
-
-function nonEmptyString(v: unknown): v is string {
-  return typeof v === 'string' && v.trim() !== ''
-}
 
 /** Uppercase/trim a user-supplied symbol; null if it is not valid Binance symbol syntax. */
 export function normalizeSymbol(symbol: string): string | null {

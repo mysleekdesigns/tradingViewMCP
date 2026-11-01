@@ -35,3 +35,9 @@ bars exist (listing start, CHART_MAX_BARS cap); title time is minute precision (
 **Why:** these are where the chart can show wrong or hindsight numbers without a cue.
 **How to apply:** on later edits to web/src/indicators/{anchoredVwap,volumeProfile}.ts, chart/volumeProfileLayer.ts
 or indicators/runner.ts, re-run the cache/runner fuzz above first. See also [[web-data-honesty-conventions]].
+
+Phase 19 wave 5 (2026-10-31): runner.ts / volumeProfile.ts / candleStore / plottable / liveCandles
+binary searches moved to web/src/chart/util/search.ts (lowerBoundByTime etc.). Verified a textual
+1:1 swap: same `<` vs `<=` predicates, volumeProfile keeps `to + 1`, closedThroughOf keeps
+lower(min unconfirmed) + upper(cap). search.test.ts has a legacy-equivalence fuzz (incl. NaN).
+On later edits, diff against the predicates in search.ts rather than re-deriving each caller.

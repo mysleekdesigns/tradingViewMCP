@@ -129,6 +129,13 @@ describe('equity helpers', () => {
     expect(equityValueAt([], 10)).toBeNull()
   })
 
+  it('reads the first point at its own time, the last past the end, and the first on a NaN time', () => {
+    expect(equityValueAt(pts, 10)).toBe(pts[0].value)
+    expect(equityValueAt(pts, 1e12)).toBe(1.2)
+    // A NaN time passes the `time < first` guard; the search has always landed on index 0.
+    expect(equityValueAt(pts, Number.NaN)).toBe(pts[0].value)
+  })
+
   it('counts trades whose entry bar is loaded', () => {
     const ts = [trade({ entry_time: 50 }), trade({ entry_time: 150 })]
     expect(tradesOnChart(ts, 100)).toBe(1)

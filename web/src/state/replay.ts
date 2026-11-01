@@ -12,6 +12,7 @@
 //
 // Every function returns the same state object when nothing changes, so React can skip renders.
 
+import { lastIndexAtOrBeforeTime } from '../chart/util/search'
 import type { ShortcutKey } from '../components/drawingTools'
 import type { Candle } from '../types'
 
@@ -65,19 +66,7 @@ export function closedBars(
 
 /** Index of the last bar with time <= t in ascending `bars`, or -1 when every bar is later. */
 export function lastIndexAtOrBefore(bars: readonly Candle[], t: number): number {
-  let lo = 0
-  let hi = bars.length - 1
-  let found = -1
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1
-    if (bars[mid].time <= t) {
-      found = mid
-      lo = mid + 1
-    } else {
-      hi = mid - 1
-    }
-  }
-  return found
+  return lastIndexAtOrBeforeTime(bars, t)
 }
 
 /** Closed-bar index of the cursor, or -1 when replay is not active or nothing is visible. */

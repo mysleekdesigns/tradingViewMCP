@@ -17,6 +17,8 @@ import {
 import { BarTimes, barsKeyOf } from '../data/candleStore'
 import type { BacktestReport, EquityPoint, ExitReason, LabTrade } from '../data/labTypes'
 import type { Candle } from '../types'
+import { toLineData as toLineDataPoint, toTime } from './points'
+import { lastIndexAtOrBeforeTime, lowerBound } from './util/search'
 
 export type EquityLineId = 'strategy' | 'buy_and_hold' | 'vol_target'
 
@@ -87,7 +89,7 @@ export function buildTradeMarkers(
       order: 1,
       marker: {
         id: `bt-entry-${i}`,
-        time: t.entry_time as UTCTimestamp,
+        time: toTime(t.entry_time),
         position: 'belowBar',
         shape: 'arrowUp',
         color: backtestColors.entry,
@@ -99,7 +101,7 @@ export function buildTradeMarkers(
       order: 0,
       marker: {
         id: `bt-exit-${i}`,
-        time: t.exit_time as UTCTimestamp,
+        time: toTime(t.exit_time),
         position: 'aboveBar',
         shape: 'arrowDown',
         color: t.pnl >= 0 ? colors.win : colors.loss,
@@ -166,14 +168,9 @@ export function snapMarkersToBars(
   const out: SeriesMarker<UTCTimestamp>[] = []
   for (const m of markers) {
     if (m.time < times[0] || m.time > times[n - 1]) continue
-    let lo = 0
-    let hi = n - 1
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1
-      if (times[mid] < m.time) lo = mid + 1
-      else hi = mid
-    }
-    out.push(times[lo] === m.time ? m : { ...m, time: times[lo] as UTCTimestamp })
+    // Searched over [0, n - 1): m.time <= times[n - 1], so the last bar is the fallback.
+    const lo = lowerBound(n - 1, (i) => times[i], m.time)
+    out.push(times[lo] === m.time ? m : { ...m, time: toTime(times[lo]) })
   }
   return out
 }
@@ -187,7 +184,7 @@ export function filterToBars<T extends { time: number }>(
 }
 
 export function toLineData(points: readonly EquityPoint[]): LineData<UTCTimestamp>[] {
-  return points.map((p) => ({ time: p.time as UTCTimestamp, value: p.value }))
+  return points.map(toLineDataPoint)
 }
 
 /** Equity axis label: change since the window start, e.g. 1.234 → "+23.4%". */
@@ -199,15 +196,9 @@ export function formatEquityAxis(value: number): string {
 export function equityValueAt(points: readonly EquityPoint[], time?: number): number | null {
   if (points.length === 0) return null
   if (time === undefined) return points[points.length - 1].value
-  let lo = 0
-  let hi = points.length - 1
   if (time < points[0].time) return null
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1
-    if (points[mid].time <= time) lo = mid
-    else hi = mid - 1
-  }
-  return points[lo].value
+  // Last point at or before `time`; index 0 when nothing matches (a NaN `time`), as before.
+  return points[Math.max(0, lastIndexAtOrBeforeTime(points, time))].value
 }
 
 /** How many of the report's trades have their entry bar loaded on the chart. */

@@ -7,9 +7,23 @@
  * Every response is validated; an unexpected shape becomes a `LabError('parse')`, never a crash.
  */
 
-import { LabError } from './labApi'
+import {
+  compact,
+  isRecord,
+  numberOr as numOr,
+  numberOrNull as num,
+  stringOr as str,
+  stringsOf as strings,
+} from './guards'
+import type { FetchLike } from './http'
+import {
+  LabError,
+  createLabRequest,
+  labFail as fail,
+  labList as list,
+  labRecord as record,
+} from './labApi'
 import type { LabPlan } from './labTypes'
-import type { FetchLike } from './persistence'
 import type {
   CandidateSummary,
   IdeaQuery,
@@ -38,10 +52,8 @@ export const RESEARCH_TIMEOUT_MS = 10_000
 export const RESEARCH_OFFLINE_MESSAGE =
   'Lab service not running — start it with `cd lab && uv run python -m lab.api` (or `npm run dev` at the repo root).'
 
-/** The message of an HTTP error whose body carried no `detail`. */
-export function httpStatusMessage(status: number): string {
-  return `The lab service answered HTTP ${status}`
-}
+/** The message of an HTTP error whose body carried no `detail` (shared with the lab client). */
+export { httpStatusMessage } from './labApi'
 
 /** FastAPI's own `detail` for a route that does not exist (vs. a handler's "… not found"). */
 export const FASTAPI_NOT_FOUND = 'Not Found'
@@ -67,49 +79,6 @@ export interface ResearchClient {
 // ---------------------------------------------------------------------------------------------
 // Parsing helpers
 // ---------------------------------------------------------------------------------------------
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
-}
-
-function num(v: unknown): number | null {
-  return typeof v === 'number' && Number.isFinite(v) ? v : null
-}
-
-function numOr(v: unknown, fallback: number): number {
-  return typeof v === 'number' && Number.isFinite(v) ? v : fallback
-}
-
-function str(v: unknown, fallback = ''): string {
-  return typeof v === 'string' ? v : fallback
-}
-
-function strings(v: unknown): string[] {
-  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
-}
-
-function fail(what: string): never {
-  throw new LabError('parse', `The lab service sent an unreadable ${what}`)
-}
-
-function record(v: unknown, what: string): Record<string, unknown> {
-  if (!isRecord(v)) fail(what)
-  return v
-}
-
-function list(v: unknown, what: string): unknown[] {
-  if (!Array.isArray(v)) fail(what)
-  return v
-}
-
-function compact<T>(items: readonly unknown[], parse: (v: unknown) => T | null): T[] {
-  const out: T[] = []
-  for (const item of items) {
-    const parsed = parse(item)
-    if (parsed !== null) out.push(parsed)
-  }
-  return out
-}
 
 /** Finite numeric entries only. */
 function numberRecord(v: unknown): Record<string, number> {
@@ -363,71 +332,22 @@ export function parsePaperComparison(v: unknown): PaperComparison | null {
 // Requests
 // ---------------------------------------------------------------------------------------------
 
-async function readJson(res: Response): Promise<unknown> {
-  try {
-    return (await res.json()) as unknown
-  } catch {
-    return undefined
-  }
-}
-
-async function errorFor(res: Response): Promise<never> {
-  // The Vite proxy answers 502 when nothing listens on 8788; 504 = gateway timeout.
-  if (res.status === 502 || res.status === 504) {
-    throw new LabError('offline', RESEARCH_OFFLINE_MESSAGE, res.status)
-  }
-  const body = await readJson(res)
-  const detail = isRecord(body) && typeof body.detail === 'string' ? body.detail.trim() : ''
-  if (res.status === 503) {
-    if (detail !== '') throw new LabError('no-data', detail, 503)
-    throw new LabError('offline', RESEARCH_OFFLINE_MESSAGE, 503)
-  }
-  throw new LabError('http', detail || httpStatusMessage(res.status), res.status)
-}
-
 const RUN_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/
 const JOURNAL_NAME_RE = /^[A-Za-z0-9._-]{1,200}$/
 
 export function createResearchClient(opts: ResearchClientOptions = {}): ResearchClient {
   const base = (opts.basePath ?? RESEARCH_BASE_PATH).replace(/\/+$/, '')
   const timeoutMs = opts.timeoutMs ?? RESEARCH_TIMEOUT_MS
-  const doFetch: FetchLike =
-    opts.fetchImpl ??
-    ((input, init) => {
-      if (typeof globalThis.fetch !== 'function') {
-        return Promise.reject(new Error('fetch is not available'))
-      }
-      return globalThis.fetch(input, init)
-    })
-
-  async function get(path: string, signal?: AbortSignal): Promise<unknown> {
-    if (signal?.aborted) throw new LabError('aborted', 'Request cancelled')
-    const controller = new AbortController()
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      controller.abort()
-    }, timeoutMs)
-    const onAbort = (): void => controller.abort()
-    signal?.addEventListener('abort', onAbort, { once: true })
-    try {
-      let res: Response
-      try {
-        res = await doFetch(`${base}${path}`, { method: 'GET', signal: controller.signal })
-      } catch {
-        if (timedOut) throw new LabError('timeout', 'The lab service did not answer in time')
-        if (signal?.aborted) throw new LabError('aborted', 'Request cancelled')
-        throw new LabError('offline', RESEARCH_OFFLINE_MESSAGE)
-      }
-      if (!res.ok) await errorFor(res)
-      const body = await readJson(res)
-      if (body === undefined) throw new LabError('parse', 'The lab service sent a non-JSON answer')
-      return body
-    } finally {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-    }
-  }
+  // The research endpoints take no plans, so a 422 is a plain http error here.
+  const request = createLabRequest({
+    fetchImpl: opts.fetchImpl,
+    base,
+    timeoutMs,
+    offlineMessage: RESEARCH_OFFLINE_MESSAGE,
+    planErrors: false,
+  })
+  const get = (path: string, signal?: AbortSignal): Promise<unknown> =>
+    request(path, { method: 'GET', signal })
 
   return {
     async runs(signal) {

@@ -1,10 +1,9 @@
-import type { CandlestickData, HistogramData, UTCTimestamp } from 'lightweight-charts'
+import type { HistogramData } from 'lightweight-charts'
 import type { Candle } from '../types'
+import { toVolumeData, type VolumeColors } from './points'
 
-export interface VolumeColors {
-  up: string
-  down: string
-}
+// The candle → point mappers live in points.ts; re-exported here for existing importers.
+export { toCandlestickData, toVolumeData, type VolumeColors } from './points'
 
 /** The volume fields of a chart palette (`ChartPalette` satisfies it). */
 export interface VolumePaletteSource {
@@ -47,27 +46,4 @@ export function recolorVolume(
   if (shown !== null && shown.up === next.up && shown.down === next.down) return shown
   series.setData(toVolumeData(candles, next))
   return next
-}
-
-/**
- * Map candles to histogram points. A bar is "up" when close >= open (a doji counts as up,
- * matching the candlestick series colouring).
- */
-export function toVolumeData(candles: readonly Candle[], palette: VolumeColors): HistogramData[] {
-  return candles.map((c) => ({
-    time: c.time as UTCTimestamp,
-    value: c.volume,
-    color: c.close >= c.open ? palette.up : palette.down,
-  }))
-}
-
-/** Map candles (UNIX seconds) to Lightweight Charts candlestick points. */
-export function toCandlestickData(candles: readonly Candle[]): CandlestickData[] {
-  return candles.map((c) => ({
-    time: c.time as UTCTimestamp,
-    open: c.open,
-    high: c.high,
-    low: c.low,
-    close: c.close,
-  }))
 }

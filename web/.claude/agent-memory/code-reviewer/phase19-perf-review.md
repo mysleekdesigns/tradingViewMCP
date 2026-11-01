@@ -33,3 +33,20 @@ at exact .5); hline/hray price labels still format per updateAllViews (drag/tick
 **How to apply:** for a new cached layer, check which inputs are NOT live-measured (index
 mapping, view data) and that each has a version bump or a measured proxy. Related:
 [[phase18-session-ranges-review]], [[review-watchlist]].
+
+Wave 5 (DRY) review 2026-10-31: sound, no Critical/Warning (tsc -b, lint, 3438 tests green).
+Conventions now in place (do not re-flag):
+- data/http.ts has TWO cores on purpose: `requestMarketJson` (AbortSignal.timeout + any; caller
+  abort wins; ServerProvider adds `callerAbortWins` pre-check + abort-over-parse) and
+  `fetchWithin` (setTimeout controller; timeout wins over caller abort; `read` runs before the
+  timer clears, so body reads stay under the deadline). Per-client error classes via `failures`.
+- `useController(factory, deps, key=deps)`: emit is ignored after cleanup (old hooks had no
+  guard; emits DURING dispose still land). useAlerts key [client], deps [client, WebSocketImpl].
+- chart/layers/base.ts: VP overrides `invalidate()` (resets frame cache); base detached() nulls
+  geom then invalidates. LayerHost.applyColors compares colorKeys, same lists as old layers.
+- util/color luminance = Rec.601 with anchored '#rrggbb'; all inputs are validated 6-hex.
+- CSS: primitives.css is @import-ed first in index.css. Cascade check method that worked: diff old
+  vs new parsed rules per file, confirm every removed (selector, prop, value) resolves the same in
+  primitives, then look for equal-specificity competitors on co-occurring classes that sat BEFORE
+  the old position (only those can flip). None found in wave 5.
+Nit left: data/, state/ and indicators/ import chart/util/search (layering inversion).

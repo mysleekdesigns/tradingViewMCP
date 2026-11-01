@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type {
   Alert,
   AlertEvent,
@@ -14,6 +14,7 @@ import {
   type AlertStreamOptions,
 } from '../data/alertsApi'
 import type { ConnectionStatus } from '../types'
+import { useController } from './useController'
 
 /**
  * Price alerts (all symbols) and their trigger history, kept in step with the local server:
@@ -363,11 +364,6 @@ export function createAlertsStore(opts: AlertsStoreOptions): AlertsStore {
   }
 }
 
-interface Entry {
-  client: AlertsClient | null
-  snapshot: AlertsSnapshot
-}
-
 /** client null → status 'unavailable', no requests, no socket. */
 export function useAlerts(opts: {
   client: AlertsClient | null
@@ -375,41 +371,36 @@ export function useAlerts(opts: {
   WebSocketImpl?: typeof WebSocket
 }): AlertsApi {
   const { client, WebSocketImpl } = opts
-  const [entry, setEntry] = useState<Entry | null>(null)
-  const storeRef = useRef<AlertsStore | null>(null)
   const onTriggeredRef = useRef(opts.onTriggered)
 
   useEffect(() => {
     onTriggeredRef.current = opts.onTriggered
   }, [opts.onTriggered])
 
-  useEffect(() => {
-    const store = createAlertsStore({
-      client,
-      WebSocketImpl,
-      onTriggered: (event, alert) => onTriggeredRef.current?.(event, alert),
-      onChange: (snapshot) => setEntry({ client, snapshot }),
-    })
-    storeRef.current = store
-    store.start()
-    return () => {
-      store.dispose()
-      if (storeRef.current === store) storeRef.current = null
-    }
-  }, [client, WebSocketImpl])
+  // A snapshot is shown while its client is current (a new WebSocketImpl alone keeps it).
+  const { snapshot: current, controllerRef: storeRef } = useController<AlertsStore, AlertsSnapshot>(
+    (emit) =>
+      createAlertsStore({
+        client,
+        WebSocketImpl,
+        onTriggered: (event, alert) => onTriggeredRef.current?.(event, alert),
+        onChange: emit,
+      }),
+    [client, WebSocketImpl],
+    [client],
+  )
 
   const snapshot =
-    entry !== null && entry.client === client
-      ? entry.snapshot
-      : client === null
-        ? UNAVAILABLE_ALERTS_SNAPSHOT
-        : LOADING_ALERTS_SNAPSHOT
+    current ?? (client === null ? UNAVAILABLE_ALERTS_SNAPSHOT : LOADING_ALERTS_SNAPSHOT)
 
-  const withStore = useCallback(<T>(fn: (s: AlertsStore) => Promise<T>): Promise<T> => {
-    const store = storeRef.current
-    if (store === null) return Promise.reject(new Error('Alerts are not available right now'))
-    return fn(store)
-  }, [])
+  const withStore = useCallback(
+    <T>(fn: (s: AlertsStore) => Promise<T>): Promise<T> => {
+      const store = storeRef.current
+      if (store === null) return Promise.reject(new Error('Alerts are not available right now'))
+      return fn(store)
+    },
+    [storeRef],
+  )
 
   const create = useCallback((a: NewAlert) => withStore((s) => s.create(a)), [withStore])
   const update = useCallback(
@@ -418,7 +409,7 @@ export function useAlerts(opts: {
   )
   const remove = useCallback((id: string) => withStore((s) => s.remove(id)), [withStore])
   const clearHistory = useCallback(() => withStore((s) => s.clearHistory()), [withStore])
-  const markSeen = useCallback(() => storeRef.current?.markSeen(), [])
+  const markSeen = useCallback(() => storeRef.current?.markSeen(), [storeRef])
 
   return useMemo(
     () => ({

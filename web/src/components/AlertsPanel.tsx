@@ -11,6 +11,7 @@ import {
   relativeTime,
 } from './alertsView'
 import { formatUtc } from './quote'
+import { useModalKeys } from './useModalKeys'
 import './Alerts.css'
 
 export interface AlertsPanelProps {
@@ -284,6 +285,7 @@ function AlertRow({
     // The delete button re-renders after the confirm closes.
     requestAnimationFrame(() => deleteRef.current?.focus())
   }
+  const onConfirmKeyDown = useModalKeys(null, cancelConfirm, { listen: 'element' })
 
   const classes = [
     'alert-row',
@@ -361,13 +363,7 @@ function AlertRow({
           className="inline-confirm"
           role="group"
           aria-label={`Delete alert ${alert.symbol}?`}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') {
-              e.preventDefault()
-              e.stopPropagation()
-              cancelConfirm()
-            }
-          }}
+          onKeyDown={onConfirmKeyDown}
         >
           <span className="inline-confirm__text">Delete this alert?</span>
           <button type="button" className="inline-confirm__btn" onClick={cancelConfirm}>
@@ -411,6 +407,7 @@ function ClearLogFooter({
     setOpen(false)
     requestAnimationFrame(() => clearRef.current?.focus())
   }
+  const onConfirmKeyDown = useModalKeys(null, close, { listen: 'element' })
 
   return (
     <div className="alerts__foot">
@@ -419,13 +416,7 @@ function ClearLogFooter({
           className="inline-confirm inline-confirm--foot"
           role="group"
           aria-label="Clear the alert log?"
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') {
-              e.preventDefault()
-              e.stopPropagation()
-              close()
-            }
-          }}
+          onKeyDown={onConfirmKeyDown}
         >
           <span className="inline-confirm__text">
             Clear {count} {count === 1 ? 'entry' : 'entries'}?

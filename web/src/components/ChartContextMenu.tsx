@@ -9,6 +9,7 @@ import {
 import type { ChartContextMenuRequest } from '../chart/drawings/types'
 import { ToolIcon, TrashIcon } from './DrawingToolbar'
 import { clampMenuPosition } from './alertsView'
+import { useModalKeys } from './useModalKeys'
 import './Drawings.css'
 
 export interface ChartContextMenuProps {
@@ -176,16 +177,11 @@ export function ChartContextMenu({
     item.run()
   }
 
+  // The menu owns the keyboard while open (no chart shortcuts underneath); Esc or Tab closes.
+  const onMenuKey = useModalKeys(null, onClose, { listen: 'element', stop: 'all', tabCloses: true })
+
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    // The menu owns the keyboard while open (no chart shortcuts underneath).
-    e.stopPropagation()
-    if (count === 0) {
-      if (e.key === 'Escape' || e.key === 'Tab') {
-        e.preventDefault()
-        onClose()
-      }
-      return
-    }
+    if (onMenuKey(e) || count === 0) return
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault()
@@ -202,11 +198,6 @@ export function ChartContextMenu({
       case 'End':
         e.preventDefault()
         focusItem(count - 1)
-        break
-      case 'Escape':
-      case 'Tab':
-        e.preventDefault()
-        onClose()
         break
     }
   }

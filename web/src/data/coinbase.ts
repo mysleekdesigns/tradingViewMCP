@@ -1,11 +1,27 @@
 import type { Candle, Interval, SymbolInfo, Ticker } from '../types'
-import { DEFAULT_STALE_TIMEOUT_MS } from './binanceStream'
+import { DEFAULT_STALE_TIMEOUT_MS, resolveWebSocket } from './binanceStream'
 import {
   DEFAULT_FORMING_FLUSH_MS,
   makeTickerFields,
   openCoinbaseCandleStream,
   openCoinbaseTickerStream,
 } from './coinbaseStream'
+import {
+  dedupeByTime,
+  finite,
+  isRecord,
+  nonEmptyString,
+  toFiniteNumber,
+  type FiniteFieldWording,
+} from './guards'
+import {
+  SharedLoad,
+  bodyString,
+  clampLimit,
+  exchangeError,
+  requestMarketJson,
+  withAbort,
+} from './http'
 import {
   MarketDataError,
   type MarketDataProvider,
@@ -44,8 +60,6 @@ import { COINBASE_REST, COINBASE_VENUE, COINBASE_WS, type VenueInfo } from './ve
 
 /** Max rows Coinbase returns per candles request. */
 const MAX_ROWS_PER_REQUEST = 300
-/** Same cap the app uses for Binance; keeps a 1w/4h request to at most 24 pages. */
-const MAX_LIMIT = 1000
 const DEFAULT_TIMEOUT_MS = 10_000
 /** 8 requests/s: under the documented 10/s public limit, leaving room for other tabs. */
 const DEFAULT_MIN_REQUEST_INTERVAL_MS = 125
@@ -112,16 +126,11 @@ export function bucketStart(t: number, interval: Interval): number {
   return Math.floor((t - origin) / bucket) * bucket + origin
 }
 
-function toFiniteNumber(value: unknown, field: string): number {
-  if (typeof value !== 'string' && typeof value !== 'number') {
-    throw new MarketDataError('parse', `candle ${field}: expected a number`)
-  }
-  if (typeof value === 'string' && value.trim() === '') {
-    throw new MarketDataError('parse', `candle ${field}: empty value`)
-  }
-  const n = Number(value)
-  if (!Number.isFinite(n)) throw new MarketDataError('parse', `candle ${field}: not finite`)
-  return n
+/** Error wording of candle row fields. */
+const CANDLE_FIELD: FiniteFieldWording = {
+  prefix: 'candle',
+  wrongType: 'expected a number',
+  notFinite: 'not finite',
 }
 
 /** One Coinbase candle row `[time(s), low, high, open, close, volume]` -> Candle. */
@@ -130,23 +139,13 @@ export function parseCoinbaseCandle(row: unknown): Candle {
     throw new MarketDataError('parse', 'candle row: expected an array with 6 fields')
   }
   return {
-    time: Math.floor(toFiniteNumber(row[0], 'time')),
-    low: toFiniteNumber(row[1], 'low'),
-    high: toFiniteNumber(row[2], 'high'),
-    open: toFiniteNumber(row[3], 'open'),
-    close: toFiniteNumber(row[4], 'close'),
-    volume: toFiniteNumber(row[5], 'volume'),
+    time: Math.floor(toFiniteNumber(row[0], 'time', CANDLE_FIELD)),
+    low: toFiniteNumber(row[1], 'low', CANDLE_FIELD),
+    high: toFiniteNumber(row[2], 'high', CANDLE_FIELD),
+    open: toFiniteNumber(row[3], 'open', CANDLE_FIELD),
+    close: toFiniteNumber(row[4], 'close', CANDLE_FIELD),
+    volume: toFiniteNumber(row[5], 'volume', CANDLE_FIELD),
   }
-}
-
-/** Keep one candle per time (the later row wins); input must be sorted ascending. */
-function dedupeByTime(sorted: Candle[]): Candle[] {
-  const out: Candle[] = []
-  for (const c of sorted) {
-    if (out.length > 0 && out[out.length - 1].time === c.time) out[out.length - 1] = c
-    else out.push(c)
-  }
-  return out
 }
 
 /**
@@ -194,14 +193,6 @@ export function aggregateCandles(
 export interface CoinbaseProduct {
   productId: string
   info: SymbolInfo
-}
-
-function nonEmptyString(v: unknown): v is string {
-  return typeof v === 'string' && v.trim() !== ''
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === 'object' && !Array.isArray(v)
 }
 
 /**
@@ -273,65 +264,15 @@ export function buildCatalog(products: readonly unknown[]): CoinbaseCatalog {
 /** Coinbase 24h stats object (`open, high, low, last, volume` strings) -> Ticker, or null. */
 export function parseStats(entry: unknown, symbol: string, time: number): Ticker | null {
   if (!isRecord(entry)) return null
-  const num = (v: unknown): number | null => {
-    if (typeof v !== 'string' && typeof v !== 'number') return null
-    if (typeof v === 'string' && v.trim() === '') return null
-    const n = Number(v)
-    return Number.isFinite(n) ? n : null
-  }
-  const last = num(entry.last)
-  const open = num(entry.open)
-  const high = num(entry.high)
-  const low = num(entry.low)
-  const volume = num(entry.volume)
+  const last = finite(entry.last)
+  const open = finite(entry.open)
+  const high = finite(entry.high)
+  const low = finite(entry.low)
+  const volume = finite(entry.volume)
   if (last === null || open === null || high === null || low === null || volume === null) {
     return null
   }
   return { symbol, ...makeTickerFields({ last, open, high, low, volume }, time) }
-}
-
-/** `Retry-After` in seconds; undefined when absent or invalid. */
-function parseRetryAfter(res: Response): number | undefined {
-  const raw = res.headers.get('Retry-After')
-  if (raw === null || raw.trim() === '') return undefined
-  const n = Number(raw)
-  return Number.isFinite(n) && n >= 0 ? n : undefined
-}
-
-async function readMessage(res: Response): Promise<string | undefined> {
-  try {
-    const body: unknown = await res.json()
-    if (isRecord(body) && typeof body.message === 'string') return body.message
-  } catch {
-    // Non-JSON error body.
-  }
-  return undefined
-}
-
-/** Reject with kind 'aborted' when `signal` aborts before `p` settles. */
-function withAbort<T>(p: Promise<T>, signal: AbortSignal | undefined, what: string): Promise<T> {
-  if (!signal) return p
-  const aborted = () => new MarketDataError('aborted', `Request for ${what} was cancelled`)
-  if (signal.aborted) return Promise.reject(aborted())
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(aborted())
-    signal.addEventListener('abort', onAbort, { once: true })
-    p.then(
-      (v) => {
-        signal.removeEventListener('abort', onAbort)
-        resolve(v)
-      },
-      (e: unknown) => {
-        signal.removeEventListener('abort', onAbort)
-        reject(e instanceof Error ? e : new Error(String(e)))
-      },
-    )
-  })
-}
-
-function clampLimit(limit: number): number {
-  if (!Number.isFinite(limit)) return 500
-  return Math.min(MAX_LIMIT, Math.max(1, Math.floor(limit)))
 }
 
 function isoSeconds(t: number): string {
@@ -377,8 +318,8 @@ export class CoinbaseProvider implements MarketDataProvider {
   private readonly minRequestIntervalMs: number
   private readonly reconcileDelayMs: number | undefined
   private readonly now: () => number
-  /** Memoized product catalog; cleared when the fetch fails so the next call retries. */
-  private catalogPromise: Promise<CoinbaseCatalog> | null = null
+  /** Memoized product catalog; forgotten when the fetch fails so the next call retries. */
+  private readonly catalogLoad = new SharedLoad(() => this.fetchCatalog())
   /** Earliest time (ms) the next REST request may start. */
   private nextRequestAt = 0
 
@@ -433,67 +374,27 @@ export class CoinbaseProvider implements MarketDataProvider {
     await this.throttle(callerSignal, what)
     onSent?.()
     const query = params ? `?${params.toString()}` : ''
-    const url = `${this.baseUrl}${path}${query}`
-    const timeout = AbortSignal.timeout(this.timeoutMs)
-    const signal = callerSignal ? AbortSignal.any([callerSignal, timeout]) : timeout
-
-    let res: Response
-    try {
-      res = await this.fetchFn(url, { signal })
-    } catch (err) {
-      if (callerSignal?.aborted) {
-        throw new MarketDataError('aborted', `Request for ${what} was cancelled`)
-      }
-      if (timeout.aborted) {
-        throw new MarketDataError(
-          'network',
-          `Timed out after ${this.timeoutMs} ms fetching ${what}`,
-        )
-      }
-      const detail = err instanceof Error ? err.message : String(err)
-      throw new MarketDataError('network', `Network error fetching ${what}: ${detail}`)
-    }
-
-    if (!res.ok) {
-      const retryAfter = parseRetryAfter(res)
-      if (res.status === 429) {
-        const pause = (retryAfter ?? DEFAULT_RATE_LIMIT_PAUSE_S) * 1000
-        this.nextRequestAt = Math.max(this.nextRequestAt, this.now() + pause)
-        throw new MarketDataError('rate-limited', `Rate limited fetching ${what}`, 429, retryAfter)
-      }
-      if (res.status === 418) {
-        throw new MarketDataError('banned', 'IP banned by provider', 418, retryAfter)
-      }
-      if (res.status === 451) {
-        throw new MarketDataError('region-blocked', 'Provider unavailable in this region', 451)
-      }
-      const msg = await readMessage(res)
-      if (res.status === 404 && productScoped) {
-        throw new MarketDataError('bad-symbol', `Unknown product in request for ${what}`, 404)
-      }
-      const suffix = msg ? `: ${msg}` : ''
-      throw new MarketDataError('http', `HTTP ${res.status} fetching ${what}${suffix}`, res.status)
-    }
-
-    try {
-      return (await res.json()) as unknown
-    } catch {
-      throw new MarketDataError('parse', `Invalid JSON in ${what} response`)
-    }
+    return requestMarketJson({
+      fetchFn: this.fetchFn,
+      url: `${this.baseUrl}${path}${query}`,
+      what,
+      timeoutMs: this.timeoutMs,
+      signal: callerSignal,
+      toError: (res) =>
+        exchangeError(res, what, {
+          detail: (body) => bodyString(body, 'message'),
+          badSymbol: (status) =>
+            status === 404 && productScoped ? `Unknown product in request for ${what}` : null,
+          onRateLimited: (retryAfter) => {
+            const pause = (retryAfter ?? DEFAULT_RATE_LIMIT_PAUSE_S) * 1000
+            this.nextRequestAt = Math.max(this.nextRequestAt, this.now() + pause)
+          },
+        }),
+    })
   }
 
   private catalog(signal?: AbortSignal): Promise<CoinbaseCatalog> {
-    if (signal?.aborted) {
-      return Promise.reject(new MarketDataError('aborted', 'Request for symbols was cancelled'))
-    }
-    if (this.catalogPromise === null) {
-      const p = this.fetchCatalog()
-      this.catalogPromise = p
-      p.catch(() => {
-        if (this.catalogPromise === p) this.catalogPromise = null
-      })
-    }
-    return withAbort(this.catalogPromise, signal, 'symbols')
+    return this.catalogLoad.join(signal, 'symbols')
   }
 
   private async fetchCatalog(): Promise<CoinbaseCatalog> {
@@ -557,6 +458,7 @@ export class CoinbaseProvider implements MarketDataProvider {
     const sym = symbol.trim().toUpperCase()
     const pid = await this.productId(sym, signal)
     const spec = INTERVAL_SPEC[interval]
+    // Same 1000 cap as Binance: a 1w/4h request is at most 24 pages.
     const lim = clampLimit(limit)
     const nowS = Math.floor(this.now() / 1000)
     const end = endTime === undefined ? nowS : Math.min(Math.floor(endTime), nowS)
@@ -718,21 +620,13 @@ export class CoinbaseProvider implements MarketDataProvider {
     return []
   }
 
-  private resolveWebSocket(caller: string): typeof WebSocket {
-    const WS = this.WebSocketImpl ?? globalThis.WebSocket
-    if (typeof WS !== 'function') {
-      throw new Error(`${caller}: WebSocket is not available in this environment`)
-    }
-    return WS
-  }
-
   subscribeCandles(
     symbol: string,
     interval: Interval,
     onCandle: (c: Candle, closed: boolean) => void,
     opts?: SubscribeOptions,
   ): () => void {
-    const WS = this.resolveWebSocket('subscribeCandles')
+    const WS = resolveWebSocket(this.WebSocketImpl, 'subscribeCandles')
     const sym = symbol.trim().toUpperCase()
     return openCoinbaseCandleStream({
       WebSocketImpl: WS,
@@ -812,7 +706,7 @@ export class CoinbaseProvider implements MarketDataProvider {
     onTickers: (tickers: Ticker[]) => void,
     opts?: TickerSubscribeOptions,
   ): () => void {
-    const WS = this.resolveWebSocket('subscribeTickers')
+    const WS = resolveWebSocket(this.WebSocketImpl, 'subscribeTickers')
     return openCoinbaseTickerStream({
       WebSocketImpl: WS,
       url: this.wsBaseUrl,

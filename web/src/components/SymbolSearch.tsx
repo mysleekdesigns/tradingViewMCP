@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { SymbolInfo } from '../types'
 import { quoteAssetsOf, searchSymbols } from './symbolRank'
+import { useModalKeys } from './useModalKeys'
 
 const RESULT_LIMIT = 100
 
@@ -112,31 +113,11 @@ export function SymbolSearch({
     }
   }
 
-  const onDialogKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      e.stopPropagation()
-      onClose()
-      return
-    }
-    if (e.key !== 'Tab' || !dialogRef.current) return
-    // Keep Tab inside the dialog.
-    const focusables = Array.from(
-      dialogRef.current.querySelectorAll<HTMLElement>(
-        'button:not([disabled]):not([tabindex="-1"]), input, [tabindex="0"]',
-      ),
-    )
-    if (focusables.length === 0) return
-    const first = focusables[0]
-    const last = focusables[focusables.length - 1]
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault()
-      last.focus()
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault()
-      first.focus()
-    }
-  }
+  // Escape closes; Tab stays inside the dialog.
+  const onDialogKeyDown = useModalKeys(dialogRef, onClose, {
+    listen: 'element',
+    trap: 'button:not([disabled]):not([tabindex="-1"]), input, [tabindex="0"]',
+  })
 
   return (
     <div

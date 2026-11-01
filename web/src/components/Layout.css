@@ -1,4 +1,5 @@
 /* ---------- Multi-chart layout: grid, cells, layout menu ---------- */
+/* Shared chrome (icon button, tabs, dialog, focus ring, scrollbar, panel head): primitives.css. */
 
 /*
  * The grid fills the workspace. Panels are separated by a 1px hairline (the grid's own
@@ -227,12 +228,6 @@
   margin: 6px 6px 2px;
   color: var(--text-faint);
   font-size: 11px;
-}
-
-.layout-menu__tile:focus-visible,
-.layout-menu__toggle:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 
 .layout-switch {

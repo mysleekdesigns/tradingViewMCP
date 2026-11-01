@@ -5,6 +5,7 @@
 import { isValidTimezone } from '../chart/timeFormat'
 import { isProviderId, type ProviderId } from '../data/providerIds'
 import type { PrefsStorage } from './prefs'
+import { storedValue } from './storedValue'
 
 export type ThemeName = 'dark' | 'light'
 
@@ -70,34 +71,20 @@ export function parseSettings(raw: unknown): Settings {
   }
 }
 
-function defaultStorage(): PrefsStorage | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage
-  } catch {
-    // Accessing localStorage itself throws when storage is disabled.
-    return null
-  }
-}
+/** `tv.settings.v1`; saved cleaned (parseSettings), colours lower-cased. */
+export const settingsStored = storedValue<Settings>(SETTINGS_KEY, {
+  parse: parseSettings,
+  fallback: defaultSettings,
+  serialize: (s) => JSON.stringify(parseSettings(s)),
+})
 
-export function loadSettings(storage: PrefsStorage | null = defaultStorage()): Settings {
-  if (!storage) return defaultSettings()
-  try {
-    const text = storage.getItem(SETTINGS_KEY)
-    if (text === null) return defaultSettings()
-    return parseSettings(JSON.parse(text))
-  } catch {
-    return defaultSettings()
-  }
+export function loadSettings(storage?: PrefsStorage | null): Settings {
+  return settingsStored.load(storage)
 }
 
 /** Best effort: a full or disabled storage must never break the app. */
-export function saveSettings(s: Settings, storage: PrefsStorage | null = defaultStorage()): void {
-  if (!storage) return
-  try {
-    storage.setItem(SETTINGS_KEY, JSON.stringify(parseSettings(s)))
-  } catch {
-    // Quota exceeded or storage disabled: keep running without persistence.
-  }
+export function saveSettings(s: Settings, storage?: PrefsStorage | null): void {
+  settingsStored.save(s, storage)
 }
 
 /**

@@ -22,7 +22,6 @@ import {
   type LogicalRange,
   type MouseEventParams,
   type Time,
-  type UTCTimestamp,
 } from 'lightweight-charts'
 import '../components/BacktestShell.css'
 import { BarTimesMemo, barsKeyOf } from '../data/candleStore'
@@ -113,11 +112,11 @@ import {
   nextAutoOlder,
   planSeriesSync,
   shiftLogicalRange,
-  toVolumePoint,
   type AutoOlder,
 } from './seriesSync'
 import { BarLineage, planSamePrefix } from './structureBars'
-import { recolorVolume, toVolumeData, volumeColorsOf, type VolumeColors } from './volume'
+import { toTime, toVolumeData, toVolumePoint } from './points'
+import { recolorVolume, volumeColorsOf, type VolumeColors } from './volume'
 import { AlertLinesManager } from './drawings/alertLines'
 import { ChartCoordinateAdapter } from './drawings/chartAdapter'
 import { DrawingController, plottedBarTime, type PointerInput } from './drawings/controller'
@@ -131,11 +130,6 @@ import type {
   DrawingStyle,
   ToolMode,
 } from './drawings/types'
-
-/** Volume bar colours of a palette: one cached object per palette, not one per volume point. */
-function volumePaletteOf(p: ChartPalette) {
-  return volumeColorsOf(p)
-}
 
 /** What the app can ask of a mounted chart (see the `onApi` prop). */
 export interface ChartApi {
@@ -856,7 +850,7 @@ export function Chart({
         const range = plan.kind === 'prepend' ? timeScale.getVisibleLogicalRange() : null
         const { points, ha } = mainSeriesData(type, candles)
         mainSeries.setData(points)
-        const volumeColors = volumePaletteOf(paletteRef.current)
+        const volumeColors = volumeColorsOf(paletteRef.current)
         volumeSeries.setData(toVolumeData(candles, volumeColors))
         volumeShownRef.current = volumeColors
         haRef.current = ha
@@ -870,7 +864,7 @@ export function Chart({
         const { points, ha } = mainSeriesTail(type, candles, plan.from, haRef.current)
         for (const point of points) mainSeries.update(point)
         for (let i = plan.from; i < candles.length; i++) {
-          volumeSeries.update(toVolumePoint(candles[i], volumePaletteOf(paletteRef.current)))
+          volumeSeries.update(toVolumePoint(candles[i], volumeColorsOf(paletteRef.current)))
         }
         haRef.current = ha
         indicatorManager.applyPlan(plan, candles)
@@ -946,7 +940,7 @@ export function Chart({
           volumeSeries,
           applied,
           volumeShownRef.current,
-          volumePaletteOf(palette),
+          volumeColorsOf(palette),
         )
       syncRealPriceLine(realLineRef.current, applied, palette)
     }
@@ -1072,7 +1066,7 @@ export function Chart({
       const price = series.coordinateToPrice(p.y)
       const time = xToSnappedTime(coords, p.x)
       if (price === null || time === null) return
-      chart.setCrosshairPosition(price, time as UTCTimestamp, series)
+      chart.setCrosshairPosition(price, toTime(time), series)
     }
 
     const onPointerDown = (e: PointerEvent) => {
@@ -1266,8 +1260,8 @@ export function Chart({
     if (plan.kind === 'apply') {
       try {
         chart.timeScale().setVisibleRange({
-          from: plan.from as UTCTimestamp,
-          to: plan.to as UTCTimestamp,
+          from: toTime(plan.from),
+          to: toTime(plan.to),
         })
       } catch {
         // A range LWC cannot map (e.g. while data is being replaced) is simply ignored.

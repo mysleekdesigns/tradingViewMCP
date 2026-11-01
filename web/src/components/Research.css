@@ -3,6 +3,7 @@
  * they are open) as an overlapping grid item, so the chart stays mounted underneath and opening
  * or closing the view never shifts the layout. Palette and fonts from index.css.
  */
+/* Shared chrome (icon button, tabs, dialog, focus ring, scrollbar, panel head): primitives.css. */
 
 .app > .research {
   /* From the chart row to just above the status bar; from after the drawing rail to just before
@@ -50,30 +51,9 @@
 /* ---------- Header ---------- */
 
 .research__head {
-  flex: none;
-  display: flex;
-  align-items: center;
   gap: 8px;
   height: 40px;
   padding: 0 8px 0 var(--r-pad);
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.research__head-icon {
-  display: inline-grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
-}
-
-.research__title {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
 }
 
 .research__spacer {
@@ -126,57 +106,9 @@
   background: var(--warn);
 }
 
-.research__tabs {
-  display: flex;
-  align-self: stretch;
-  gap: 2px;
-  margin-left: 10px;
-  min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.research__tab {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 10px;
-  border: 0;
-  background: transparent;
-  color: var(--text-muted);
-  font: inherit;
-  font-weight: 500;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.research__tab:hover,
-.research__tab[aria-selected='true'] {
-  color: var(--text);
-}
-
 .research__tab[aria-selected='true']::after {
-  position: absolute;
   right: 8px;
-  bottom: -1px;
   left: 8px;
-  height: 2px;
-  border-radius: 2px 2px 0 0;
-  background: var(--accent);
-  content: '';
-}
-
-.research__tab-count {
-  min-width: 14px;
-  padding: 0 4px;
-  border-radius: 7px;
-  background: var(--fill);
-  color: var(--text-muted);
-  font-family: var(--font-num);
-  font-size: 10px;
-  line-height: 15px;
-  text-align: center;
 }
 
 .research__back {
@@ -215,8 +147,6 @@
   min-height: 0;
   padding: 0 var(--r-pad) var(--r-pad);
   overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--panel-hover) transparent;
 }
 
 .research__split {
@@ -232,8 +162,6 @@
   border-right: 1px solid var(--border-soft);
   list-style: none;
   overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--panel-hover) transparent;
 }
 
 .research__list-item {
@@ -290,8 +218,6 @@
   min-height: 0;
   padding: 12px var(--r-pad) var(--r-pad);
   overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--panel-hover) transparent;
 }
 
 /* ---------- Toolbar, controls ---------- */
@@ -379,41 +305,6 @@
 .research__btn--primary:hover:not(:disabled) {
   border-color: var(--accent-hover);
   background: var(--accent-hover);
-}
-
-.research__icon-btn {
-  display: inline-grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-}
-
-.research__icon-btn:hover {
-  background: var(--panel-hover);
-  color: var(--text);
-}
-
-.research__tab:focus-visible,
-.research__back:focus-visible,
-.research__btn:focus-visible,
-.research__icon-btn:focus-visible,
-.research__list-item:focus-visible,
-.research__select:focus-visible,
-.research a:focus-visible,
-.research__plan > summary:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-.research__tab:focus-visible {
-  border-radius: 4px;
-  outline-offset: -4px;
 }
 
 .research__actions {
@@ -584,26 +475,12 @@
 /* ---------- Empty / error / loading states ---------- */
 
 .research__state {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
   min-height: 220px;
   padding: 24px;
-  text-align: center;
 }
 
 .research__state-icon {
-  display: inline-grid;
-  place-items: center;
-  width: 48px;
-  height: 48px;
-  margin-bottom: 4px;
   border-radius: 12px;
-  background: var(--fill);
-  color: var(--text-muted);
 }
 
 .research__state--offline .research__state-icon,
@@ -612,16 +489,9 @@
   color: var(--down);
 }
 
-.research__state-title {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-}
-
 .research__state-text {
   max-width: 520px;
   margin: 0 0 6px;
-  color: var(--text-muted);
   line-height: 1.55;
 }
 
@@ -858,8 +728,6 @@
   border-radius: 4px;
   list-style: none;
   overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--panel-hover) transparent;
 }
 
 .research__event {
@@ -1137,8 +1005,6 @@
 .research__table-wrap {
   min-width: 0;
   overflow-x: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--panel-hover) transparent;
 }
 
 .research__table {

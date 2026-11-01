@@ -4,6 +4,8 @@
 // pixels, however many redundant state sets either made. `setLineDash` arguments are kept by
 // reference so a test can tell whether a draw allocated new dash arrays.
 
+import { lowerBound } from './util/search'
+
 export type PathCommand =
   | readonly ['M', number, number]
   | readonly ['L', number, number]
@@ -188,18 +190,6 @@ export interface FakeView {
   times: number[]
 }
 
-/** First index in `times` whose value is >= t. */
-function lowerBoundTimes(times: readonly number[], t: number): number {
-  let lo = 0
-  let hi = times.length
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (times[mid] < t) lo = mid + 1
-    else hi = mid
-  }
-  return lo
-}
-
 /** The fake's visible range: open times of the first and last bar inside the pane. */
 export function fakeVisibleRange(v: FakeView): { from: number; to: number } | null {
   const n = v.times.length
@@ -213,7 +203,7 @@ export function fakeVisibleRange(v: FakeView): { from: number; to: number } | nu
 export function fakeTimeToIndex(v: FakeView, t: number, nearest: boolean): number | null {
   const times = v.times
   if (times.length === 0) return null
-  const i = lowerBoundTimes(times, t)
+  const i = lowerBound(times.length, (k) => times[k], t)
   if (i < times.length && times[i] === t) return i
   if (!nearest) return null
   if (i === 0) return 0

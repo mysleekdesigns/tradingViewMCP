@@ -14,6 +14,7 @@ import type {
 } from '../data/labTypes'
 import { isNativeInterval, timeframeSeconds } from '../data/timeframes'
 import { CHART_MAX_BARS } from '../chart/conflation'
+import { storedValue } from '../state/storedValue'
 import { INTERVALS, type Interval, type Timeframe } from '../types'
 
 export const EMPTY = '—'
@@ -1138,40 +1139,28 @@ export interface PlanStorage {
   setItem(key: string, value: string): void
 }
 
-function defaultStorage(): PlanStorage | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage
-  } catch {
-    return null
-  }
-}
+/** The tester's plan text and whether the user edited it; null when never saved or invalid. */
+export const planTextStored = storedValue<{ text: string; edited: boolean } | null>(
+  PLAN_STORAGE_KEY,
+  {
+    parse: (v) => {
+      if (typeof v !== 'object' || v === null) return null
+      const { text, edited } = v as { text?: unknown; edited?: unknown }
+      if (typeof text !== 'string' || typeof edited !== 'boolean') return null
+      return { text: text.slice(0, 100_000), edited }
+    },
+    fallback: () => null,
+  },
+)
 
 export function loadPlanText(
-  storage: PlanStorage | null = defaultStorage(),
+  storage?: PlanStorage | null,
 ): { text: string; edited: boolean } | null {
-  try {
-    const raw = storage?.getItem(PLAN_STORAGE_KEY)
-    if (!raw) return null
-    const v: unknown = JSON.parse(raw)
-    if (typeof v !== 'object' || v === null) return null
-    const { text, edited } = v as { text?: unknown; edited?: unknown }
-    if (typeof text !== 'string' || typeof edited !== 'boolean') return null
-    return { text: text.slice(0, 100_000), edited }
-  } catch {
-    return null
-  }
+  return planTextStored.load(storage)
 }
 
-export function savePlanText(
-  text: string,
-  edited: boolean,
-  storage: PlanStorage | null = defaultStorage(),
-): void {
-  try {
-    storage?.setItem(PLAN_STORAGE_KEY, JSON.stringify({ text, edited }))
-  } catch {
-    // Quota or privacy mode: the plan simply is not remembered.
-  }
+export function savePlanText(text: string, edited: boolean, storage?: PlanStorage | null): void {
+  planTextStored.save({ text, edited }, storage)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1196,32 +1185,26 @@ export function clampDockHeight(height: number, viewport: number): number {
   return Math.round(Math.min(max, Math.max(DOCK_MIN_HEIGHT, height)))
 }
 
-export function loadDockPrefs(storage: PlanStorage | null = defaultStorage()): DockPrefs {
-  try {
-    const raw = storage?.getItem(DOCK_STORAGE_KEY)
-    if (raw) {
-      const v = JSON.parse(raw) as { open?: unknown; height?: unknown }
-      return {
-        open: v.open === true,
-        height:
-          typeof v.height === 'number' && Number.isFinite(v.height)
-            ? v.height
-            : DOCK_DEFAULT_HEIGHT,
-      }
+const defaultDockPrefs = (): DockPrefs => ({ open: false, height: DOCK_DEFAULT_HEIGHT })
+
+/** The dock's open state and height; unreadable prefs fall back to the defaults. */
+export const dockPrefsStored = storedValue<DockPrefs>(DOCK_STORAGE_KEY, {
+  parse: (raw) => {
+    // A stored `null` throws here and falls back like any unreadable value.
+    const v = raw as { open?: unknown; height?: unknown }
+    return {
+      open: v.open === true,
+      height:
+        typeof v.height === 'number' && Number.isFinite(v.height) ? v.height : DOCK_DEFAULT_HEIGHT,
     }
-  } catch {
-    // Unreadable prefs fall back to the defaults.
-  }
-  return { open: false, height: DOCK_DEFAULT_HEIGHT }
+  },
+  fallback: defaultDockPrefs,
+})
+
+export function loadDockPrefs(storage?: PlanStorage | null): DockPrefs {
+  return dockPrefsStored.load(storage)
 }
 
-export function saveDockPrefs(
-  prefs: DockPrefs,
-  storage: PlanStorage | null = defaultStorage(),
-): void {
-  try {
-    storage?.setItem(DOCK_STORAGE_KEY, JSON.stringify(prefs))
-  } catch {
-    // Quota or privacy mode: the layout simply is not remembered.
-  }
+export function saveDockPrefs(prefs: DockPrefs, storage?: PlanStorage | null): void {
+  dockPrefsStored.save(prefs, storage)
 }

@@ -15,6 +15,7 @@ import {
   TOGGLE_ON,
   type SettingsDraft,
 } from './indicatorForm'
+import { useModalKeys } from './useModalKeys'
 import './Indicators.css'
 
 const SOURCE_LABELS: Record<PriceSource, string> = {
@@ -132,30 +133,10 @@ export function IndicatorSettings({
     document.getElementById(tabId(tabs[next].id))?.focus()
   }
 
-  const onDialogKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      e.stopPropagation()
-      onClose()
-      return
-    }
-    if (e.key !== 'Tab' || !dialogRef.current) return
-    const focusables = Array.from(
-      dialogRef.current.querySelectorAll<HTMLElement>(
-        'button:not([disabled]):not([tabindex="-1"]), input, select, [tabindex="0"]',
-      ),
-    )
-    if (focusables.length === 0) return
-    const first = focusables[0]
-    const last = focusables[focusables.length - 1]
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault()
-      last.focus()
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault()
-      first.focus()
-    }
-  }
+  const onDialogKeyDown = useModalKeys(dialogRef, onClose, {
+    listen: 'element',
+    trap: 'button:not([disabled]):not([tabindex="-1"]), input, select, [tabindex="0"]',
+  })
 
   const showError = (key: string) => (touched.has(key) ? errors[key] : undefined)
 

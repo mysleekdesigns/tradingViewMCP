@@ -1,4 +1,5 @@
 import { changePercent, formatChange, formatPrice, type Direction } from '../chart/legend'
+import { lastIndexAtOrBeforeTime } from '../chart/util/search'
 import { timeframeSeconds } from '../data/timeframes'
 import { formatClock } from '../state/appSettings'
 import { panelSelector, rawCandles, type LiveState, type PanelKey } from '../state/liveStore'
@@ -18,19 +19,8 @@ export interface Quote {
 
 /** Last candle with time <= `target`, or undefined. `candles` sorted ascending. */
 function candleAtOrBefore(candles: readonly Candle[], target: number): Candle | undefined {
-  let lo = 0
-  let hi = candles.length - 1
-  let found: Candle | undefined
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1
-    if (candles[mid].time <= target) {
-      found = candles[mid]
-      lo = mid + 1
-    } else {
-      hi = mid - 1
-    }
-  }
-  return found
+  const i = lastIndexAtOrBeforeTime(candles, target)
+  return i >= 0 ? candles[i] : undefined
 }
 
 /**

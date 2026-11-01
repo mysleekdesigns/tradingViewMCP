@@ -18,19 +18,6 @@
 //
 // Shown only on intervals below 1d (a daily bar holds every session, so a box would be the bar).
 
-import type {
-  IChartApiBase,
-  IPrimitivePaneRenderer,
-  IPrimitivePaneView,
-  IRange,
-  ISeriesApi,
-  ISeriesPrimitive,
-  ITimeScaleApi,
-  SeriesAttachedParameter,
-  SeriesType,
-  Time,
-  UTCTimestamp,
-} from 'lightweight-charts'
 import { INDICATOR_BY_ID } from '../indicators/registry'
 import {
   SESSION_KEYS,
@@ -51,12 +38,20 @@ import type {
 } from '../indicators/types'
 import type { IndicatorConfig } from '../state/indicators'
 import type { Candle } from '../types'
-import { BarLineage, closedBarCount } from './structureBars'
+import {
+  CulledLayerPrimitive,
+  LayerHost,
+  NO_DASH,
+  clampX,
+  type BitmapScope,
+  type ChartCoords,
+} from './layers/base'
+import { BarLineage, closedBarCount, pushNewBars } from './structureBars'
 import { fontFamily, type ChartPalette } from './theme'
-import { barSpacingOf, sameViewSignature, viewSignature, type ViewSignature } from './viewSignature'
+import { isLightBackground } from './util/color'
+import { lowerBound } from './util/search'
 
-type RenderTarget = Parameters<IPrimitivePaneRenderer['draw']>[0]
-type BitmapScope = Parameters<Parameters<RenderTarget['useBitmapCoordinateSpace']>[0]>[0]
+export type { PrimitiveHost } from './layers/base'
 
 /** Intervals at or above this many seconds (1d) draw no session boxes. */
 export const SESSION_MAX_INTERVAL_SECONDS = 86_400
@@ -77,14 +72,6 @@ export interface SessionRangesColors {
   light: boolean
 }
 
-/** Relative luminance of '#rrggbb' (0 black .. 1 white); other strings count as dark. */
-function luminance(hex: string): number {
-  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex)
-  if (m === null) return 0
-  const [r, g, b] = [m[1], m[2], m[3]].map((h) => parseInt(h, 16) / 255)
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b
-}
-
 /** Muted, distinct hues (indigo, green, amber, grey), deeper on a light background. */
 const DARK_SESSION_COLORS = {
   asia: '#7986cb',
@@ -103,7 +90,7 @@ const LIGHT_SESSION_COLORS = {
 export function sessionRangesColorsFor(
   palette: Pick<ChartPalette, 'background'>,
 ): SessionRangesColors {
-  const light = luminance(palette.background) > 0.5
+  const light = isLightBackground(palette.background)
   return { ...(light ? LIGHT_SESSION_COLORS : DARK_SESSION_COLORS), light }
 }
 
@@ -211,23 +198,6 @@ export interface SessionBoxGeometry {
   label: SessionLabelGeometry | null
 }
 
-/** Keeps far off-screen edges near the pane so the canvas never sees huge coordinates. */
-function clampX(x: number, width: number): number {
-  return Math.min(width + 2, Math.max(-2, x))
-}
-
-/** First index in [0, n) whose key is >= x (keys ascending). */
-function lowerBound(n: number, key: (i: number) => number, x: number): number {
-  let lo = 0
-  let hi = n
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (key(mid) < x) lo = mid + 1
-    else hi = mid
-  }
-  return lo
-}
-
 /**
  * Session labels go in the top-left corner (the opening range's in the bottom-left, so it does
  * not sit on Asia's, which starts at the same bar), inside the box when it is tall enough and
@@ -305,9 +275,6 @@ export const SESSION_FILL_ALPHA = 0.08
 export const SESSION_BORDER_ALPHA = 0.55
 const LIGHT_FILL_SCALE = 0.8
 const LABEL_ALPHA = 0.9
-
-/** Solid borders. `setLineDash` copies its argument, so shared arrays are safe (never mutated). */
-const NO_DASH: number[] = []
 
 /** The opening range's dash and the label font for one pair of pixel ratios. */
 interface FrameConstants {
@@ -395,221 +362,35 @@ export function drawSessions(
   ctx.restore()
 }
 
-class SessionRenderer implements IPrimitivePaneRenderer {
-  geom: SessionBoxGeometry[] | null = null
-  colors: SessionRangesColors = DEFAULT_SESSION_RANGES_COLORS
-
-  draw(target: RenderTarget): void {
-    const geom = this.geom
-    if (geom === null || geom.length === 0) return
-    target.useBitmapCoordinateSpace((scope) => drawSessions(scope, geom, this.colors))
-  }
-}
-
-class SessionPaneView implements IPrimitivePaneView {
-  readonly renderer_ = new SessionRenderer()
-
-  /** Under the candles and under the drawings (which use 'top'). */
-  zOrder(): 'bottom' {
-    return 'bottom'
-  }
-
-  renderer(): IPrimitivePaneRenderer {
-    return this.renderer_
-  }
-}
-
-type AttachedParam = Pick<SeriesAttachedParameter<Time>, 'chart' | 'series' | 'requestUpdate'>
-
-/**
- * Reference prices of the geometry cache's signature: positive (valid on a log scale) and
- * distinct; every price scale mode maps prices through a function fixed by two points.
- */
-const REF_PRICES: readonly [number, number] = [1, 2]
-
-/** A visible time range in UNIX seconds. */
-type TimeRange = { readonly from: number; readonly to: number }
-
-/** True when the chart's visible range is in UNIX seconds (not null, not business days). */
-function isTimestampRange(r: IRange<Time> | null): r is IRange<UTCTimestamp> {
-  return r !== null && typeof r.from === 'number' && typeof r.to === 'number'
+/** An empty geometry draws nothing (the bitmap scope is not even opened). */
+function noBoxes(geom: readonly SessionBoxGeometry[]): boolean {
+  return geom.length === 0
 }
 
 /**
- * `SessionCoords` over the chart, one per primitive (no closures per frame): `updateAllViews`
- * points it at the time scale and series and sets the range, spacing and width it already read.
+ * One instance's session boxes on the main series, under the candles and under the drawings
+ * (which use 'top'). No `autoscaleInfo` (old boxes never stretch the price scale) and no hit
+ * test (it never takes clicks from the candles or the drawings). The geometry is cached behind
+ * the view signature (see `CulledLayerPrimitive`). Box edges are plotted bars (first / last bar
+ * of the session), so the exact time lookup works.
  */
-class ChartSessionCoords implements SessionCoords {
-  ts: ITimeScaleApi<Time> | null = null
-  series: ISeriesApi<SeriesType, Time> | null = null
-  range: TimeRange | null = null
-  barSpacing = 0
-  width = 0
-
-  visibleRange(): TimeRange | null {
-    return this.range
-  }
-
-  // Box edges are plotted bars (first / last bar of the session), so the exact lookup works;
-  // it also places bars outside the view.
-  xOfTime(time: number): number | null {
-    return this.ts === null ? null : this.ts.timeToCoordinate(time as Time)
-  }
-
-  yOfPrice(price: number): number | null {
-    return this.series === null ? null : this.series.priceToCoordinate(price)
-  }
-}
-
-/**
- * One instance's session boxes on the main series. No `autoscaleInfo` (old boxes never stretch
- * the price scale) and no hit test (it never takes clicks from the candles or the drawings).
- */
-export class SessionRangesPrimitive implements ISeriesPrimitive<Time> {
-  readonly uid: string
-  private viewData: SessionView | null = null
-  private visible = true
-  private chart: IChartApiBase<Time> | null = null
-  private series: ISeriesApi<SeriesType, Time> | null = null
-  private requestUpdate: (() => void) | null = null
-  private readonly paneView = new SessionPaneView()
-  private readonly paneViewList: readonly IPrimitivePaneView[] = [this.paneView]
-  /**
-   * Bumped whenever what the geometry is built from changes (view, visibility, colours,
-   * attach / detach); part of the geometry cache's signature.
-   */
-  private version = 0
-  /** The view signature and time range the current geometry was built for (null = none). */
-  private cachedSig: ViewSignature | null = null
-  private cachedRange: TimeRange | null = null
-  private readonly coordsAdapter = new ChartSessionCoords()
-  /** Geometry builds so far (tests: an unchanged view must not rebuild). */
-  private builds = 0
-
+export class SessionRangesPrimitive extends CulledLayerPrimitive<
+  SessionView,
+  SessionBoxGeometry[],
+  SessionRangesColors
+> {
   constructor(uid: string, colors: SessionRangesColors) {
-    this.uid = uid
-    this.paneView.renderer_.colors = colors
+    super(uid, { colors, paint: drawSessions, isEmpty: noBoxes, zOrder: 'bottom', snap: 'exact' })
   }
 
-  attached(param: AttachedParam): void {
-    this.chart = param.chart
-    this.series = param.series
-    this.requestUpdate = param.requestUpdate
-    this.version += 1
-  }
-
-  detached(): void {
-    this.chart = null
-    this.series = null
-    this.requestUpdate = null
-    this.paneView.renderer_.geom = null
-    this.coordsAdapter.ts = null
-    this.coordsAdapter.series = null
-    this.version += 1
-  }
-
-  /** What the primitive draws (the same object until the boxes or the toggles change). */
-  view(): SessionView | null {
-    return this.viewData
-  }
-
-  isVisible(): boolean {
-    return this.visible
-  }
-
-  setView(view: SessionView | null): void {
-    if (view === this.viewData) return
-    this.viewData = view
-    this.version += 1
-    this.requestUpdate?.()
-  }
-
-  setVisible(visible: boolean): void {
-    if (visible === this.visible) return
-    this.visible = visible
-    this.version += 1
-    this.requestUpdate?.()
-  }
-
-  setColors(colors: SessionRangesColors): void {
-    this.paneView.renderer_.colors = colors
-    this.version += 1
-    this.requestUpdate?.()
-  }
-
-  colors(): SessionRangesColors {
-    return this.paneView.renderer_.colors
-  }
-
-  /** The geometry drawn on the last frame (null = nothing drawn). */
-  geometry(): SessionBoxGeometry[] | null {
-    return this.paneView.renderer_.geom
-  }
-
-  /** Geometry builds so far (tests, debugging). */
-  buildCount(): number {
-    return this.builds
-  }
-
-  /**
-   * Rebuilds the geometry only when the view moved: a drawing drag, a live tick or a hover
-   * change asks every primitive to update (a crosshair-only move repaints without calling
-   * this), and an unchanged signature (scroll position, bar
-   * spacing, width, two price coordinates, `version`) plus an unchanged visible time range
-   * means every coordinate the geometry reads is unchanged too.
-   */
-  updateAllViews(): void {
-    const view = this.viewData
-    const chart = this.chart
-    const series = this.series
-    const renderer = this.paneView.renderer_
-    if (!this.visible || view === null || chart === null || series === null) {
-      renderer.geom = null
-      this.cachedSig = null
-      return
-    }
-    const ts = chart.timeScale()
-    const r = ts.getVisibleRange()
-    // LWC returns a fresh range object per call; it is kept as is (read-only here).
-    if (!isTimestampRange(r)) {
-      // No bar in view: nothing to draw, nothing to build.
-      renderer.geom = null
-      this.cachedSig = null
-      return
-    }
-    const range: TimeRange = r
-    const sig = viewSignature(chart, series, REF_PRICES, this.version)
-    const prev = this.cachedRange
-    if (
-      prev !== null &&
-      range.from === prev.from &&
-      range.to === prev.to &&
-      sameViewSignature(sig, this.cachedSig)
-    )
-      return
-    const coords = this.coordsAdapter
-    coords.ts = ts
-    coords.series = series
-    coords.range = range
-    coords.barSpacing = sig === null ? barSpacingOf(ts) : sig.barSpacing
-    coords.width = sig === null ? ts.width() : sig.width
-    renderer.geom = sessionGeometry(view, coords)
-    this.builds += 1
-    this.cachedSig = sig
-    this.cachedRange = range
-  }
-
-  paneViews(): readonly IPrimitivePaneView[] {
-    return this.paneViewList
+  protected build(view: SessionView, coords: ChartCoords): SessionBoxGeometry[] | null {
+    return sessionGeometry(view, coords)
   }
 }
 
 /* ------------------------------------------------------------------------------------------ */
 /* Layer                                                                                       */
 /* ------------------------------------------------------------------------------------------ */
-
-/** The part of a series the layer uses (an `ISeriesApi` satisfies it). */
-export type PrimitiveHost = Pick<ISeriesApi<SeriesType>, 'attachPrimitive' | 'detachPrimitive'>
 
 interface Entry {
   primitive: SessionRangesPrimitive
@@ -632,6 +413,15 @@ interface Entry {
 }
 
 const NO_BOXES: readonly SessionBox[] = Object.freeze([])
+
+/** The colour fields whose change is a new theme for the layer. */
+const COLOR_KEYS: readonly (keyof SessionRangesColors)[] = [
+  'asia',
+  'london',
+  'newyork',
+  'opening',
+  'light',
+]
 
 interface DerivedInputs {
   inputs: IndicatorInputs
@@ -667,11 +457,11 @@ function derivedInputs(
  * `sync(configs, appliedCandles, closedThrough, intervalSeconds)` when the configs, candles,
  * closedThrough or interval change, `setColors` on theme change.
  */
-export class SessionRangesLayer {
-  private series: PrimitiveHost | null = null
-  private readonly entries = new Map<string, Entry>()
-  private colors: SessionRangesColors
-
+export class SessionRangesLayer extends LayerHost<
+  SessionRangesColors,
+  SessionRangesPrimitive,
+  Entry
+> {
   /** The chart's record of which bars a tick kept (skips the identity scan on live ticks). */
   private readonly lineage: BarLineage
 
@@ -679,30 +469,8 @@ export class SessionRangesLayer {
     colors: SessionRangesColors = DEFAULT_SESSION_RANGES_COLORS,
     lineage: BarLineage = new BarLineage(),
   ) {
-    this.colors = colors
+    super(colors, COLOR_KEYS)
     this.lineage = lineage
-  }
-
-  /** Attach every primitive to `series` (moving them off a previous one). */
-  attach(series: PrimitiveHost): void {
-    if (this.series === series) return
-    if (this.series !== null) this.detach()
-    this.series = series
-    for (const e of this.entries.values()) series.attachPrimitive(e.primitive)
-  }
-
-  /**
-   * Take the primitives off the series. `alive` false = the series (or the chart) has already
-   * been removed, so only the references are dropped. Results stay for the next attach.
-   */
-  detach(alive = true): void {
-    const series = this.series
-    this.series = null
-    if (series === null) return
-    for (const e of this.entries.values()) {
-      if (alive) series.detachPrimitive(e.primitive)
-      else e.primitive.detached()
-    }
   }
 
   /**
@@ -724,19 +492,7 @@ export class SessionRangesLayer {
     const bars = candles ?? []
     const intraday = intervalSeconds < SESSION_MAX_INTERVAL_SECONDS
     const closedLen = intraday ? closedBarCount(bars, closedThrough) : 0
-    const prefixOf = new Map<readonly Candle[], number>()
-    const prefixMatches = (entry: Entry): boolean => {
-      const n = entry.engine?.count ?? 0
-      if (n === 0) return true
-      if (closedLen < n || entry.synced === null) return false
-      const prev = entry.synced
-      let same = prefixOf.get(prev)
-      if (same === undefined) {
-        same = this.lineage.samePrefixLength(prev, bars)
-        prefixOf.set(prev, same)
-      }
-      return same >= n
-    }
+    const prefix = this.lineage.prefixChecks(bars, closedLen)
     const keep = new Set<string>()
     for (const config of configs) {
       const def = defs.get(config.type)
@@ -744,7 +500,7 @@ export class SessionRangesLayer {
       keep.add(config.uid)
       let entry = this.entries.get(config.uid)
       if (entry === undefined) {
-        entry = {
+        entry = this.add(config.uid, {
           primitive: new SessionRangesPrimitive(config.uid, this.colors),
           engine: null,
           paramsKey: '',
@@ -756,9 +512,7 @@ export class SessionRangesLayer {
           view: null,
           recomputes: 0,
           pushed: 0,
-        }
-        this.entries.set(config.uid, entry)
-        this.series?.attachPrimitive(entry.primitive)
+        })
       }
       entry.primitive.setVisible(config.visible)
       if (!config.visible || !intraday) {
@@ -775,7 +529,11 @@ export class SessionRangesLayer {
 
       const derived = derivedInputs(entry, config.inputs, intervalSeconds)
       const key = derived.key
-      if (entry.engine === null || entry.paramsKey !== key || !prefixMatches(entry)) {
+      if (
+        entry.engine === null ||
+        entry.paramsKey !== key ||
+        !prefix.keeps(entry.synced, entry.engine.count)
+      ) {
         entry.engine = new SessionRangesEngine(derived.params)
         entry.paramsKey = key
         entry.boxes = NO_BOXES
@@ -783,10 +541,9 @@ export class SessionRangesLayer {
         entry.recomputes += 1
       }
       const engine = entry.engine
-      const n = engine.count
-      if (closedLen > n) {
-        for (let i = n; i < closedLen; i++) engine.push(bars[i])
-        entry.pushed += closedLen - n
+      const added = pushNewBars(engine, bars, closedLen)
+      if (added > 0) {
+        entry.pushed += added
         entry.boxes = engine.result().boxes
         entry.version += 1
       }
@@ -800,34 +557,7 @@ export class SessionRangesLayer {
       }
       entry.primitive.setView(entry.view)
     }
-    for (const [uid, entry] of this.entries) {
-      if (keep.has(uid)) continue
-      this.series?.detachPrimitive(entry.primitive)
-      this.entries.delete(uid)
-    }
-  }
-
-  setColors(colors: SessionRangesColors): void {
-    const c = this.colors
-    if (
-      c.asia === colors.asia &&
-      c.london === colors.london &&
-      c.newyork === colors.newyork &&
-      c.opening === colors.opening &&
-      c.light === colors.light
-    )
-      return
-    this.colors = { ...colors }
-    for (const e of this.entries.values()) e.primitive.setColors(this.colors)
-  }
-
-  /** Uids with a primitive, in creation order (tests, debugging). */
-  uids(): string[] {
-    return [...this.entries.keys()]
-  }
-
-  primitiveOf(uid: string): SessionRangesPrimitive | undefined {
-    return this.entries.get(uid)?.primitive
+    this.sweep(keep)
   }
 
   /** The current boxes of `uid` (null while hidden, on 1d+, or before its first visible sync). */

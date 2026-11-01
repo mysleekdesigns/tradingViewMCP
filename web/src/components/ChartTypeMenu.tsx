@@ -1,5 +1,6 @@
-import { memo, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
+import { memo, useId, type KeyboardEvent } from 'react'
 import { CHART_TYPES, type ChartType } from '../types'
+import { useMenu } from './useMenu'
 
 const CHART_TYPE_LABELS: Record<ChartType, string> = {
   candles: 'Candles',
@@ -16,32 +17,20 @@ interface ChartTypeMenuProps {
 
 /** Button + listbox. Arrow keys move, Enter/Space picks, Esc or a click outside closes. */
 export const ChartTypeMenu = memo(function ChartTypeMenu({ value, onChange }: ChartTypeMenuProps) {
-  const [open, setOpen] = useState(false)
-  const [active, setActive] = useState(() => CHART_TYPES.indexOf(value))
-  const rootRef = useRef<HTMLDivElement>(null)
-  const buttonRef = useRef<HTMLButtonElement>(null)
-  const listRef = useRef<HTMLUListElement>(null)
+  const {
+    open,
+    active,
+    setActive,
+    rootRef,
+    buttonRef,
+    menuRef,
+    openMenu,
+    close,
+    toggle,
+    onMenuKey,
+    rove,
+  } = useMenu<HTMLUListElement>({ openAt: () => Math.max(0, CHART_TYPES.indexOf(value)) })
   const listId = useId()
-
-  useEffect(() => {
-    if (!open) return
-    listRef.current?.focus()
-    const onPointerDown = (e: PointerEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('pointerdown', onPointerDown)
-    return () => document.removeEventListener('pointerdown', onPointerDown)
-  }, [open])
-
-  const openMenu = () => {
-    setActive(Math.max(0, CHART_TYPES.indexOf(value)))
-    setOpen(true)
-  }
-
-  const close = (refocus: boolean) => {
-    setOpen(false)
-    if (refocus) buttonRef.current?.focus()
-  }
 
   const pick = (type: ChartType) => {
     close(true)
@@ -56,37 +45,10 @@ export const ChartTypeMenu = memo(function ChartTypeMenu({ value, onChange }: Ch
   }
 
   const onListKeyDown = (e: KeyboardEvent<HTMLUListElement>) => {
-    const n = CHART_TYPES.length
-    switch (e.key) {
-      case 'ArrowDown':
-        e.preventDefault()
-        setActive((i) => (i + 1) % n)
-        break
-      case 'ArrowUp':
-        e.preventDefault()
-        setActive((i) => (i - 1 + n) % n)
-        break
-      case 'Home':
-        e.preventDefault()
-        setActive(0)
-        break
-      case 'End':
-        e.preventDefault()
-        setActive(n - 1)
-        break
-      case 'Enter':
-      case ' ':
-        e.preventDefault()
-        pick(CHART_TYPES[active])
-        break
-      case 'Escape':
-        e.preventDefault()
-        e.stopPropagation()
-        close(true)
-        break
-      case 'Tab':
-        close(false)
-        break
+    if (rove(e, CHART_TYPES.length) || onMenuKey(e)) return
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      pick(CHART_TYPES[active])
     }
   }
 
@@ -101,7 +63,7 @@ export const ChartTypeMenu = memo(function ChartTypeMenu({ value, onChange }: Ch
         aria-controls={open ? listId : undefined}
         aria-label={`Chart type: ${CHART_TYPE_LABELS[value]}`}
         title="Chart type"
-        onClick={() => (open ? close(false) : openMenu())}
+        onClick={toggle}
         onKeyDown={onButtonKeyDown}
       >
         <ChartTypeIcon type={value} />
@@ -111,7 +73,7 @@ export const ChartTypeMenu = memo(function ChartTypeMenu({ value, onChange }: Ch
       </button>
       {open && (
         <ul
-          ref={listRef}
+          ref={menuRef}
           id={listId}
           className="ct-menu__list"
           role="listbox"

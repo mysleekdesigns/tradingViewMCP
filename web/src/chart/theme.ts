@@ -16,6 +16,7 @@ import { isSecondsTimeframe } from '../data/timeframes'
 import type { ThemeName } from '../state/settings'
 import type { ChartType, Timeframe } from '../types'
 import { makeTickMarkFormatter, makeTimeFormatter } from './timeFormat'
+import { luminance } from './util/color'
 
 /** Every colour the chart draws with (series, scales, crosshair, watermark). */
 export interface ChartPalette {
@@ -414,21 +415,13 @@ export function handleColorsFor(p: Pick<ChartPalette, 'background' | 'text'>): H
   return { fill: p.background, ring: p.text }
 }
 
-/** Perceived brightness of '#rrggbb' in [0, 1]; null for anything else. */
-export function hexLuminance(color: string): number | null {
-  const m = /^#([0-9a-f]{6})/i.exec(color.trim())
-  if (!m) return null
-  const v = parseInt(m[1], 16)
-  return (0.299 * ((v >> 16) & 255) + 0.587 * ((v >> 8) & 255) + 0.114 * (v & 255)) / 255
-}
-
 /**
  * Stroke for a selection handle: the drawing's colour, unless it would vanish against the handle
  * fill (e.g. a light-grey line on the light theme), then the theme's ring colour.
  */
 export function handleStroke(drawingColor: string, handles: HandleColors): string {
-  const a = hexLuminance(drawingColor)
-  const b = hexLuminance(handles.fill)
+  const a = luminance(drawingColor)
+  const b = luminance(handles.fill)
   if (a === null || b === null) return drawingColor
   return Math.abs(a - b) < 0.2 ? handles.ring : drawingColor
 }

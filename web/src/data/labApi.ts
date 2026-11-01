@@ -35,7 +35,15 @@ import type {
   ValidationResult,
   WalkForwardFold,
 } from './labTypes'
-import type { FetchLike } from './persistence'
+import {
+  compact,
+  isRecord,
+  numberOr as numOr,
+  numberOrNull as num,
+  stringOr as str,
+  stringsOf as strings,
+} from './guards'
+import { fetchWithin, globalFetch, jsonInit, readJsonOrUndefined, type FetchLike } from './http'
 
 export const LAB_BASE_PATH = '/lab'
 /** Health, registry, validate, ledger. */
@@ -110,24 +118,6 @@ export interface LabClient extends LabRegimeClient {
 // Parsing (tolerant where the contract allows null, strict on structure)
 // ---------------------------------------------------------------------------------------------
 
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
-}
-
-/** A finite number, else null (the lab sends null for NaN/inf). */
-function num(v: unknown): number | null {
-  return typeof v === 'number' && Number.isFinite(v) ? v : null
-}
-
-/** A finite number, else `fallback`. */
-function numOr(v: unknown, fallback: number): number {
-  return typeof v === 'number' && Number.isFinite(v) ? v : fallback
-}
-
-function str(v: unknown, fallback = ''): string {
-  return typeof v === 'string' ? v : fallback
-}
-
 function fail(what: string): never {
   throw new LabError('parse', `The lab service sent an unreadable ${what}`)
 }
@@ -142,9 +132,8 @@ function list(v: unknown, what: string): unknown[] {
   return v
 }
 
-function strings(v: unknown): string[] {
-  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
-}
+// Shared with the research client (same lab service, same wording).
+export { fail as labFail, list as labList, record as labRecord }
 
 export function parsePlanErrors(v: unknown): PlanError[] {
   if (!Array.isArray(v)) return []
@@ -222,15 +211,6 @@ function parseFold(v: unknown): WalkForwardFold | null {
     total_return: num(v.total_return),
     n_trades: numOr(v.n_trades, 0),
   }
-}
-
-function compact<T>(items: readonly unknown[], parse: (v: unknown) => T | null): T[] {
-  const out: T[] = []
-  for (const item of items) {
-    const parsed = parse(item)
-    if (parsed !== null) out.push(parsed)
-  }
-  return out
 }
 
 export const DEFAULT_DISCLAIMER =
@@ -446,23 +426,28 @@ function matchesTimes(points: readonly DerivativesPoint[], times: readonly numbe
 // Requests
 // ---------------------------------------------------------------------------------------------
 
-async function readJson(res: Response): Promise<unknown> {
-  try {
-    return (await res.json()) as unknown
-  } catch {
-    return undefined
-  }
+/** The message of an HTTP error whose body carried no `detail`. */
+export function httpStatusMessage(status: number): string {
+  return `The lab service answered HTTP ${status}`
 }
 
-/** Throws the LabError a non-2xx response stands for. */
-async function errorFor(res: Response): Promise<never> {
-  // The Vite proxy answers 502 (text/plain) when nothing listens on 8788; 504 = gateway timeout.
+/**
+ * Throws the LabError a non-2xx response stands for: 502/504 (the Vite proxy when nothing
+ * listens on 8788, or a gateway timeout) -> offline; 422 -> invalid with the plan errors (when
+ * `planErrors`); 503 -> no-data with the `detail`, else offline; else http with the `detail`
+ * or "The lab service answered HTTP <status>".
+ */
+export async function labErrorFor(
+  res: Response,
+  offlineMessage: string,
+  planErrors: boolean,
+): Promise<never> {
   if (res.status === 502 || res.status === 504) {
-    throw new LabError('offline', LAB_OFFLINE_MESSAGE, res.status)
+    throw new LabError('offline', offlineMessage, res.status)
   }
-  const body = await readJson(res)
+  const body = await readJsonOrUndefined(res)
   const detail = isRecord(body) && typeof body.detail === 'string' ? body.detail.trim() : ''
-  if (res.status === 422) {
+  if (planErrors && res.status === 422) {
     const errors = isRecord(body) ? parsePlanErrors(body.errors) : []
     const first = errors[0]
     throw new LabError(
@@ -474,9 +459,59 @@ async function errorFor(res: Response): Promise<never> {
   }
   if (res.status === 503) {
     if (detail !== '') throw new LabError('no-data', detail, 503)
-    throw new LabError('offline', LAB_OFFLINE_MESSAGE, 503)
+    throw new LabError('offline', offlineMessage, 503)
   }
-  throw new LabError('http', detail || `The lab service answered HTTP ${res.status}`, res.status)
+  throw new LabError('http', detail || httpStatusMessage(res.status), res.status)
+}
+
+export interface LabRequestInit {
+  method: 'GET' | 'POST'
+  /** JSON-encoded when given. */
+  body?: unknown
+  signal?: AbortSignal
+  /** Overrides the client's timeout for this request. */
+  timeoutMs?: number
+}
+
+/**
+ * A JSON request function for the lab service under `base`. Caller abort -> `aborted`
+ * ("Request cancelled"); our timer -> `timeout`; fetch failure -> `offline` (`offlineMessage`);
+ * non-2xx -> `labErrorFor`; a body that is not JSON -> `parse`.
+ */
+export function createLabRequest(o: {
+  fetchImpl?: FetchLike
+  base: string
+  timeoutMs: number
+  offlineMessage: string
+  /** Map 422 to `invalid` with the plan errors (the plan endpoints); else 422 is `http`. */
+  planErrors: boolean
+}): (path: string, init: LabRequestInit) => Promise<unknown> {
+  const doFetch: FetchLike = o.fetchImpl ?? globalFetch
+  const cancelled = (): LabError => new LabError('aborted', 'Request cancelled')
+  return async (path, init) => {
+    if (init.signal?.aborted) throw cancelled()
+    return fetchWithin(
+      {
+        fetchImpl: doFetch,
+        url: `${o.base}${path}`,
+        init: jsonInit(init.method, init.body),
+        timeoutMs: init.timeoutMs ?? o.timeoutMs,
+        signal: init.signal,
+        failures: {
+          aborted: cancelled,
+          timeout: () => new LabError('timeout', 'The lab service did not answer in time'),
+          network: () => new LabError('offline', o.offlineMessage),
+        },
+      },
+      async (res) => {
+        if (!res.ok) await labErrorFor(res, o.offlineMessage, o.planErrors)
+        const body = await readJsonOrUndefined(res)
+        if (body === undefined)
+          throw new LabError('parse', 'The lab service sent a non-JSON answer')
+        return body
+      },
+    )
+  }
 }
 
 /**
@@ -487,51 +522,13 @@ export function createLabClient(opts: LabClientOptions = {}): LabClient & LabDer
   const base = (opts.basePath ?? LAB_BASE_PATH).replace(/\/+$/, '')
   const timeoutMs = opts.timeoutMs ?? LAB_TIMEOUT_MS
   const backtestTimeoutMs = opts.backtestTimeoutMs ?? LAB_BACKTEST_TIMEOUT_MS
-  const doFetch: FetchLike =
-    opts.fetchImpl ??
-    ((input, init) => {
-      if (typeof globalThis.fetch !== 'function') {
-        return Promise.reject(new Error('fetch is not available'))
-      }
-      return globalThis.fetch(input, init)
-    })
-
-  async function request(
-    path: string,
-    init: { method: 'GET' | 'POST'; body?: unknown; signal?: AbortSignal; timeoutMs?: number },
-  ): Promise<unknown> {
-    if (init.signal?.aborted) throw new LabError('aborted', 'Request cancelled')
-    const controller = new AbortController()
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      controller.abort()
-    }, init.timeoutMs ?? timeoutMs)
-    const onAbort = (): void => controller.abort()
-    init.signal?.addEventListener('abort', onAbort, { once: true })
-    const reqInit: RequestInit = { method: init.method, signal: controller.signal }
-    if (init.body !== undefined) {
-      reqInit.headers = { 'Content-Type': 'application/json' }
-      reqInit.body = JSON.stringify(init.body)
-    }
-    try {
-      let res: Response
-      try {
-        res = await doFetch(`${base}${path}`, reqInit)
-      } catch {
-        if (timedOut) throw new LabError('timeout', 'The lab service did not answer in time')
-        if (init.signal?.aborted) throw new LabError('aborted', 'Request cancelled')
-        throw new LabError('offline', LAB_OFFLINE_MESSAGE)
-      }
-      if (!res.ok) await errorFor(res)
-      const body = await readJson(res)
-      if (body === undefined) throw new LabError('parse', 'The lab service sent a non-JSON answer')
-      return body
-    } finally {
-      clearTimeout(timer)
-      init.signal?.removeEventListener('abort', onAbort)
-    }
-  }
+  const request = createLabRequest({
+    fetchImpl: opts.fetchImpl,
+    base,
+    timeoutMs,
+    offlineMessage: LAB_OFFLINE_MESSAGE,
+    planErrors: true,
+  })
 
   return {
     async health(signal) {

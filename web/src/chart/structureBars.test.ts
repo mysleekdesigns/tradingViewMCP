@@ -12,7 +12,13 @@ import type { Candle, ConnectionStatus } from '../types'
 import { MarketStructureLayer } from './marketStructureLayer'
 import { planSeriesSync } from './seriesSync'
 import { SessionRangesLayer } from './sessionRangesLayer'
-import { BarLineage, closedBarCount, planSamePrefix, structureClosedThrough } from './structureBars'
+import {
+  BarLineage,
+  closedBarCount,
+  planSamePrefix,
+  pushNewBars,
+  structureClosedThrough,
+} from './structureBars'
 
 const H = 3600
 
@@ -417,5 +423,96 @@ describe('BarLineage (skips the overlay identity scan on a live tick)', () => {
     expect(fs.resultOf('sr')).toEqual(ss.resultOf('sr'))
     expect(fm.statsOf('ms')).toEqual(sm.statsOf('ms'))
     expect(fs.statsOf('sr')).toEqual(ss.statsOf('sr'))
+  })
+})
+
+describe('closedBarCount (shared upperBound)', () => {
+  it('counts the bars opening at or before closedThrough, against a linear count', () => {
+    const bars = ROWS
+    for (const t of [null, -1, 0, 1, H - 1, H, 2 * H + 5, 3 * H, 10 * H, Number.NaN]) {
+      const linear = t === null ? 0 : bars.filter((b) => b.time <= t).length
+      expect(closedBarCount(bars, t)).toBe(linear)
+    }
+    expect(closedBarCount([], 5)).toBe(0)
+  })
+})
+
+describe("BarLineage.prefixChecks (the overlay layers' shared prefix memo)", () => {
+  /** A lineage that counts the identity prefixes it is asked for. */
+  class CountingLineage extends BarLineage {
+    asked = 0
+    override samePrefixLength(a: readonly Candle[], b: readonly Candle[]): number {
+      this.asked++
+      return super.samePrefixLength(a, b)
+    }
+  }
+
+  const bars = ROWS
+  const revised = [ROWS[0], c(H, 9, 9, 9, 9), ROWS[2], ROWS[3]]
+
+  it('nothing pushed always keeps (and asks nothing)', () => {
+    const lineage = new CountingLineage()
+    const checks = lineage.prefixChecks(bars, 0)
+    expect(checks.keeps(null, 0)).toBe(true)
+    expect(checks.keeps(revised, 0)).toBe(true)
+    expect(lineage.asked).toBe(0)
+  })
+
+  it('more pushed than usable (closedThrough moved back) or no synced array: start over', () => {
+    const lineage = new CountingLineage()
+    const checks = lineage.prefixChecks(bars, 2)
+    expect(checks.keeps(bars, 3)).toBe(false)
+    expect(checks.keeps(null, 1)).toBe(false)
+    expect(lineage.asked).toBe(0)
+  })
+
+  it('keeps exactly while the pushed bars are the same objects', () => {
+    const lineage = new BarLineage()
+    const checks = lineage.prefixChecks(bars, 4)
+    expect(checks.keeps(bars, 4)).toBe(true)
+    expect(checks.keeps(revised, 1)).toBe(true)
+    expect(checks.keeps(revised, 2)).toBe(false)
+    expect(checks.keeps(revised.slice(0, 3), 2)).toBe(false)
+  })
+
+  it('one identity prefix per distinct synced array per sync, then a fresh sync asks again', () => {
+    const lineage = new CountingLineage()
+    const prev = bars.slice()
+    const checks = lineage.prefixChecks(bars, 4)
+    expect(checks.keeps(prev, 3)).toBe(true)
+    expect(checks.keeps(prev, 4)).toBe(true)
+    expect(checks.keeps(revised, 1)).toBe(true)
+    expect(checks.keeps(revised, 2)).toBe(false)
+    expect(lineage.asked).toBe(2)
+    const next = lineage.prefixChecks(bars, 4)
+    expect(next.keeps(prev, 4)).toBe(true)
+    expect(lineage.asked).toBe(3)
+  })
+
+  it('the recorded step is answered as recorded (no scan)', () => {
+    const lineage = new BarLineage()
+    const prev = bars.slice()
+    const next = [...bars.slice(0, 3), c(3 * H, 2, 2, 2, 2)]
+    lineage.record(prev, next, 3)
+    const checks = lineage.prefixChecks(next, 3)
+    expect(checks.keeps(prev, 3)).toBe(true)
+    expect(lineage.prefixChecks(next, 4).keeps(prev, 4)).toBe(false)
+  })
+})
+
+describe('pushNewBars', () => {
+  it('pushes only the usable bars the engine has not seen, in order', () => {
+    const pushed: number[] = []
+    const engine = {
+      get count() {
+        return pushed.length
+      },
+      push: (b: Candle) => pushed.push(b.time),
+    }
+    expect(pushNewBars(engine, ROWS, 2)).toBe(2)
+    expect(pushNewBars(engine, ROWS, 2)).toBe(0)
+    expect(pushNewBars(engine, ROWS, 1)).toBe(0)
+    expect(pushNewBars(engine, ROWS, 4)).toBe(2)
+    expect(pushed).toEqual([0, H, 2 * H, 3 * H])
   })
 })

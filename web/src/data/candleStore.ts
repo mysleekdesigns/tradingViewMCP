@@ -1,29 +1,6 @@
+import { indexByTime, lowerBoundByTime, upperBoundByTime } from '../chart/util/search'
+import { sameCandle } from './guards'
 import type { Candle } from '../types'
-
-/** Index of the element with `time`, or -1. `candles` must be ascending by time. */
-function indexOfTime(candles: readonly Candle[], time: number): number {
-  let lo = 0
-  let hi = candles.length - 1
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1
-    const t = candles[mid].time
-    if (t === time) return mid
-    if (t < time) lo = mid + 1
-    else hi = mid - 1
-  }
-  return -1
-}
-
-function sameFields(a: Candle, b: Candle): boolean {
-  return (
-    a.time === b.time &&
-    a.open === b.open &&
-    a.high === b.high &&
-    a.low === b.low &&
-    a.close === b.close &&
-    a.volume === b.volume
-  )
-}
 
 /**
  * Apply one live candle to an ascending, unique-time array. Never mutates input.
@@ -46,8 +23,8 @@ export function applyLiveCandle(candles: readonly Candle[], c: Candle): Candle[]
     recordLineage(appended, candles, candles.length)
     return appended
   }
-  const idx = c.time === last.time ? candles.length - 1 : indexOfTime(candles, c.time)
-  if (idx === -1 || sameFields(candles[idx], c)) return candles as Candle[]
+  const idx = c.time === last.time ? candles.length - 1 : indexByTime(candles, c.time)
+  if (idx === -1 || sameCandle(candles[idx], c)) return candles as Candle[]
   const out = candles.slice()
   out[idx] = c
   recordLineage(out, candles, idx)
@@ -164,30 +141,6 @@ export function samePrefixLength(a: readonly Candle[], b: readonly Candle[]): nu
 /* Sorted merges: binary-search splices of ascending, unique-time arrays                        */
 /* ------------------------------------------------------------------------------------------ */
 
-/** First index of ascending `candles` whose time is >= `time` (`candles.length` if none). */
-export function lowerBoundTime(candles: readonly Candle[], time: number): number {
-  let lo = 0
-  let hi = candles.length
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (candles[mid].time < time) lo = mid + 1
-    else hi = mid
-  }
-  return lo
-}
-
-/** First index of ascending `candles` whose time is > `time` (`candles.length` if none). */
-export function upperBoundTime(candles: readonly Candle[], time: number): number {
-  let lo = 0
-  let hi = candles.length
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (candles[mid].time <= time) lo = mid + 1
-    else hi = mid
-  }
-  return lo
-}
-
 /** True when every time is strictly greater than the one before it (ascending, unique). */
 function strictlyAscending(candles: readonly Candle[]): boolean {
   for (let i = 1; i < candles.length; i++)
@@ -220,8 +173,8 @@ function spliceMerge(
   keepUnchanged: boolean,
 ): Candle[] {
   if (fresh.length === 0) return existing.slice()
-  const lo = lowerBoundTime(existing, fresh[0].time)
-  const hi = upperBoundTime(existing, fresh[fresh.length - 1].time)
+  const lo = lowerBoundByTime(existing, fresh[0].time)
+  const hi = upperBoundByTime(existing, fresh[fresh.length - 1].time)
   const out = existing.slice(0, lo)
   let i = lo
   let j = 0
@@ -233,7 +186,7 @@ function spliceMerge(
     } else {
       const e = existing[i++]
       const f = fresh[j++]
-      out.push(keepUnchanged && sameFields(e, f) ? e : f)
+      out.push(keepUnchanged && sameCandle(e, f) ? e : f)
     }
   }
   for (let k = hi; k < existing.length; k++) out.push(existing[k])
@@ -267,7 +220,7 @@ export function mergeCandlesKeepingUnchanged(
     // Exact prefix: the bars before the first fresh time are copied as they are; scan on from
     // there (the merged window, plus the rest when every fresh row kept its existing bar).
     const n = Math.min(out.length, existing.length)
-    let same = rows.length === 0 ? n : Math.min(n, lowerBoundTime(existing, rows[0].time))
+    let same = rows.length === 0 ? n : Math.min(n, lowerBoundByTime(existing, rows[0].time))
     while (same < n && out[same] === existing[same]) same++
     recordLineage(out, existing, same)
   }
@@ -284,7 +237,7 @@ export function mergeCandlesKeepingUnchanged(
 export function prependOlder(existing: readonly Candle[], older: readonly Candle[]): Candle[] {
   const first = existing.length > 0 ? existing[0].time : Infinity
   const page = ascendingUnique(older)
-  const cut = lowerBoundTime(page, first)
+  const cut = lowerBoundByTime(page, first)
   if (cut === 0) return existing as Candle[]
   return page.slice(0, cut).concat(existing)
 }

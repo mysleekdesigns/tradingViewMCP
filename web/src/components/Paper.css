@@ -1,4 +1,5 @@
 /* Paper trading sidebar panel. Palette and fonts from index.css (light and dark themes). */
+/* Shared chrome (icon button, tabs, dialog, focus ring, scrollbar, panel head): primitives.css. */
 
 .paper {
   --pp-pad-x: 12px;
@@ -15,20 +16,8 @@
 }
 
 .paper__header {
-  flex: none;
-  display: flex;
-  align-items: center;
   gap: 8px;
-  height: 38px;
   padding: 0 6px 0 var(--pp-pad-x);
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.paper__title {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
 }
 
 .paper__scope {
@@ -48,33 +37,6 @@
 
 .paper__spacer {
   flex: 1;
-}
-
-.paper__icon-btn {
-  display: inline-grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  transition:
-    background-color 120ms ease,
-    color 120ms ease;
-}
-
-.paper__icon-btn:hover,
-.paper__icon-btn[aria-expanded='true'] {
-  background: var(--panel-hover);
-  color: var(--text);
-}
-
-.paper__icon-btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
 }
 
 /* Always-visible "simulated" notice. */
@@ -108,8 +70,6 @@
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: var(--panel-hover) transparent;
 }
 
 /* ---------- Summary ---------- */
@@ -260,11 +220,6 @@
   color: var(--on-accent);
 }
 
-.paper-ticket__side:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
 .paper-ticket__types {
   display: flex;
   gap: 14px;
@@ -304,8 +259,6 @@
 
 .paper-ticket__type:focus-visible {
   border-radius: 3px;
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
 }
 
 .paper-field {
@@ -422,11 +375,6 @@
   opacity: 0.5;
 }
 
-.paper-input-wrap__btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
 .paper-ticket__pcts {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -453,11 +401,6 @@
 .paper-ticket__pct:disabled {
   cursor: not-allowed;
   opacity: 0.5;
-}
-
-.paper-ticket__pct:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 
 .paper-ticket__est {
@@ -527,11 +470,6 @@
   opacity: 0.45;
 }
 
-.paper-ticket__submit:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
 /* Why the ticket is paused (reviewing replay history, feed offline, another quote currency). */
 .paper-ticket__paused {
   margin: 0;
@@ -568,61 +506,19 @@
   position: sticky;
   top: 0;
   z-index: 1;
-  display: flex;
-  gap: 4px;
   padding: 0 calc(var(--pp-pad-x) - 6px);
   border-bottom: 1px solid var(--border-soft);
   background: var(--bg);
 }
 
 .paper__tab {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
   height: 32px;
   padding: 0 6px;
-  border: 0;
-  background: transparent;
-  color: var(--text-muted);
-  font: inherit;
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.paper__tab:hover,
-.paper__tab[aria-selected='true'] {
-  color: var(--text);
 }
 
 .paper__tab[aria-selected='true']::after {
-  position: absolute;
   right: 4px;
-  bottom: -1px;
   left: 4px;
-  height: 2px;
-  border-radius: 2px 2px 0 0;
-  background: var(--accent);
-  content: '';
-}
-
-.paper__tab:focus-visible {
-  border-radius: 4px;
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-.paper__tab-count {
-  min-width: 14px;
-  padding: 0 4px;
-  border-radius: 7px;
-  background: var(--fill);
-  color: var(--text-muted);
-  font-family: var(--font-num);
-  font-size: 10px;
-  line-height: 15px;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
 }
 
 .paper__list {
@@ -699,11 +595,6 @@
   text-underline-offset: 2px;
 }
 
-.paper-row__symbol--link:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
 .paper-row__qty {
   color: var(--text-muted);
   font-family: var(--font-num);
@@ -750,32 +641,9 @@
   opacity: 0.45;
 }
 
-.paper-row__action:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-.paper-row__icon {
-  display: inline-grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 0;
-  border-radius: 3px;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-}
-
 .paper-row__icon:hover {
   background: var(--panel-hover);
   color: var(--down-text);
-}
-
-.paper-row__icon:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
 }
 
 .paper-chip {
@@ -869,9 +737,4 @@
 .paper-reset__btn:disabled {
   cursor: not-allowed;
   opacity: 0.5;
-}
-
-.paper-reset__btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }

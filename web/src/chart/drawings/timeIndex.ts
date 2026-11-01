@@ -9,6 +9,7 @@
 // mapping back keeps its position relative to the bars around it.
 
 import type { Interval } from '../../types'
+import { lastIndexAtOrBeforeTime } from '../util/search'
 
 /** Bar length of each interval in seconds (used to extrapolate past either end of the data). */
 export const INTERVAL_SECONDS: Readonly<Record<Interval, number>> = {
@@ -24,23 +25,6 @@ export const INTERVAL_SECONDS: Readonly<Record<Interval, number>> = {
 /** Anything with a bar open time in UNIX seconds (a Candle qualifies). */
 export interface TimedBar {
   readonly time: number
-}
-
-/** Index of the last bar with time <= t (bars ascending); -1 if t is before the first bar. */
-function lastAtOrBefore(bars: readonly TimedBar[], t: number): number {
-  let lo = 0
-  let hi = bars.length - 1
-  let found = -1
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1
-    if (bars[mid].time <= t) {
-      found = mid
-      lo = mid + 1
-    } else {
-      hi = mid - 1
-    }
-  }
-  return found
 }
 
 /**
@@ -59,7 +43,8 @@ export function timeToLogical(
   const last = bars[n - 1].time
   if (time <= first) return (time - first) / stepSeconds
   if (time >= last) return n - 1 + (time - last) / stepSeconds
-  const i = lastAtOrBefore(bars, time)
+  // The last bar with time <= `time` (first < time < last here, so 0 <= i < n - 1).
+  const i = lastIndexAtOrBeforeTime(bars, time)
   const t0 = bars[i].time
   if (t0 === time) return i
   const t1 = bars[i + 1].time

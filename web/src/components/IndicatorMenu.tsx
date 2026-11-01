@@ -8,6 +8,7 @@ import {
   flattenGroups,
   groupIndicators,
 } from './indicatorMenuFilter'
+import { useModalKeys } from './useModalKeys'
 import './Indicators.css'
 
 /** How long the "Added" tick stays on a row. */
@@ -120,30 +121,10 @@ export function IndicatorMenu({ items, onAdd, onClose }: IndicatorMenuProps) {
     }
   }
 
-  const onDialogKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      e.stopPropagation()
-      onClose()
-      return
-    }
-    if (e.key !== 'Tab' || !dialogRef.current) return
-    const focusables = Array.from(
-      dialogRef.current.querySelectorAll<HTMLElement>(
-        'button:not([disabled]):not([tabindex="-1"]), input, [tabindex="0"]',
-      ),
-    )
-    if (focusables.length === 0) return
-    const first = focusables[0]
-    const last = focusables[focusables.length - 1]
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault()
-      last.focus()
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault()
-      first.focus()
-    }
-  }
+  const onDialogKeyDown = useModalKeys(dialogRef, onClose, {
+    listen: 'element',
+    trap: 'button:not([disabled]):not([tabindex="-1"]), input, [tabindex="0"]',
+  })
 
   return (
     <div

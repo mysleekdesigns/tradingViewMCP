@@ -1,13 +1,4 @@
-import {
-  memo,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-  type FormEvent,
-  type KeyboardEvent,
-} from 'react'
+import { memo, useId, useMemo, useState, type FormEvent, type KeyboardEvent } from 'react'
 import {
   PRESET_TIMEFRAMES,
   parseTimeframe,
@@ -16,6 +7,7 @@ import {
   timeframeSeconds,
 } from '../data/timeframes'
 import type { Timeframe, TimeframeUnit } from '../types'
+import { useMenu } from './useMenu'
 import './Timeframes.css'
 
 /** Quick buttons shown by default (the previous toolbar's intervals). */
@@ -71,14 +63,9 @@ export const TimeframePicker = memo(function TimeframePicker({
   supports,
   favorites = DEFAULT_FAVORITES,
 }: TimeframePickerProps) {
-  const [open, setOpen] = useState(false)
-  const [active, setActive] = useState(0)
   const [count, setCount] = useState('')
   const [unit, setUnit] = useState<TimeframeUnit>('m')
   const [error, setError] = useState<string | null>(null)
-  const rootRef = useRef<HTMLDivElement>(null)
-  const buttonRef = useRef<HTMLButtonElement>(null)
-  const listRef = useRef<HTMLDivElement>(null)
   const baseId = useId()
   const listId = `${baseId}-list`
   const errorId = `${baseId}-error`
@@ -105,42 +92,34 @@ export const TimeframePicker = memo(function TimeframePicker({
   /** Options in display (group) order; `active` indexes this. */
   const flat = groups.flatMap((g) => g.items)
 
-  useEffect(() => {
-    if (!open) return
-    listRef.current?.focus()
-    const onPointerDown = (e: PointerEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('pointerdown', onPointerDown)
-    return () => document.removeEventListener('pointerdown', onPointerDown)
-  }, [open])
+  const {
+    open,
+    active,
+    setActive,
+    rootRef,
+    buttonRef,
+    menuRef,
+    openMenu: openPanel,
+    close,
+    onMenuKey,
+    rove,
+  } = useMenu<HTMLDivElement>({
+    openAt: () => {
+      const i = flat.indexOf(value)
+      return i >= 0 ? i : Math.max(0, flat.findIndex(allowed))
+    },
+    tabCloses: false, // tabbing out closes through the panel's onBlur
+  })
 
   const openMenu = () => {
-    const i = flat.indexOf(value)
-    setActive(i >= 0 ? i : Math.max(0, flat.findIndex(allowed)))
     setError(null)
-    setOpen(true)
-  }
-
-  const close = (refocus: boolean) => {
-    setOpen(false)
-    if (refocus) buttonRef.current?.focus()
+    openPanel()
   }
 
   const pick = (tf: Timeframe) => {
     if (!allowed(tf)) return
     close(true)
     if (tf !== value) onChange(tf)
-  }
-
-  /** Next selectable index from `from` in direction `dir`, wrapping; `from` if none. */
-  const step = (from: number, dir: 1 | -1): number => {
-    const n = flat.length
-    for (let k = 1; k <= n; k++) {
-      const i = (from + dir * k + n * k) % n
-      if (allowed(flat[i])) return i
-    }
-    return from
   }
 
   const onButtonKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
@@ -151,36 +130,11 @@ export const TimeframePicker = memo(function TimeframePicker({
   }
 
   const onListKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    switch (e.key) {
-      case 'ArrowDown':
-        e.preventDefault()
-        setActive((i) => step(i, 1))
-        break
-      case 'ArrowUp':
-        e.preventDefault()
-        setActive((i) => step(i, -1))
-        break
-      case 'Home':
-        e.preventDefault()
-        setActive(step(flat.length - 1, 1))
-        break
-      case 'End':
-        e.preventDefault()
-        setActive(step(0, -1))
-        break
-      case 'Enter':
-      case ' ':
-        e.preventDefault()
-        if (flat[active] !== undefined) pick(flat[active])
-        break
-    }
-  }
-
-  const onPanelKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === 'Escape') {
+    // Arrows, Home and End skip unavailable entries.
+    if (rove(e, flat.length, (i) => allowed(flat[i]))) return
+    if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
-      e.stopPropagation()
-      close(true)
+      if (flat[active] !== undefined) pick(flat[active])
     }
   }
 
@@ -243,15 +197,15 @@ export const TimeframePicker = memo(function TimeframePicker({
           className="tfp__panel"
           role="dialog"
           aria-label="Timeframes"
-          onKeyDown={onPanelKeyDown}
+          onKeyDown={onMenuKey}
           onBlur={(e) => {
             // Tabbing out of the panel closes it.
             const next = e.relatedTarget as Node | null
-            if (next !== null && !rootRef.current?.contains(next)) setOpen(false)
+            if (next !== null && !rootRef.current?.contains(next)) close(false)
           }}
         >
           <div
-            ref={listRef}
+            ref={menuRef}
             id={listId}
             className="tfp__list"
             role="listbox"

@@ -6,10 +6,8 @@ import {
   type IChartApi,
   type IPriceLine,
   type ISeriesApi,
-  type LineData,
   type LineWidth,
   type SeriesType,
-  type UTCTimestamp,
 } from 'lightweight-charts'
 import { INDICATOR_BY_ID } from '../indicators/registry'
 import { IndicatorRunner } from '../indicators/runner'
@@ -27,6 +25,7 @@ import type {
 import type { IndicatorConfig } from '../state/indicators'
 import type { Candle } from '../types'
 import { formatPrice, formatVolume, selectLegendIndex } from './legend'
+import { toLineData, toTime } from './points'
 import type { SeriesSyncPlan } from './seriesSync'
 import { SESSION_MAX_INTERVAL_SECONDS, sessionsHiddenByAlignment } from './sessionRangesLayer'
 import {
@@ -40,6 +39,7 @@ import {
   mainPaneStretch,
   type ChartPalette,
 } from './theme'
+import { lowerBoundByTime } from './util/search'
 
 /** The theme colours indicator series use (their line colours are the user's and stay). */
 export type IndicatorPalette = Pick<ChartPalette, 'background' | 'mutedText'>
@@ -457,24 +457,9 @@ export interface IndicatorSnapshot {
   paneVersion: number
 }
 
-function lowerBound(points: readonly IndicatorPoint[], t: number): number {
-  let lo = 0
-  let hi = points.length
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (points[mid].time < t) lo = mid + 1
-    else hi = mid
-  }
-  return lo
-}
-
-function toLineData(p: IndicatorPoint): LineData {
-  return { time: p.time as UTCTimestamp, value: p.value }
-}
-
 function toHistogramData(points: readonly IndicatorPoint[], positive: string): HistogramData[] {
   return points.map((p, i) => ({
-    time: p.time as UTCTimestamp,
+    time: toTime(p.time),
     value: p.value,
     color: histogramColor(p.value, i > 0 ? points[i - 1].value : undefined, positive),
   }))
@@ -957,10 +942,10 @@ export class IndicatorSeriesManager {
         const all = full[line.key] ?? []
         const positive = lineColor(entry.config, line)
         for (const p of points) {
-          const i = lowerBound(all, p.time)
+          const i = lowerBoundByTime(all, p.time)
           const prev = i > 0 ? all[i - 1].value : undefined
           ;(series as ISeriesApi<'Histogram'>).update({
-            time: p.time as UTCTimestamp,
+            time: toTime(p.time),
             value: p.value,
             color: histogramColor(p.value, prev, positive),
           })

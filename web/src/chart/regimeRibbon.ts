@@ -18,7 +18,9 @@ import {
 } from 'lightweight-charts'
 import type { RegimePoint, RegimeState } from '../data/labTypes'
 import type { Candle } from '../types'
+import { toTime } from './points'
 import { withHexAlpha, type ChartPalette } from './theme'
+import { upperBoundByTime } from './util/search'
 
 export interface RegimeColors {
   bull: string
@@ -80,7 +82,7 @@ export function regimeRibbonData(
   const out: (HistogramData<UTCTimestamp> | WhitespaceData<UTCTimestamp>)[] = []
   for (const p of points) {
     if (plotted !== undefined && !plotted.has(p.time)) continue
-    const time = p.time as UTCTimestamp
+    const time = toTime(p.time)
     out.push(p.state === null ? { time } : { time, value: 1, color: colorOf(p.state, colors) })
   }
   return out
@@ -101,13 +103,7 @@ export function regimeSourceBars(
   if (replayVisible.length === 0) return { candles: [], formingLast: false }
   const cursor = replayVisible[replayVisible.length - 1].time
   // First raw bar after the cursor (raw is ascending).
-  let lo = 0
-  let hi = raw.length
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (raw[mid].time <= cursor) lo = mid + 1
-    else hi = mid
-  }
+  const lo = upperBoundByTime(raw, cursor)
   return { candles: lo === raw.length ? raw : raw.slice(0, lo), formingLast: false }
 }
 

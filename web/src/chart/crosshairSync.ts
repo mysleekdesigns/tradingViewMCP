@@ -1,5 +1,7 @@
-import type { MouseEventParams, Time, UTCTimestamp } from 'lightweight-charts'
+import type { MouseEventParams, Time } from 'lightweight-charts'
 import type { Candle } from '../types'
+import { toTime } from './points'
+import { lastIndexAtOrBeforeTime } from './util/search'
 
 /**
  * Crosshair sync between charts (multi-chart layouts). Hovering one chart publishes its bar
@@ -110,16 +112,7 @@ export function barIndexAt(
   time: number,
   step: number,
 ): number | null {
-  let lo = 0
-  let hi = bars.length - 1
-  let found = -1
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1
-    if (bars[mid].time <= time) {
-      found = mid
-      lo = mid + 1
-    } else hi = mid - 1
-  }
+  const found = lastIndexAtOrBeforeTime(bars, time)
   if (found < 0) return null
   const open = bars[found].time
   if (open === time) return found
@@ -173,7 +166,7 @@ export function bindCrosshairSync<S>(
         return
       }
       const bar = bars[i]
-      chart.setCrosshairPosition(bar.close, bar.time as UTCTimestamp, series)
+      chart.setCrosshairPosition(bar.close, toTime(bar.time), series)
       source.onShow?.(bar.time)
     },
     clear,

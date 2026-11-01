@@ -9,6 +9,7 @@ import {
   colorName,
   gridMove,
 } from './drawingTools'
+import { useModalKeys } from './useModalKeys'
 import './Drawings.css'
 
 export interface DrawingStyleBarProps {
@@ -214,6 +215,8 @@ function StylePopover({
     close(true)
   }
 
+  const onPanelKeyDown = useModalKeys(null, () => close(true), { listen: 'element', stop: 'all' })
+
   const onButtonKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (!open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
       e.preventDefault()
@@ -268,13 +271,8 @@ function StylePopover({
       {open && (
         <div
           className="draw-pop__panel"
-          onKeyDown={(e) => {
-            // Keep keys away from global chart shortcuts (Delete, Escape, Alt+…).
-            e.stopPropagation()
-            if (e.key !== 'Escape') return
-            e.preventDefault()
-            close(true)
-          }}
+          // Keeps every key away from global chart shortcuts (Delete, Escape, Alt+…).
+          onKeyDown={onPanelKeyDown}
         >
           <ul
             ref={listRef}

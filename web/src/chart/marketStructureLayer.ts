@@ -18,20 +18,6 @@
 // pivot), the pivot dot exists only once the swing is confirmed (it is in the result only from
 // then), and every marker sits on a closed bar at or after the bar that produced it.
 
-import type {
-  IChartApiBase,
-  IPrimitivePaneRenderer,
-  IPrimitivePaneView,
-  IRange,
-  ISeriesApi,
-  ISeriesPrimitive,
-  ITimeScaleApi,
-  Logical,
-  SeriesAttachedParameter,
-  SeriesType,
-  Time,
-  UTCTimestamp,
-} from 'lightweight-charts'
 import {
   MarketStructureEngine,
   structureParams,
@@ -48,13 +34,22 @@ import type {
 import type { IndicatorConfig } from '../state/indicators'
 import type { Candle } from '../types'
 import type { MarkersHandle } from './backtestOverlay'
+import {
+  CulledLayerPrimitive,
+  LayerHost,
+  NO_DASH,
+  clampX,
+  type BitmapScope,
+  type ChartCoords,
+} from './layers/base'
+import { toTime } from './points'
 import type { ChartMarker } from './seriesMarkers'
-import { BarLineage, closedBarCount } from './structureBars'
+import { BarLineage, closedBarCount, pushNewBars } from './structureBars'
 import type { ChartPalette } from './theme'
-import { sameViewSignature, viewSignature, type ViewSignature } from './viewSignature'
+import { isLightBackground } from './util/color'
+import { lowerBound, upperBound } from './util/search'
 
-type RenderTarget = Parameters<IPrimitivePaneRenderer['draw']>[0]
-type BitmapScope = Parameters<Parameters<RenderTarget['useBitmapCoordinateSpace']>[0]>[0]
+export type { PrimitiveHost } from './layers/base'
 
 /* ------------------------------------------------------------------------------------------ */
 /* Colours and toggles                                                                         */
@@ -71,14 +66,6 @@ export interface MarketStructureColors {
   light: boolean
 }
 
-/** Relative luminance of '#rrggbb' (0 black .. 1 white); other strings count as dark. */
-function luminance(hex: string): number {
-  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex)
-  if (m === null) return 0
-  const [r, g, b] = [m[1], m[2], m[3]].map((h) => parseInt(h, 16) / 255)
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b
-}
-
 /** Candle colours for direction, the muted text colour for neutral levels. */
 export function marketStructureColorsFor(
   palette: Pick<ChartPalette, 'up' | 'down' | 'mutedText' | 'background'>,
@@ -87,7 +74,7 @@ export function marketStructureColorsFor(
     up: palette.up,
     down: palette.down,
     neutral: palette.mutedText,
-    light: luminance(palette.background) > 0.5,
+    light: isLightBackground(palette.background),
   }
 }
 
@@ -145,7 +132,7 @@ export function structureMarkers(
       if (e.kind === 'bos' ? !show.bos : !show.choch) continue
       const up = e.direction === 'up'
       events.push({
-        time: e.time as UTCTimestamp,
+        time: toTime(e.time),
         position: up ? 'belowBar' : 'aboveBar',
         shape: up ? 'arrowUp' : 'arrowDown',
         color: up ? colors.up : colors.down,
@@ -159,7 +146,7 @@ export function structureMarkers(
     if (z.retestTime === null) continue
     const support = z.side === 'support'
     retests.push({
-      time: z.retestTime as UTCTimestamp,
+      time: toTime(z.retestTime),
       position: support ? 'belowBar' : 'aboveBar',
       shape: 'circle',
       color: support ? colors.up : colors.down,
@@ -262,15 +249,9 @@ export class IntervalIndex {
   query(from: number, to: number): number[] {
     const starts = this.starts
     // First index with start > to.
-    let lo = 0
-    let hi = starts.length
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1
-      if (starts[mid] <= to) lo = mid + 1
-      else hi = mid
-    }
+    const end = upperBound(starts.length, (k) => starts[k], to)
     const out: number[] = []
-    let i = lo - 1
+    let i = end - 1
     while (i >= 0) {
       const b = Math.floor(i / BLOCK)
       if (this.blockMax[b] < from) {
@@ -283,18 +264,6 @@ export class IntervalIndex {
     out.reverse()
     return out
   }
-}
-
-/** First index in [0, n) whose key is >= x (keys ascending). */
-function lowerBound(n: number, key: (i: number) => number, x: number): number {
-  let lo = 0
-  let hi = n
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (key(mid) < x) lo = mid + 1
-    else hi = mid
-  }
-  return lo
 }
 
 /**
@@ -407,11 +376,6 @@ export interface StructureGeometry {
   dots: PivotDotGeometry[]
 }
 
-/** Keeps far off-screen ends near the pane so the canvas never sees huge coordinates. */
-function clampX(x: number, width: number): number {
-  return Math.min(width + 2, Math.max(-2, x))
-}
-
 /** The parts of `view` that intersect the visible time range, in pane coordinates. */
 export function structureGeometry(
   view: StructureView,
@@ -494,9 +458,6 @@ const ZONE_EDGE_ALPHA = 0.55
 const LIGHT_FILL_SCALE = 0.8
 const LINE_ALPHA: Record<SwingLineState, number> = { active: 0.9, broken: 0.75, superseded: 0.35 }
 const DOT_RADIUS_PX = 2.25
-
-/** Solid lines. `setLineDash` copies its argument, so shared arrays are safe (never mutated). */
-const NO_DASH: number[] = []
 
 /** Dash patterns in device pixels for one horizontal pixel ratio. */
 interface DashSet {
@@ -611,218 +572,29 @@ export function drawStructure(
   ctx.restore()
 }
 
-class StructureRenderer implements IPrimitivePaneRenderer {
-  geom: StructureGeometry | null = null
-  colors: MarketStructureColors = DEFAULT_MARKET_STRUCTURE_COLORS
-
-  draw(target: RenderTarget): void {
-    const geom = this.geom
-    if (geom === null) return
-    target.useBitmapCoordinateSpace((scope) => drawStructure(scope, geom, this.colors))
-  }
-}
-
-class StructurePaneView implements IPrimitivePaneView {
-  readonly renderer_ = new StructureRenderer()
-
-  /** Under the candles and under the drawings (which use 'top'). */
-  zOrder(): 'bottom' {
-    return 'bottom'
-  }
-
-  renderer(): IPrimitivePaneRenderer {
-    return this.renderer_
-  }
-}
-
-type AttachedParam = Pick<SeriesAttachedParameter<Time>, 'chart' | 'series' | 'requestUpdate'>
-
 /**
- * Reference prices of the geometry cache's signature: positive (valid on a log scale) and
- * distinct; every price scale mode maps prices through a function fixed by two points.
+ * One instance's swing levels and flip zones on the main series, under the candles and under
+ * the drawings (which use 'top'). No `autoscaleInfo`, so old zones and levels never stretch the
+ * price scale. No hit test: it never takes clicks from the candles or the drawings. The
+ * geometry is cached behind the view signature (see `CulledLayerPrimitive`).
  */
-const REF_PRICES: readonly [number, number] = [1, 2]
-
-/** A visible time range in UNIX seconds. */
-type TimeRange = { readonly from: number; readonly to: number }
-
-/** True when the chart's visible range is in UNIX seconds (not null, not business days). */
-function isTimestampRange(r: IRange<Time> | null): r is IRange<UTCTimestamp> {
-  return r !== null && typeof r.from === 'number' && typeof r.to === 'number'
-}
-
-/**
- * `StructureCoords` over the chart, one per primitive (no closures per frame): `updateAllViews`
- * points it at the time scale and series and sets the range and width it already read.
- */
-class ChartStructureCoords implements StructureCoords {
-  ts: ITimeScaleApi<Time> | null = null
-  series: ISeriesApi<SeriesType, Time> | null = null
-  range: TimeRange | null = null
-  width = 0
-
-  visibleRange(): TimeRange | null {
-    return this.range
-  }
-
-  // Nearest plotted bar; logicalToCoordinate also places off-screen bars.
-  xOfTime(time: number): number | null {
-    const ts = this.ts
-    if (ts === null) return null
-    const index = ts.timeToIndex(time as Time, true)
-    return index === null ? null : ts.logicalToCoordinate(index as unknown as Logical)
-  }
-
-  yOfPrice(price: number): number | null {
-    return this.series === null ? null : this.series.priceToCoordinate(price)
-  }
-}
-
-/**
- * One instance's swing levels and flip zones on the main series. No `autoscaleInfo`, so old
- * zones and levels never stretch the price scale. No hit test: it never takes clicks from the
- * candles or the drawings.
- */
-export class MarketStructurePrimitive implements ISeriesPrimitive<Time> {
-  readonly uid: string
-  private viewData: StructureView | null = null
-  private visible = true
-  private chart: IChartApiBase<Time> | null = null
-  private series: ISeriesApi<SeriesType, Time> | null = null
-  private requestUpdate: (() => void) | null = null
-  private readonly paneView = new StructurePaneView()
-  private readonly paneViewList: readonly IPrimitivePaneView[] = [this.paneView]
-  /**
-   * Bumped whenever what the geometry is built from changes (view, visibility, colours,
-   * attach / detach); part of the geometry cache's signature.
-   */
-  private version = 0
-  /** The view signature and time range the current geometry was built for (null = none). */
-  private cachedSig: ViewSignature | null = null
-  private cachedRange: TimeRange | null = null
-  private readonly coordsAdapter = new ChartStructureCoords()
-  /** Geometry builds so far (tests: an unchanged view must not rebuild). */
-  private builds = 0
-
+export class MarketStructurePrimitive extends CulledLayerPrimitive<
+  StructureView,
+  StructureGeometry,
+  MarketStructureColors
+> {
   constructor(uid: string, colors: MarketStructureColors) {
-    this.uid = uid
-    this.paneView.renderer_.colors = colors
+    super(uid, { colors, paint: drawStructure, zOrder: 'bottom', snap: 'nearest' })
   }
 
-  attached(param: AttachedParam): void {
-    this.chart = param.chart
-    this.series = param.series
-    this.requestUpdate = param.requestUpdate
-    this.version += 1
-  }
-
-  detached(): void {
-    this.chart = null
-    this.series = null
-    this.requestUpdate = null
-    this.paneView.renderer_.geom = null
-    this.coordsAdapter.ts = null
-    this.coordsAdapter.series = null
-    this.version += 1
-  }
-
-  /** What the primitive draws (the same object until the result or the toggles change). */
-  view(): StructureView | null {
-    return this.viewData
-  }
-
-  isVisible(): boolean {
-    return this.visible
-  }
-
-  setView(view: StructureView | null): void {
-    if (view === this.viewData) return
-    this.viewData = view
-    this.version += 1
-    this.requestUpdate?.()
-  }
-
-  setVisible(visible: boolean): void {
-    if (visible === this.visible) return
-    this.visible = visible
-    this.version += 1
-    this.requestUpdate?.()
-  }
-
-  setColors(colors: MarketStructureColors): void {
-    this.paneView.renderer_.colors = colors
-    this.version += 1
-    this.requestUpdate?.()
-  }
-
-  /** The geometry drawn on the last frame (null = nothing drawn). */
-  geometry(): StructureGeometry | null {
-    return this.paneView.renderer_.geom
-  }
-
-  /** Geometry builds so far (tests, debugging). */
-  buildCount(): number {
-    return this.builds
-  }
-
-  /**
-   * Rebuilds the geometry only when the view moved: a drawing drag, a live tick or a hover
-   * change asks every primitive to update (a crosshair-only move repaints without calling
-   * this), and an unchanged signature (scroll position, bar
-   * spacing, width, two price coordinates, `version`) plus an unchanged visible time range
-   * means every coordinate the geometry reads is unchanged too.
-   */
-  updateAllViews(): void {
-    const view = this.viewData
-    const chart = this.chart
-    const series = this.series
-    const renderer = this.paneView.renderer_
-    if (!this.visible || view === null || chart === null || series === null) {
-      renderer.geom = null
-      this.cachedSig = null
-      return
-    }
-    const ts = chart.timeScale()
-    const r = ts.getVisibleRange()
-    // LWC returns a fresh range object per call; it is kept as is (read-only here).
-    if (!isTimestampRange(r)) {
-      // No bar in view: nothing to draw, nothing to build.
-      renderer.geom = null
-      this.cachedSig = null
-      return
-    }
-    const range: TimeRange = r
-    const sig = viewSignature(chart, series, REF_PRICES, this.version)
-    const prev = this.cachedRange
-    if (
-      prev !== null &&
-      range.from === prev.from &&
-      range.to === prev.to &&
-      sameViewSignature(sig, this.cachedSig)
-    )
-      return
-    const coords = this.coordsAdapter
-    coords.ts = ts
-    coords.series = series
-    coords.range = range
-    coords.width = sig?.width ?? ts.width()
-    renderer.geom = structureGeometry(view, coords)
-    this.builds += 1
-    this.cachedSig = sig
-    this.cachedRange = range
-  }
-
-  paneViews(): readonly IPrimitivePaneView[] {
-    return this.paneViewList
+  protected build(view: StructureView, coords: ChartCoords): StructureGeometry | null {
+    return structureGeometry(view, coords)
   }
 }
 
 /* ------------------------------------------------------------------------------------------ */
 /* Layer                                                                                       */
 /* ------------------------------------------------------------------------------------------ */
-
-/** The part of a series the layer uses (an `ISeriesApi` satisfies it). */
-export type PrimitiveHost = Pick<ISeriesApi<SeriesType>, 'attachPrimitive' | 'detachPrimitive'>
 
 interface Entry {
   primitive: MarketStructurePrimitive
@@ -852,6 +624,9 @@ interface Entry {
 
 const NO_MARKERS: readonly ChartMarker[] = Object.freeze([])
 
+/** The colour fields whose change is a new theme for the layer. */
+const COLOR_KEYS: readonly (keyof MarketStructureColors)[] = ['up', 'down', 'neutral', 'light']
+
 interface DerivedInputs {
   inputs: IndicatorInputs
   params: MarketStructureParams
@@ -876,10 +651,11 @@ function derivedInputs(entry: Entry, inputs: IndicatorInputs): DerivedInputs {
  * change, `setColors` on theme change. `markers` is the 'structure' channel of the shared
  * markers mux.
  */
-export class MarketStructureLayer {
-  private series: PrimitiveHost | null = null
-  private readonly entries = new Map<string, Entry>()
-  private colors: MarketStructureColors
+export class MarketStructureLayer extends LayerHost<
+  MarketStructureColors,
+  MarketStructurePrimitive,
+  Entry
+> {
   private readonly markersOut: MarkersHandle | null
   private merged: readonly ChartMarker[] = NO_MARKERS
   /** Uids that contributed to `merged`, in order, and their marker lists (by identity). */
@@ -898,31 +674,9 @@ export class MarketStructureLayer {
     markers: MarkersHandle | null = null,
     lineage: BarLineage = new BarLineage(),
   ) {
-    this.colors = colors
+    super(colors, COLOR_KEYS)
     this.markersOut = markers
     this.lineage = lineage
-  }
-
-  /** Attach every primitive to `series` (moving them off a previous one). */
-  attach(series: PrimitiveHost): void {
-    if (this.series === series) return
-    if (this.series !== null) this.detach()
-    this.series = series
-    for (const e of this.entries.values()) series.attachPrimitive(e.primitive)
-  }
-
-  /**
-   * Take the primitives off the series. `alive` false = the series (or the chart) has already
-   * been removed, so only the references are dropped. Results stay for the next attach.
-   */
-  detach(alive = true): void {
-    const series = this.series
-    this.series = null
-    if (series === null) return
-    for (const e of this.entries.values()) {
-      if (alive) series.detachPrimitive(e.primitive)
-      else e.primitive.detached()
-    }
   }
 
   /**
@@ -943,19 +697,7 @@ export class MarketStructureLayer {
     const closedLen = closedBarCount(bars, closedThrough)
     // Identity check per distinct previous array: free for the chart's own last step (the
     // lineage), else an O(n) pointer scan, once per sync.
-    const prefixOf = new Map<readonly Candle[], number>()
-    const prefixMatches = (entry: Entry): boolean => {
-      const n = entry.engine?.count ?? 0
-      if (n === 0) return true
-      if (closedLen < n || entry.synced === null) return false
-      const prev = entry.synced
-      let same = prefixOf.get(prev)
-      if (same === undefined) {
-        same = this.lineage.samePrefixLength(prev, bars)
-        prefixOf.set(prev, same)
-      }
-      return same >= n
-    }
+    const prefix = this.lineage.prefixChecks(bars, closedLen)
     const keep = new Set<string>()
     for (const config of configs) {
       const def = defs.get(config.type)
@@ -963,7 +705,7 @@ export class MarketStructureLayer {
       keep.add(config.uid)
       let entry = this.entries.get(config.uid)
       if (entry === undefined) {
-        entry = {
+        entry = this.add(config.uid, {
           primitive: new MarketStructurePrimitive(config.uid, this.colors),
           engine: null,
           paramsKey: '',
@@ -977,9 +719,7 @@ export class MarketStructureLayer {
           markersFrom: null,
           recomputes: 0,
           pushed: 0,
-        }
-        this.entries.set(config.uid, entry)
-        this.series?.attachPrimitive(entry.primitive)
+        })
       }
       entry.primitive.setVisible(config.visible)
       // Hidden instances draw nothing, give no markers and are not advanced until shown.
@@ -987,7 +727,11 @@ export class MarketStructureLayer {
 
       const derived = derivedInputs(entry, config.inputs)
       const key = derived.key
-      if (entry.engine === null || entry.paramsKey !== key || !prefixMatches(entry)) {
+      if (
+        entry.engine === null ||
+        entry.paramsKey !== key ||
+        !prefix.keeps(entry.synced, entry.engine.count)
+      ) {
         entry.engine = new MarketStructureEngine(derived.params)
         entry.paramsKey = key
         entry.spans = new StructureSpans()
@@ -995,10 +739,9 @@ export class MarketStructureLayer {
         entry.recomputes += 1
       }
       const engine = entry.engine
-      const n = engine.count
-      if (closedLen > n) {
-        for (let i = n; i < closedLen; i++) engine.push(bars[i])
-        entry.pushed += closedLen - n
+      const added = pushNewBars(engine, bars, closedLen)
+      if (added > 0) {
+        entry.pushed += added
         entry.version += 1
       }
       // The pushed bars are bars[0 .. count - 1] now.
@@ -1025,11 +768,7 @@ export class MarketStructureLayer {
 
       this.refreshMarkers(entry)
     }
-    for (const [uid, entry] of this.entries) {
-      if (keep.has(uid)) continue
-      this.series?.detachPrimitive(entry.primitive)
-      this.entries.delete(uid)
-    }
+    this.sweep(keep)
     this.lastConfigs = configs
     this.publishMarkers(configs)
   }
@@ -1080,20 +819,10 @@ export class MarketStructureLayer {
     entry.markersFrom = { version: entry.version, show: entry.show, colors: this.colors }
   }
 
-  setColors(colors: MarketStructureColors): void {
-    const c = this.colors
-    if (
-      c.up === colors.up &&
-      c.down === colors.down &&
-      c.neutral === colors.neutral &&
-      c.light === colors.light
-    )
-      return
-    this.colors = { ...colors }
-    for (const e of this.entries.values()) {
-      e.primitive.setColors(this.colors)
-      if (e.primitive.isVisible()) this.refreshMarkers(e)
-    }
+  /** New colours for every primitive, then the markers rebuilt in them and re-published. */
+  override setColors(colors: MarketStructureColors): void {
+    if (!this.applyColors(colors)) return
+    for (const e of this.entries.values()) if (e.primitive.isVisible()) this.refreshMarkers(e)
     this.publishMarkers(this.lastConfigs)
   }
 
@@ -1105,15 +834,6 @@ export class MarketStructureLayer {
   /** How many times several instances' markers were merged (tests). */
   mergeCount(): number {
     return this.merges
-  }
-
-  /** Uids with a primitive, in creation order (tests, debugging). */
-  uids(): string[] {
-    return [...this.entries.keys()]
-  }
-
-  primitiveOf(uid: string): MarketStructurePrimitive | undefined {
-    return this.entries.get(uid)?.primitive
   }
 
   /** The live result of `uid` (null before its first visible sync). */

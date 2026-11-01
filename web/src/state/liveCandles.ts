@@ -1,10 +1,5 @@
-import {
-  applyLiveCandle,
-  lowerBoundTime,
-  mergeCandlesKeepingUnchanged,
-  prependOlder,
-  upperBoundTime,
-} from '../data/candleStore'
+import { indexByTime, lowerBoundByTime, upperBoundByTime } from '../chart/util/search'
+import { applyLiveCandle, mergeCandlesKeepingUnchanged, prependOlder } from '../data/candleStore'
 import { plottableCandles } from '../data/plottable'
 import { MarketDataError } from '../data/provider'
 import type { CandleSource } from '../data/timeframeProvider'
@@ -163,8 +158,7 @@ function overlapsStart(existing: readonly Candle[], start: number): boolean {
 
 /** True when ascending `candles` has a bar opening at `time` (binary search). */
 function hasTime(candles: readonly Candle[], time: number): boolean {
-  const i = lowerBoundTime(candles, time)
-  return i < candles.length && candles[i].time === time
+  return indexByTime(candles, time) !== -1
 }
 
 /**
@@ -182,8 +176,8 @@ export function closedThroughOf(
   if (candles.length === 0) return null
   let min = Number.POSITIVE_INFINITY
   for (const t of unconfirmed) if (t < min) min = t
-  let end = min === Number.POSITIVE_INFINITY ? candles.length : lowerBoundTime(candles, min)
-  if (cap !== null) end = Math.min(end, upperBoundTime(candles, cap))
+  let end = min === Number.POSITIVE_INFINITY ? candles.length : lowerBoundByTime(candles, min)
+  if (cap !== null) end = Math.min(end, upperBoundByTime(candles, cap))
   return end === 0 ? null : candles[end - 1].time
 }
 

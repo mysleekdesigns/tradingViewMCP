@@ -21,8 +21,10 @@ import {
   type WhitespaceData,
 } from 'lightweight-charts'
 import type { DerivativesPoint } from '../data/labTypes'
+import { toTime } from './points'
 import { syncPoints } from './regimeRibbon'
 import { withHexAlpha, type ChartPalette } from './theme'
+import { lastIndexAtOrBeforeTime } from './util/search'
 
 /** What the chart draws: one point per closed bar sent to the lab (value null = no data). */
 export interface DerivativesOverlay {
@@ -136,7 +138,7 @@ export function fundingHistogramData(
   const out: (HistogramData<UTCTimestamp> | Whitespace)[] = []
   for (const p of points) {
     if (plotted !== undefined && !plotted.has(p.time)) continue
-    const time = p.time as UTCTimestamp
+    const time = toTime(p.time)
     if (p.value === null) {
       out.push({ time })
       continue
@@ -158,27 +160,10 @@ export function openInterestLineData(
   const out: (LineData<UTCTimestamp> | Whitespace)[] = []
   for (const p of points) {
     if (plotted !== undefined && !plotted.has(p.time)) continue
-    const time = p.time as UTCTimestamp
+    const time = toTime(p.time)
     out.push(p.value === null ? { time } : { time, value: p.value })
   }
   return out
-}
-
-/**
- * Index of the last point at or before `time` (binary search; points ascending), or -1.
- */
-function lastIndexAtOrBefore(points: readonly DerivativesPoint[], time: number): number {
-  let lo = 0
-  let hi = points.length - 1
-  let found = -1
-  while (lo <= hi) {
-    const mid = (lo + hi) >>> 1
-    if (points[mid].time <= time) {
-      found = mid
-      lo = mid + 1
-    } else hi = mid - 1
-  }
-  return found
 }
 
 /**
@@ -193,11 +178,11 @@ export function derivativesValueAt(
   lastPlotted: number | undefined,
 ): number | null {
   if (time !== undefined) {
-    const i = lastIndexAtOrBefore(points, time)
+    const i = lastIndexAtOrBeforeTime(points, time)
     return i >= 0 && points[i].time === time ? points[i].value : null
   }
   if (lastPlotted === undefined) return null
-  const i = lastIndexAtOrBefore(points, lastPlotted)
+  const i = lastIndexAtOrBeforeTime(points, lastPlotted)
   return i >= 0 ? points[i].value : null
 }
 
@@ -212,7 +197,7 @@ export function derivativesLatestAt(
   lastPlotted: number | undefined,
 ): { time: number; value: number } | null {
   if (lastPlotted === undefined) return null
-  for (let i = lastIndexAtOrBefore(points, lastPlotted); i >= 0; i--) {
+  for (let i = lastIndexAtOrBeforeTime(points, lastPlotted); i >= 0; i--) {
     const v = points[i].value
     if (v !== null) return { time: points[i].time, value: v }
   }

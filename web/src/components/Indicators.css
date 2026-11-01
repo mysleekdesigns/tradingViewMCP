@@ -1,5 +1,6 @@
 /* Indicators: header button, "Indicators" picker, per-indicator settings dialog.
    Colours and fonts come from the variables in src/index.css. */
+/* Shared chrome (icon button, tabs, dialog, focus ring, scrollbar, panel head): primitives.css. */
 
 /* ---------- Header button ---------- */
 
@@ -26,11 +27,6 @@
   background: var(--fill);
 }
 
-.ind-btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
 .ind-btn__icon {
   color: var(--text);
 }
@@ -52,45 +48,20 @@
   padding-top: 16px;
 }
 
-.ind-dialog {
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel);
-  box-shadow: 0 24px 64px var(--shadow-strong);
-  overflow: hidden;
-  animation: dialog-in 140ms ease-out;
-}
-
-.ind-dialog:focus {
-  outline: none;
-}
-
 .ind-dialog__head {
-  display: flex;
-  align-items: center;
   gap: 12px;
   padding: 12px 12px 8px 18px;
 }
 
 .ind-dialog__title {
-  flex: 1;
-  min-width: 0;
-  margin: 0;
   overflow: hidden;
-  font-size: 16px;
-  font-weight: 600;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .ind-dialog__foot {
-  display: flex;
   flex-wrap: wrap;
   gap: 16px;
   padding: 8px 18px;
-  border-top: 1px solid var(--border);
   color: var(--text-faint);
   font-size: 11px;
 }
@@ -337,51 +308,19 @@
 }
 
 .ind-tabs {
-  display: flex;
   flex: none;
-  gap: 4px;
   padding: 0 14px;
   border-bottom: 1px solid var(--border);
 }
 
 .ind-tabs__tab {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
   height: 34px;
   padding: 0 8px;
-  border: 0;
-  background: transparent;
-  color: var(--text-muted);
-  font: inherit;
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.ind-tabs__tab:hover {
-  color: var(--text);
-}
-
-.ind-tabs__tab[aria-selected='true'] {
-  color: var(--text);
 }
 
 .ind-tabs__tab[aria-selected='true']::after {
-  position: absolute;
   right: 6px;
-  bottom: -1px;
   left: 6px;
-  height: 2px;
-  border-radius: 2px 2px 0 0;
-  background: var(--accent);
-  content: '';
-}
-
-.ind-tabs__tab:focus-visible {
-  border-radius: 4px;
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
 }
 
 .ind-tabs__badge {
@@ -570,11 +509,6 @@
   opacity: 1;
 }
 
-.ind-check:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
 .ind-check--invalid {
   border-color: var(--down);
 }
@@ -593,11 +527,6 @@
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--bg);
-}
-
-.ind-swatch:focus-within {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 
 .ind-swatch__input {

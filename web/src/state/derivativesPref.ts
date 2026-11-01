@@ -3,40 +3,25 @@
 
 import type { VenueInfo } from '../data/venue'
 import { labOnChart } from './appSettings'
+import { storedValue, type ValueStorage } from './storedValue'
 
 export const DERIVATIVES_PREF_KEY = 'tv.derivatives.v1'
 
-export type DerivativesStorage = Pick<Storage, 'getItem' | 'setItem'>
+export type DerivativesStorage = ValueStorage
 
-function defaultStorage(): DerivativesStorage | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage
-  } catch {
-    return null
-  }
-}
+/** Saved as JSON `true` / `false`; anything else reads as off. */
+export const derivativesOnStored = storedValue<boolean>(DERIVATIVES_PREF_KEY, {
+  parse: (raw) => raw === true,
+  fallback: () => false,
+})
 
 /** True when the panes were on at the last visit; off when never saved or unreadable. */
-export function loadDerivativesOn(storage: DerivativesStorage | null = defaultStorage()): boolean {
-  if (!storage) return false
-  try {
-    const raw = storage.getItem(DERIVATIVES_PREF_KEY)
-    return raw !== null && (JSON.parse(raw) as unknown) === true
-  } catch {
-    return false
-  }
+export function loadDerivativesOn(storage?: DerivativesStorage | null): boolean {
+  return derivativesOnStored.load(storage)
 }
 
-export function saveDerivativesOn(
-  on: boolean,
-  storage: DerivativesStorage | null = defaultStorage(),
-): void {
-  if (!storage) return
-  try {
-    storage.setItem(DERIVATIVES_PREF_KEY, JSON.stringify(on))
-  } catch {
-    // Quota exceeded or storage disabled: keep it in memory only.
-  }
+export function saveDerivativesOn(on: boolean, storage?: DerivativesStorage | null): void {
+  derivativesOnStored.save(on, storage)
 }
 
 /**

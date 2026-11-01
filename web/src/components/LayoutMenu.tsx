@@ -1,5 +1,6 @@
-import { memo, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
+import { memo, useId, type KeyboardEvent } from 'react'
 import { LAYOUT_KINDS, type LayoutKind } from '../state/layout'
+import { roveFocus, useMenu } from './useMenu'
 import './Layout.css'
 
 const LAYOUT_LABELS: Record<LayoutKind, string> = {
@@ -12,6 +13,11 @@ const LAYOUT_SHORT: Record<LayoutKind, string> = {
   '1': '1',
   '2': '2',
   '4': '2×2',
+}
+
+/** Focus the current layout tile so arrows start from it. */
+function focusCheckedTile(menu: HTMLElement): void {
+  menu.querySelector<HTMLElement>('[aria-checked="true"]')?.focus()
 }
 
 interface LayoutMenuProps {
@@ -32,27 +38,9 @@ export const LayoutMenu = memo(function LayoutMenu({
   syncCrosshair,
   onSyncCrosshairChange,
 }: LayoutMenuProps) {
-  const [open, setOpen] = useState(false)
-  const rootRef = useRef<HTMLDivElement>(null)
-  const buttonRef = useRef<HTMLButtonElement>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
+  const { open, rootRef, buttonRef, menuRef, openMenu, close, toggle, onMenuKey } =
+    useMenu<HTMLDivElement>({ focusOnOpen: focusCheckedTile })
   const menuId = useId()
-
-  useEffect(() => {
-    if (!open) return
-    // Focus the current layout tile so arrows start from it.
-    menuRef.current?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus()
-    const onPointerDown = (e: PointerEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('pointerdown', onPointerDown)
-    return () => document.removeEventListener('pointerdown', onPointerDown)
-  }, [open])
-
-  const close = (refocus: boolean) => {
-    setOpen(false)
-    if (refocus) buttonRef.current?.focus()
-  }
 
   const pickKind = (next: LayoutKind) => {
     close(true)
@@ -62,7 +50,7 @@ export const LayoutMenu = memo(function LayoutMenu({
   const onButtonKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
-      setOpen(true)
+      openMenu()
     }
   }
 
@@ -71,36 +59,7 @@ export const LayoutMenu = memo(function LayoutMenu({
     const items = Array.from(
       menuRef.current?.querySelectorAll<HTMLElement>('[data-menu-item]') ?? [],
     )
-    const at = items.indexOf(document.activeElement as HTMLElement)
-    const move = (i: number) => items[(i + items.length) % items.length]?.focus()
-    switch (e.key) {
-      case 'ArrowDown':
-      case 'ArrowRight':
-        e.preventDefault()
-        move(at + 1)
-        break
-      case 'ArrowUp':
-      case 'ArrowLeft':
-        e.preventDefault()
-        move(at - 1)
-        break
-      case 'Home':
-        e.preventDefault()
-        move(0)
-        break
-      case 'End':
-        e.preventDefault()
-        move(items.length - 1)
-        break
-      case 'Escape':
-        e.preventDefault()
-        e.stopPropagation()
-        close(true)
-        break
-      case 'Tab':
-        close(false)
-        break
-    }
+    if (!roveFocus(e, items, document.activeElement, true)) onMenuKey(e)
   }
 
   return (
@@ -114,7 +73,7 @@ export const LayoutMenu = memo(function LayoutMenu({
         aria-controls={open ? menuId : undefined}
         aria-label={`Chart layout: ${LAYOUT_LABELS[kind]}`}
         title="Chart layout and sync"
-        onClick={() => (open ? close(false) : setOpen(true))}
+        onClick={toggle}
         onKeyDown={onButtonKeyDown}
       >
         <LayoutGlyph kind={kind} size={18} />

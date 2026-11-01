@@ -22,6 +22,7 @@ import type {
   Time,
 } from 'lightweight-charts'
 import { drawingObjectId } from '../hover'
+import { NO_DASH, hLine, type BitmapScope, type RenderTarget } from '../layers/base'
 import { colors, fontFamily, handleColorsFor, handleStroke, type HandleColors } from '../theme'
 import type { DrawingsView, HoverHit } from './controller'
 import {
@@ -39,9 +40,6 @@ import {
 } from './geometry'
 import { ShapeCache, type ShapesFrame } from './shapeCache'
 import { FIB_LEVELS, type Drawing, type DrawingStyle, type LineStyleName } from './types'
-
-type RenderTarget = Parameters<IPrimitivePaneRenderer['draw']>[0]
-type BitmapScope = Parameters<Parameters<RenderTarget['useBitmapCoordinateSpace']>[0]>[0]
 
 /** What the primitive needs from the interaction layer. DrawingController satisfies it. */
 export interface DrawingsSource {
@@ -119,8 +117,6 @@ const RECT_FILL_ALPHA = 0.16
 const FIB_FILL_ALPHAS = [0.06, 0.11] as const
 /** Opacity of the fib's anchor-to-anchor line. */
 const FIB_TREND_ALPHA = 0.5
-/** setLineDash copies its argument, so one shared empty pattern serves every solid stroke. */
-const NO_DASH: number[] = []
 
 function samePaintStyle(p: Paint, kind: Drawing['kind'], style: DrawingStyle): boolean {
   return (
@@ -532,17 +528,6 @@ function strokeSetup(scope: BitmapScope, paint: Paint): number {
   ctx.lineCap = 'butt'
   ctx.setLineDash(scaledDash(paint, ratio))
   return width
-}
-
-/** Crisp horizontal line from media x0 to x1 at media y. */
-function hLine(scope: BitmapScope, x0: number, x1: number, y: number, lineWidth: number): void {
-  const ctx = scope.context
-  const offset = lineWidth % 2 ? 0.5 : 0
-  const yb = Math.round(y * scope.verticalPixelRatio) + offset
-  ctx.beginPath()
-  ctx.moveTo(Math.round(x0 * scope.horizontalPixelRatio), yb)
-  ctx.lineTo(Math.round(x1 * scope.horizontalPixelRatio), yb)
-  ctx.stroke()
 }
 
 function segment(scope: BitmapScope, x1: number, y1: number, x2: number, y2: number): void {

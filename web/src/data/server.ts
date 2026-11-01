@@ -1,5 +1,5 @@
 import type { Candle, ConnectionStatus, Interval, SymbolInfo, Ticker } from '../types'
-import { DEFAULT_STALE_TIMEOUT_MS, openReconnectingSocket } from './binanceStream'
+import { DEFAULT_STALE_TIMEOUT_MS, openReconnectingSocket, resolveWebSocket } from './binanceStream'
 import { normalizeSymbol } from './binanceTicker'
 import {
   MarketDataError,
@@ -8,6 +8,8 @@ import {
   type SubscribeOptions,
   type TickerSubscribeOptions,
 } from './provider'
+import { dedupeByTime, isFiniteNumber, isRecord, nonNegative } from './guards'
+import { SharedLoad, clampLimit, parseRetryAfter, requestMarketJson } from './http'
 import { parseVenueInfo, type VenueInfo } from './venue'
 
 /**
@@ -36,30 +38,6 @@ const SERVER_ERROR_KINDS: ReadonlySet<MarketDataErrorKind> = new Set<MarketDataE
   'http',
   'parse',
 ])
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === 'object' && !Array.isArray(v)
-}
-
-function isFiniteNumber(v: unknown): v is number {
-  return typeof v === 'number' && Number.isFinite(v)
-}
-
-function nonNegative(v: unknown): number | undefined {
-  return isFiniteNumber(v) && v >= 0 ? v : undefined
-}
-
-/** `Retry-After` delta-seconds; undefined when absent or invalid. */
-function parseRetryAfterHeader(res: Response): number | undefined {
-  const raw = res.headers.get('Retry-After')
-  if (raw === null || raw.trim() === '') return undefined
-  return nonNegative(Number(raw))
-}
-
-function clampLimit(limit: number): number {
-  if (!Number.isFinite(limit)) return DEFAULT_LIMIT
-  return Math.min(MAX_LIMIT, Math.max(1, Math.floor(limit)))
-}
 
 /** A server Candle (all numbers finite), or null. */
 export function toCandle(v: unknown): Candle | null {
@@ -202,40 +180,31 @@ export function parseStreamMessage(
   }
 }
 
-/** Reject with kind 'aborted' when `signal` aborts before `p` settles. */
-function withAbort<T>(p: Promise<T>, signal: AbortSignal | undefined, what: string): Promise<T> {
-  if (!signal) return p
-  const aborted = () => new MarketDataError('aborted', `Request for ${what} was cancelled`)
-  if (signal.aborted) return Promise.reject(aborted())
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(aborted())
-    signal.addEventListener('abort', onAbort, { once: true })
-    p.then(
-      (v) => {
-        signal.removeEventListener('abort', onAbort)
-        resolve(v)
-      },
-      (e: unknown) => {
-        signal.removeEventListener('abort', onAbort)
-        reject(e instanceof Error ? e : new Error(String(e)))
-      },
-    )
-  })
-}
-
 export class ServerProvider implements MarketDataProvider {
   private readonly baseUrl: string
   private readonly fetchImpl: typeof fetch
   private readonly WebSocketImpl: typeof WebSocket | undefined
   private readonly staleTimeoutMs: number
   private readonly timeoutMs: number
-  /** Memoized symbol list; cleared when the fetch fails so the next call retries. */
-  private symbolsPromise: Promise<SymbolInfo[]> | null = null
+  /** Memoized symbol list; forgotten when the fetch fails so the next call retries. */
+  private readonly symbols = new SharedLoad(() =>
+    this.requestJson('/api/symbols', null, 'symbols').then((body) =>
+      parseArray(body, toSymbolInfo, 'symbols'),
+    ),
+  )
   /**
-   * Memoized `/api/health` venue lookup, shared by `getVenue` and the candle URLs; cleared when
-   * it fails so the next caller retries.
+   * Memoized `/api/health` venue lookup, shared by `getVenue` and the candle URLs; forgotten
+   * when it fails so the next caller retries. Records `venueId` when the server reports a
+   * usable id.
    */
-  private venuePromise: Promise<VenueInfo> | null = null
+  private readonly venue = new SharedLoad(() =>
+    this.requestJson('/api/health', null, 'server health').then((body) => {
+      const venue = isRecord(body) ? parseVenueInfo(body.venue) : null
+      if (venue === null) throw new MarketDataError('parse', 'Server health has no venue')
+      if (VENUE_ID_RE.test(venue.id)) this.venueId = venue.id
+      return venue
+    }),
+  )
   /**
    * The server's venue id once the lookup succeeded. Sent as `venue` on closed-history pages
    * (`endTime` set), which makes the server's `immutable` caching safe across a venue switch:
@@ -268,21 +237,13 @@ export class ServerProvider implements MarketDataProvider {
     return `${scheme}://${location.host}`
   }
 
-  private resolveWebSocket(caller: string): typeof WebSocket {
-    const WS = this.WebSocketImpl ?? globalThis.WebSocket
-    if (typeof WS !== 'function') {
-      throw new Error(`${caller}: WebSocket is not available in this environment`)
-    }
-    return WS
-  }
-
   /**
    * GET `path?params` and return the parsed JSON body. Caller abort -> 'aborted';
    * timeout/transport -> 'network'; non-2xx -> the server's `{error, message, retryAfter}`
    * (unknown kind -> 'http'; `Retry-After` header used when the body has no retryAfter);
    * unparseable 2xx body -> 'parse'.
    */
-  private async requestJson(
+  private requestJson(
     path: string,
     params: URLSearchParams | null,
     what: string,
@@ -290,40 +251,16 @@ export class ServerProvider implements MarketDataProvider {
     cache?: RequestCache,
   ): Promise<unknown> {
     const query = params ? `?${params.toString()}` : ''
-    const url = `${this.baseUrl}${path}${query}`
-    if (callerSignal?.aborted) {
-      throw new MarketDataError('aborted', `Request for ${what} was cancelled`)
-    }
-    const timeout = AbortSignal.timeout(this.timeoutMs)
-    const signal = callerSignal ? AbortSignal.any([callerSignal, timeout]) : timeout
-
-    let res: Response
-    try {
-      res = await this.fetchImpl(url, cache === undefined ? { signal } : { signal, cache })
-    } catch (err) {
-      if (callerSignal?.aborted) {
-        throw new MarketDataError('aborted', `Request for ${what} was cancelled`)
-      }
-      if (timeout.aborted) {
-        throw new MarketDataError(
-          'network',
-          `Timed out after ${this.timeoutMs} ms fetching ${what}`,
-        )
-      }
-      const detail = err instanceof Error ? err.message : String(err)
-      throw new MarketDataError('network', `Network error fetching ${what}: ${detail}`)
-    }
-
-    if (!res.ok) throw await this.toError(res, what)
-
-    try {
-      return (await res.json()) as unknown
-    } catch {
-      if (callerSignal?.aborted) {
-        throw new MarketDataError('aborted', `Request for ${what} was cancelled`)
-      }
-      throw new MarketDataError('parse', `Invalid JSON in ${what} response`)
-    }
+    return requestMarketJson({
+      fetchFn: this.fetchImpl,
+      url: `${this.baseUrl}${path}${query}`,
+      what,
+      timeoutMs: this.timeoutMs,
+      signal: callerSignal,
+      cache,
+      callerAbortWins: true,
+      toError: (res) => this.toError(res, what),
+    })
   }
 
   private async toError(res: Response, what: string): Promise<MarketDataError> {
@@ -333,7 +270,7 @@ export class ServerProvider implements MarketDataProvider {
     } catch {
       body = undefined
     }
-    const headerRetry = parseRetryAfterHeader(res)
+    const headerRetry = parseRetryAfter(res)
     if (!isRecord(body)) {
       return new MarketDataError(
         'http',
@@ -362,7 +299,11 @@ export class ServerProvider implements MarketDataProvider {
     opts?: { signal?: AbortSignal },
   ): Promise<Candle[]> {
     const sym = symbol.trim().toUpperCase()
-    const params = new URLSearchParams({ symbol: sym, interval, limit: String(clampLimit(limit)) })
+    const params = new URLSearchParams({
+      symbol: sym,
+      interval,
+      limit: String(clampLimit(limit, MAX_LIMIT, DEFAULT_LIMIT)),
+    })
     // Server API takes UNIX seconds, like the provider interface.
     let venueUnknown = false
     if (endTime !== undefined && Number.isFinite(endTime)) {
@@ -381,18 +322,13 @@ export class ServerProvider implements MarketDataProvider {
       venueUnknown ? 'no-cache' : undefined,
     )
     // Never waits for the venue: this page goes out without it, later pages carry it.
-    if (venueUnknown) this.lookupVenue().catch(() => undefined)
+    if (venueUnknown) this.venue.get().catch(() => undefined)
     const body = await pending
     const candles = parseArray(body, toCandle, `${sym} candles`)
     // The contract promises ascending unique times; enforce it since Lightweight Charts
     // throws on duplicates (later row wins).
     candles.sort((a, b) => a.time - b.time)
-    const out: Candle[] = []
-    for (const c of candles) {
-      if (out.length > 0 && out[out.length - 1].time === c.time) out[out.length - 1] = c
-      else out.push(c)
-    }
-    return out
+    return dedupeByTime(candles)
   }
 
   /**
@@ -400,19 +336,7 @@ export class ServerProvider implements MarketDataProvider {
    * aborting must not cancel it for others); each caller's signal only rejects its own promise.
    */
   getSymbols(opts?: { signal?: AbortSignal }): Promise<SymbolInfo[]> {
-    if (opts?.signal?.aborted) {
-      return Promise.reject(new MarketDataError('aborted', 'Request for symbols was cancelled'))
-    }
-    if (this.symbolsPromise === null) {
-      const p = this.requestJson('/api/symbols', null, 'symbols').then((body) =>
-        parseArray(body, toSymbolInfo, 'symbols'),
-      )
-      this.symbolsPromise = p
-      p.catch(() => {
-        if (this.symbolsPromise === p) this.symbolsPromise = null
-      })
-    }
-    return withAbort(this.symbolsPromise, opts?.signal, 'symbols')
+    return this.symbols.join(opts?.signal, 'symbols')
   }
 
   /**
@@ -421,32 +345,7 @@ export class ServerProvider implements MarketDataProvider {
    * next call retries. Each caller's signal only rejects its own promise.
    */
   getVenue(opts?: { signal?: AbortSignal }): Promise<VenueInfo> {
-    if (opts?.signal?.aborted) {
-      return Promise.reject(
-        new MarketDataError('aborted', 'Request for server health was cancelled'),
-      )
-    }
-    return withAbort(this.lookupVenue(), opts?.signal, 'server health')
-  }
-
-  /** The memoized venue lookup; records `venueId` when the server reports a usable id. */
-  private lookupVenue(): Promise<VenueInfo> {
-    if (this.venuePromise === null) {
-      const p = this.requestJson('/api/health', null, 'server health').then((body) => {
-        const venue =
-          body !== null && typeof body === 'object' && !Array.isArray(body)
-            ? parseVenueInfo((body as { venue?: unknown }).venue)
-            : null
-        if (venue === null) throw new MarketDataError('parse', 'Server health has no venue')
-        if (VENUE_ID_RE.test(venue.id)) this.venueId = venue.id
-        return venue
-      })
-      this.venuePromise = p
-      p.catch(() => {
-        if (this.venuePromise === p) this.venuePromise = null
-      })
-    }
-    return this.venuePromise
+    return this.venue.join(opts?.signal, 'server health')
   }
 
   async getTickers(symbols: readonly string[], opts?: { signal?: AbortSignal }): Promise<Ticker[]> {
@@ -471,7 +370,7 @@ export class ServerProvider implements MarketDataProvider {
     onCandle: (c: Candle, closed: boolean) => void,
     opts?: SubscribeOptions,
   ): () => void {
-    const WS = this.resolveWebSocket('subscribeCandles')
+    const WS = resolveWebSocket(this.WebSocketImpl, 'subscribeCandles')
     const sym = symbol.trim().toUpperCase()
     const params = new URLSearchParams({ symbol: sym, interval })
     return this.openStream(
@@ -499,7 +398,7 @@ export class ServerProvider implements MarketDataProvider {
     onTickers: (tickers: Ticker[]) => void,
     opts?: TickerSubscribeOptions,
   ): () => void {
-    const BaseWS = this.resolveWebSocket('subscribeTickers')
+    const BaseWS = resolveWebSocket(this.WebSocketImpl, 'subscribeTickers')
     const getSymbols = opts?.symbols
     let disposed = false
     /** The newest socket (older ones are discarded by the reconnecting socket). */

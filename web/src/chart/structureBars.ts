@@ -5,6 +5,7 @@ import { knownSamePrefix as storeSamePrefix, samePrefixLength } from '../data/ca
 import type { LiveCandlesSnapshot } from '../state/liveCandles'
 import type { Candle } from '../types'
 import type { SeriesSyncPlan } from './seriesSync'
+import { upperBoundByTime } from './util/search'
 
 /**
  * The `closedThrough` time the chart's market-structure layer gets (it uses plotted bars with
@@ -29,14 +30,7 @@ export function structureClosedThrough(
 /** How many leading bars of ascending `bars` open at or before `closedThrough` (0 for null). */
 export function closedBarCount(bars: readonly Candle[], closedThrough: number | null): number {
   if (closedThrough === null) return 0
-  let lo = 0
-  let hi = bars.length
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (bars[mid].time <= closedThrough) lo = mid + 1
-    else hi = mid
-  }
-  return lo
+  return upperBoundByTime(bars, closedThrough)
 }
 
 /**
@@ -83,6 +77,66 @@ export class BarLineage {
     if (older === this.prev && newer === this.next) return this.same
     return storeSamePrefix(older, newer)
   }
+
+  /**
+   * The prefix checks of one sync against `bars`, of which only the first `usable` may be
+   * read (the closed bars): see `PrefixChecks`. Make one per sync; it holds `bars`.
+   */
+  prefixChecks(bars: readonly Candle[], usable: number): PrefixChecks {
+    return new PrefixChecks(this, bars, usable)
+  }
+}
+
+/**
+ * "Are the bars an engine already pushed still the first bars?" for every instance of one
+ * layer sync. `keeps(synced, n)` is true when the engine pushed nothing (n 0), or when the
+ * first `n` bars of `synced` (the array the engine was last synced with) are the same objects
+ * as the first `n` of the sync's bars and all of them are still usable (a `closedThrough` that
+ * moved back fails). The identity prefix is asked of the lineage (free for the chart's own last
+ * step, else an O(n) pointer scan) once per distinct `synced` array, so instances synced
+ * together share one scan.
+ */
+export class PrefixChecks {
+  private readonly lineage: BarLineage
+  private readonly bars: readonly Candle[]
+  private readonly usable: number
+  /** Identity prefix of each `synced` array asked about so far (made on first use). */
+  private memo: Map<readonly Candle[], number> | null = null
+
+  constructor(lineage: BarLineage, bars: readonly Candle[], usable: number) {
+    this.lineage = lineage
+    this.bars = bars
+    this.usable = usable
+  }
+
+  keeps(synced: readonly Candle[] | null, n: number): boolean {
+    if (n === 0) return true
+    if (this.usable < n || synced === null) return false
+    const memo = (this.memo ??= new Map())
+    let same = memo.get(synced)
+    if (same === undefined) {
+      same = this.lineage.samePrefixLength(synced, this.bars)
+      memo.set(synced, same)
+    }
+    return same >= n
+  }
+}
+
+/** An incremental engine fed one closed bar at a time (market structure, session ranges). */
+export interface BarEngine {
+  readonly count: number
+  push(bar: Candle): void
+}
+
+/**
+ * Push `bars[engine.count .. usable - 1]` (the usable bars the engine has not seen) into
+ * `engine`, in order; returns how many were pushed (0 when it is up to date).
+ */
+export function pushNewBars(engine: BarEngine, bars: readonly Candle[], usable: number): number {
+  const n = engine.count
+  if (usable <= n) return 0
+  for (let i = n; i < usable; i++) engine.push(bars[i])
+  return usable - n
 }
 
 /**

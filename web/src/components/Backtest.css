@@ -4,6 +4,7 @@
  * and the equity-pane legend, which the app needs before the panel loads, are in
  * BacktestShell.css. Palette and fonts from index.css.
  */
+/* Shared chrome (icon button, tabs, dialog, focus ring, scrollbar, panel head): primitives.css. */
 
 /* ---------- While the dock's top edge is dragged (BacktestPanel sets the class) ---------- */
 
@@ -50,30 +51,11 @@ body.tester-resizing * {
 }
 
 .tester__head {
-  flex: none;
-  display: flex;
-  align-items: center;
   gap: 8px;
-  height: 38px;
   padding: 0 6px 0 var(--t-pad);
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.tester__head-icon {
-  display: inline-grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
 }
 
 .tester__title {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
   white-space: nowrap;
 }
 
@@ -120,90 +102,15 @@ body.tester-resizing * {
 }
 
 /* Tabs */
-.tester__tabs {
-  display: flex;
-  align-self: stretch;
-  gap: 2px;
-  margin-left: 10px;
-  min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.tester__tab {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 10px;
-  border: 0;
-  background: transparent;
-  color: var(--text-muted);
-  font: inherit;
-  font-weight: 500;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.tester__tab:hover {
-  color: var(--text);
-}
-
-.tester__tab[aria-selected='true'] {
-  color: var(--text);
-}
 
 .tester__tab[aria-selected='true']::after {
-  position: absolute;
   right: 8px;
-  bottom: -1px;
   left: 8px;
-  height: 2px;
-  border-radius: 2px 2px 0 0;
-  background: var(--accent);
-  content: '';
-}
-
-.tester__tab:focus-visible {
-  border-radius: 4px;
-  outline: 2px solid var(--accent);
-  outline-offset: -4px;
-}
-
-.tester__tab-count {
-  min-width: 14px;
-  padding: 0 4px;
-  border-radius: 7px;
-  background: var(--fill);
-  color: var(--text-muted);
-  font-family: var(--font-num);
-  font-size: 10px;
-  line-height: 15px;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
 }
 
 /* Buttons */
 .tester__icon-btn {
-  display: inline-grid;
   flex: none;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  transition:
-    background-color 120ms ease,
-    color 120ms ease;
-}
-
-.tester__icon-btn:hover:not(:disabled) {
-  background: var(--panel-hover);
-  color: var(--text);
 }
 
 .tester__icon-btn:disabled {
@@ -272,14 +179,6 @@ body.tester-resizing * {
   opacity: 0.45;
 }
 
-.tester__icon-btn:focus-visible,
-.tester__btn:focus-visible,
-.tester__text-btn:focus-visible,
-.tester__run:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
 /* ---------- Body: editor | results ---------- */
 
 .tester__body {
@@ -298,8 +197,6 @@ body.tester-resizing * {
   padding: 8px 10px 10px var(--t-pad);
   border-right: 1px solid var(--border-soft);
   overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--panel-hover) transparent;
 }
 
 .tester__editor-bar {
@@ -356,8 +253,6 @@ body.tester-resizing * {
   resize: none;
   white-space: pre;
   overflow: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--panel-hover) transparent;
 }
 
 .tester__plan:hover {
@@ -463,8 +358,6 @@ body.tester-resizing * {
   max-height: 220px;
   padding: 4px 8px 8px;
   overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--panel-hover) transparent;
 }
 
 .tester__features {
@@ -621,8 +514,6 @@ body.tester-resizing * {
   padding: 0 var(--t-pad) 10px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: var(--panel-hover) transparent;
 }
 
 .tester__report-bar {
@@ -762,38 +653,16 @@ body.tester-resizing * {
 
 /* Empty state */
 .tester__empty {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
   min-height: 140px;
   padding: 16px;
-  text-align: center;
 }
 
 .tester__empty-icon {
-  display: inline-grid;
-  place-items: center;
-  width: 48px;
-  height: 48px;
-  margin-bottom: 4px;
   border-radius: 12px;
-  background: var(--fill);
-  color: var(--text-muted);
-}
-
-.tester__empty-title {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
 }
 
 .tester__empty-text {
   max-width: 420px;
-  margin: 0;
-  color: var(--text-muted);
   line-height: 1.5;
 }
 
@@ -887,8 +756,6 @@ body.tester-resizing * {
 .tester__table-wrap {
   min-width: 0;
   overflow-x: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--panel-hover) transparent;
 }
 
 .tester__table-wrap--fill {
@@ -984,11 +851,6 @@ body.tester-resizing * {
 
 .tester__row--link {
   cursor: pointer;
-}
-
-.tester__row--link:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
 }
 
 .tester__cell-name {

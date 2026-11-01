@@ -1,4 +1,5 @@
 import type { Candle, ConnectionStatus } from '../types'
+import { finite, isRecord } from './guards'
 
 const BACKOFF_BASE_MS = 1_000
 const BACKOFF_CAP_MS = 30_000
@@ -9,16 +10,19 @@ const OFFLINE_AFTER_FAILURES = 5
 /** WebSocket.OPEN; a literal so injected WebSocket implementations need not define it. */
 const WS_OPEN = 1
 
-/** Strict numeric field: finite number or non-empty numeric string, else null. */
-function finite(value: unknown): number | null {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  if (typeof value !== 'string' || value.trim() === '') return null
-  const n = Number(value)
-  return Number.isFinite(n) ? n : null
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === 'object' && !Array.isArray(v)
+/**
+ * The WebSocket class to use: `impl` when given, else the global one. Throws (naming `caller`)
+ * when neither exists.
+ */
+export function resolveWebSocket(
+  impl: typeof WebSocket | undefined,
+  caller: string,
+): typeof WebSocket {
+  const WS = impl ?? globalThis.WebSocket
+  if (typeof WS !== 'function') {
+    throw new Error(`${caller}: WebSocket is not available in this environment`)
+  }
+  return WS
 }
 
 /**

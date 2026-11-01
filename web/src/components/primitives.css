@@ -1,0 +1,571 @@
+/*
+ * Shared UI primitives: the chrome several panels and dialogs repeat word for word. Each block
+ * lists the existing component classes (no new class names), so the components keep their
+ * markup and their own specificity; only the shared declarations live here. What differs per
+ * component (sizes, paddings, insets) stays in its own stylesheet, which loads after this file.
+ *
+ * Loaded first, via the @import at the top of index.css. Moving a declaration here moves it
+ * earlier in the cascade, so a selector belongs in a block only while no rule between here and
+ * its old place, with the same specificity, sets the same property on the same element.
+ */
+
+/* ---------- Icon button ---------- */
+
+/* Square, borderless, transparent until hovered; the groups below (or the component) size it. */
+.alerts__icon-btn,
+.paper__icon-btn,
+.research__icon-btn,
+.tester__icon-btn,
+.watchlist__icon-btn,
+.alert-row__btn,
+.alert-toast__close,
+.paper-row__icon,
+.draw-rail__btn,
+.replay-bar__btn,
+.side-rail__btn {
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+/* 28px: panel toolbars. */
+.alerts__icon-btn,
+.paper__icon-btn,
+.research__icon-btn,
+.tester__icon-btn,
+.watchlist__icon-btn {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  color: var(--text-muted);
+}
+
+/* 22px: row and toast actions. */
+.alert-row__btn,
+.alert-toast__close,
+.paper-row__icon {
+  display: inline-grid;
+  width: 22px;
+  height: 22px;
+  border-radius: 3px;
+  color: var(--text-muted);
+}
+
+.alerts__icon-btn,
+.paper__icon-btn,
+.tester__icon-btn,
+.watchlist__icon-btn,
+.draw-rail__btn,
+.side-rail__btn {
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.alerts__icon-btn:hover:not(:disabled),
+.tester__icon-btn:hover:not(:disabled),
+.paper__icon-btn:hover,
+.paper__icon-btn[aria-expanded='true'],
+.research__icon-btn:hover,
+.watchlist__icon-btn:hover,
+.alert-row__btn:hover,
+.alert-toast__close:hover,
+.side-rail__btn:hover {
+  background: var(--panel-hover);
+  color: var(--text);
+}
+
+/* ---------- Tabs with an accent underline ---------- */
+
+.tester__tabs,
+.research__tabs {
+  display: flex;
+  align-self: stretch;
+  gap: 2px;
+  margin-left: 10px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.alerts__tabs,
+.ind-tabs,
+.paper__tabs,
+.seasonals__tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.alerts__tab,
+.ind-tabs__tab,
+.paper__tab,
+.research__tab,
+.seasonals__tab,
+.set-nav__tab,
+.tester__tab {
+  position: relative;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.alerts__tab,
+.ind-tabs__tab,
+.paper__tab,
+.research__tab,
+.tester__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.research__tab,
+.tester__tab {
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.alerts__tab:hover,
+.alerts__tab[aria-selected='true'],
+.ind-tabs__tab:hover,
+.ind-tabs__tab[aria-selected='true'],
+.paper__tab:hover,
+.paper__tab[aria-selected='true'],
+.research__tab:hover,
+.research__tab[aria-selected='true'],
+.seasonals__tab:hover,
+.seasonals__tab[aria-selected='true'],
+.tester__tab:hover,
+.tester__tab[aria-selected='true'] {
+  color: var(--text);
+}
+
+/* The underline; each tab strip sets its own left/right inset. */
+.alerts__tab[aria-selected='true']::after,
+.ind-tabs__tab[aria-selected='true']::after,
+.paper__tab[aria-selected='true']::after,
+.research__tab[aria-selected='true']::after,
+.seasonals__tab[aria-selected='true']::after,
+.tester__tab[aria-selected='true']::after {
+  position: absolute;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
+  content: '';
+}
+
+.alerts__tab:focus-visible,
+.ind-tabs__tab:focus-visible,
+.paper__tab:focus-visible,
+.research__tab:focus-visible,
+.seasonals__tab:focus-visible,
+.tester__tab:focus-visible {
+  border-radius: 4px;
+}
+
+.alerts__tab-count,
+.paper__tab-count,
+.research__tab-count,
+.tester__tab-count {
+  min-width: 14px;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: var(--fill);
+  color: var(--text-muted);
+  font-family: var(--font-num);
+  font-size: 10px;
+  line-height: 15px;
+  text-align: center;
+}
+
+.alerts__tab-count,
+.paper__tab-count,
+.tester__tab-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Dialog shell, head, title, foot ---------- */
+
+.alert-dialog,
+.ind-dialog,
+.set-dialog,
+.shortcuts-dialog,
+.seasonals {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.alert-dialog,
+.ind-dialog,
+.set-dialog {
+  box-shadow: 0 24px 64px var(--shadow-strong);
+}
+
+.alert-dialog,
+.ind-dialog,
+.set-dialog,
+.seasonals {
+  animation: dialog-in 140ms ease-out;
+}
+
+/* Focus moves into these programmatically; the controls inside show the ring. */
+.alert-dialog:focus,
+.ind-dialog:focus,
+.set-dialog:focus,
+.shortcuts-dialog:focus,
+.shortcuts-dialog__body:focus,
+.seasonals:focus {
+  outline: none;
+}
+
+.alert-dialog__head,
+.ind-dialog__head,
+.set-dialog__head,
+.shortcuts-dialog__head,
+.seasonals__head {
+  display: flex;
+  align-items: center;
+}
+
+.alert-dialog__head,
+.set-dialog__head,
+.shortcuts-dialog__head {
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.alert-dialog__title,
+.ind-dialog__title,
+.set-dialog__title,
+.shortcuts-dialog__title,
+.seasonals__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.alert-dialog__title,
+.ind-dialog__title,
+.set-dialog__title,
+.shortcuts-dialog__title {
+  flex: 1;
+}
+
+.alert-dialog__title,
+.ind-dialog__title,
+.shortcuts-dialog__title {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.alert-dialog__foot,
+.ind-dialog__foot,
+.set-dialog__foot,
+.shortcuts-dialog__foot,
+.seasonals__foot {
+  display: flex;
+  border-top: 1px solid var(--border);
+}
+
+.alert-dialog__foot,
+.set-dialog__foot,
+.shortcuts-dialog__foot,
+.seasonals__foot {
+  align-items: center;
+}
+
+/* ---------- Panel head, title, empty state ---------- */
+
+.alerts__header,
+.paper__header,
+.research__head,
+.tester__head,
+.watchlist__header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.alerts__header,
+.paper__header,
+.tester__head,
+.watchlist__header {
+  height: 38px;
+}
+
+.research__head-icon,
+.tester__head-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+
+.alerts__title,
+.paper__title,
+.research__title,
+.tester__title,
+.watchlist__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.alerts__empty,
+.research__state,
+.seasonals-state,
+.tester__empty,
+.watchlist__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.research__state,
+.seasonals-state,
+.tester__empty {
+  flex: 1;
+  justify-content: center;
+}
+
+.alerts__empty,
+.research__state,
+.tester__empty,
+.watchlist__empty {
+  gap: 6px;
+}
+
+.alerts__empty-icon,
+.research__state-icon,
+.tester__empty-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 4px;
+  background: var(--fill);
+  color: var(--text-muted);
+}
+
+.alerts__empty-title,
+.research__state-title,
+.tester__empty-title,
+.watchlist__empty-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.alerts__empty-text,
+.tester__empty-text {
+  margin: 0;
+}
+
+.alerts__empty-text,
+.research__state-text,
+.tester__empty-text,
+.watchlist__empty-text {
+  color: var(--text-muted);
+}
+
+/* ---------- Thin scrollbar on scrolling panes ---------- */
+
+.alerts__body,
+.paper__scroll,
+.research__detail,
+.research__events,
+.research__list,
+.research__pane,
+.research__table-wrap,
+.set-panel,
+.tester__editor,
+.tester__plan,
+.tester__ref-body,
+.tester__results,
+.tester__table-wrap,
+.watchlist__list {
+  scrollbar-width: thin;
+  scrollbar-color: var(--panel-hover) transparent;
+}
+
+/* ---------- Keyboard focus ring ---------- */
+
+.symbol-btn:focus-visible,
+.ct-menu__button:focus-visible,
+.icon-btn:focus-visible,
+.chip:focus-visible,
+.btn:focus-visible,
+.history-chip__stop:focus-visible,
+.app-notice__close:focus-visible,
+.app-notice__action:focus-visible,
+.alert-price__last:focus-visible,
+.alert-segmented__btn:focus-visible,
+.alerts__icon-btn:focus-visible,
+.alerts__tab:focus-visible,
+.alerts__banner-btn:focus-visible,
+.alerts__symbol:focus-visible,
+.alert-row__btn:focus-visible,
+.inline-confirm__btn:focus-visible,
+.alerts__text-btn:focus-visible,
+.alert-toast__body--button:focus-visible,
+.alert-toast__close:focus-visible,
+.draw-rail__btn:focus-visible,
+.draw-stylebar__btn:focus-visible,
+.draw-pop__color-input:focus-visible,
+.ind-btn:focus-visible,
+.ind-tabs__tab:focus-visible,
+.ind-check:focus-visible,
+.ind-swatch:focus-within,
+.layout-menu__tile:focus-visible,
+.layout-menu__toggle:focus-visible,
+.tfp__btn:focus-visible,
+.tfp__more:focus-visible,
+.tfp__apply:focus-visible,
+.tfp__input:focus-visible,
+.tfp__select:focus-visible,
+.replay-bar__info:focus-visible,
+.replay-bar__btn:focus-visible,
+.replay-bar__speed:focus-visible,
+.replay-bar__text-btn:focus-visible,
+.side-rail__btn:focus-visible,
+.watchlist__icon-btn:focus-visible,
+.tester__tab:focus-visible,
+.tester__icon-btn:focus-visible,
+.tester__btn:focus-visible,
+.tester__text-btn:focus-visible,
+.tester__run:focus-visible,
+.tester__row--link:focus-visible,
+.research__tab:focus-visible,
+.research__back:focus-visible,
+.research__btn:focus-visible,
+.research__icon-btn:focus-visible,
+.research__list-item:focus-visible,
+.research__select:focus-visible,
+.research a:focus-visible,
+.research__plan > summary:focus-visible,
+.seasonals__tab:focus-visible,
+.seasonals-scroll:focus-visible,
+.set-nav__tab:focus-visible,
+.set-link:focus-visible,
+.set-segmented__opt:focus-visible,
+.set-swatch:focus-visible,
+.set-custom-color:focus-within,
+.set-provider:focus-within,
+.shortcuts-dialog__head .icon-btn:focus-visible,
+.paper__icon-btn:focus-visible,
+.paper-ticket__side:focus-visible,
+.paper-ticket__type:focus-visible,
+.paper-input-wrap__btn:focus-visible,
+.paper-ticket__pct:focus-visible,
+.paper-ticket__submit:focus-visible,
+.paper__tab:focus-visible,
+.paper-row__symbol--link:focus-visible,
+.paper-row__action:focus-visible,
+.paper-row__icon:focus-visible,
+.paper-reset__btn:focus-visible {
+  outline: 2px solid var(--accent);
+}
+
+/* Offset 2px: free-standing buttons and links. */
+.btn:focus-visible,
+.alerts__banner-btn:focus-visible,
+.alerts__symbol:focus-visible,
+.alert-toast__body--button:focus-visible,
+.ind-check:focus-visible,
+.set-link:focus-visible,
+.paper-ticket__submit:focus-visible,
+.paper-row__symbol--link:focus-visible {
+  outline-offset: 2px;
+}
+
+/* Offset 1px: header controls, compact buttons, fields. */
+.symbol-btn:focus-visible,
+.ct-menu__button:focus-visible,
+.icon-btn:focus-visible,
+.chip:focus-visible,
+.history-chip__stop:focus-visible,
+.app-notice__close:focus-visible,
+.app-notice__action:focus-visible,
+.alert-price__last:focus-visible,
+.inline-confirm__btn:focus-visible,
+.draw-pop__color-input:focus-visible,
+.ind-btn:focus-visible,
+.ind-swatch:focus-within,
+.layout-menu__tile:focus-visible,
+.layout-menu__toggle:focus-visible,
+.tfp__btn:focus-visible,
+.tfp__more:focus-visible,
+.tfp__apply:focus-visible,
+.tfp__input:focus-visible,
+.tfp__select:focus-visible,
+.tester__icon-btn:focus-visible,
+.tester__btn:focus-visible,
+.tester__text-btn:focus-visible,
+.tester__run:focus-visible,
+.research__back:focus-visible,
+.research__btn:focus-visible,
+.research__icon-btn:focus-visible,
+.research__list-item:focus-visible,
+.research__select:focus-visible,
+.research a:focus-visible,
+.research__plan > summary:focus-visible,
+.set-custom-color:focus-within,
+.set-provider:focus-within,
+.shortcuts-dialog__head .icon-btn:focus-visible,
+.paper-ticket__side:focus-visible,
+.paper-input-wrap__btn:focus-visible,
+.paper-ticket__pct:focus-visible,
+.paper-row__action:focus-visible,
+.paper-reset__btn:focus-visible {
+  outline-offset: 1px;
+}
+
+/* Offset -2px: the ring sits inside rail, toolbar, tab and row controls. */
+.alert-segmented__btn:focus-visible,
+.alerts__icon-btn:focus-visible,
+.alerts__tab:focus-visible,
+.alert-row__btn:focus-visible,
+.alerts__text-btn:focus-visible,
+.alert-toast__close:focus-visible,
+.draw-rail__btn:focus-visible,
+.draw-stylebar__btn:focus-visible,
+.ind-tabs__tab:focus-visible,
+.replay-bar__info:focus-visible,
+.replay-bar__btn:focus-visible,
+.replay-bar__speed:focus-visible,
+.replay-bar__text-btn:focus-visible,
+.side-rail__btn:focus-visible,
+.watchlist__icon-btn:focus-visible,
+.tester__row--link:focus-visible,
+.seasonals__tab:focus-visible,
+.seasonals-scroll:focus-visible,
+.set-nav__tab:focus-visible,
+.set-segmented__opt:focus-visible,
+.paper__icon-btn:focus-visible,
+.paper-ticket__type:focus-visible,
+.paper__tab:focus-visible,
+.paper-row__icon:focus-visible {
+  outline-offset: -2px;
+}
+
+.tester__tab:focus-visible,
+.research__tab:focus-visible {
+  outline-offset: -4px;
+}

@@ -1,4 +1,5 @@
 import type { Candle } from '../types'
+import { indexByTime } from './util/search'
 
 /**
  * Format a price with precision that scales with magnitude, so BTC shows cents and
@@ -59,16 +60,8 @@ export function formatChange(pct: number | null): string {
 export function selectLegendIndex(candles: readonly Candle[], hoveredTime?: number): number {
   if (candles.length === 0) return -1
   if (hoveredTime === undefined) return candles.length - 1
-  let lo = 0
-  let hi = candles.length - 1
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1
-    const t = candles[mid].time
-    if (t === hoveredTime) return mid
-    if (t < hoveredTime) lo = mid + 1
-    else hi = mid - 1
-  }
-  return candles.length - 1
+  const i = indexByTime(candles, hoveredTime)
+  return i === -1 ? candles.length - 1 : i
 }
 
 export type Direction = 'up' | 'down' | 'flat'

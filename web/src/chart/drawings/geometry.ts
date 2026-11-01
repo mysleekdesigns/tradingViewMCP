@@ -2,6 +2,7 @@
 // rectangle normalisation and anchor-drag maths. Pixels are the main pane's CSS ("media")
 // pixels: x from the pane's left edge, y from its top edge.
 
+import { luminance } from '../util/color'
 import { FIB_LEVELS, type Anchor, type Drawing } from './types'
 
 /** Converts between anchors and pane pixels. Implemented on top of the chart in chartAdapter.ts. */
@@ -342,11 +343,8 @@ export function withAlpha(color: string, alpha: number): string {
 
 /** Readable label text on a `#rrggbb` background: dark on light colours, white otherwise. */
 export function contrastText(color: string): string {
-  const m = /^#([0-9a-f]{6})$/i.exec(color.trim())
-  if (!m) return '#ffffff'
-  const v = parseInt(m[1], 16)
-  const lum = (0.299 * ((v >> 16) & 255) + 0.587 * ((v >> 8) & 255) + 0.114 * (v & 255)) / 255
-  return lum > 0.6 ? '#131722' : '#ffffff'
+  const lum = luminance(color)
+  return lum !== null && lum > 0.6 ? '#131722' : '#ffffff'
 }
 
 /** Fib label price: legend precision plus thousands separators, e.g. 65012.5 → "65,012.50". */

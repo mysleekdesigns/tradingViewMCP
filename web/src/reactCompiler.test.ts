@@ -185,6 +185,10 @@ describe.skipIf(!import.meta.env.SLOW)('compiler output (slow)', () => {
     'components/AlertDialog.tsx',
     // A `{ [x as K]: … }` computed key.
     'components/AlertToasts.tsx',
+    // Generic hook: forwards the caller's deps array to useEffect behind an exhaustive-deps
+    // suppression (the useEffect contract), which the compiler cannot analyse. Not compiled in
+    // 'annotation' mode; its callers compile as usual.
+    'state/useController.ts',
   ]
 
   describe('bailouts across src in infer mode (readiness for widening the mode)', () => {

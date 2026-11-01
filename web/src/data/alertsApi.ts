@@ -19,6 +19,7 @@ import {
 } from './alertTypes'
 import { DEFAULT_STALE_TIMEOUT_MS, openReconnectingSocket } from './binanceStream'
 import { createLocalServerRequest, type LocalServerClientOptions } from './drawingsApi'
+import { isFiniteNumber, isRecord } from './guards'
 import { PersistenceError } from './persistence'
 import { SERVER_FATAL_CLOSE_CODES } from './server'
 
@@ -39,14 +40,6 @@ export interface AlertsClient {
   /** Trigger history, newest first. Malformed rows are skipped. */
   listEvents(limit?: number): Promise<AlertEvent[]>
   clearEvents(): Promise<void>
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
-}
-
-function isFiniteNumber(v: unknown): v is number {
-  return typeof v === 'number' && Number.isFinite(v)
 }
 
 function isCondition(v: unknown): v is AlertCondition {

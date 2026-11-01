@@ -43,14 +43,12 @@ import {
   initialHistoryLoad,
   initTesterState,
   isChartInterval,
-  loadDockPrefs,
+  dockPrefsStored,
   loadPlanText,
   historyRoom,
   reportMatchesChart,
-  saveDockPrefs,
   savePlanText,
   testerReducer,
-  type DockPrefs,
 } from './components/backtestView'
 import type { FocusPlan } from './chart/backtestOverlay'
 import { ChartContextMenu } from './components/ChartContextMenu'
@@ -89,7 +87,7 @@ import {
   type CandidateRunRequest,
   type PlanRestore,
 } from './components/researchView'
-import { SidebarRail, type SidebarPanel } from './components/SidebarRail'
+import { SidebarRail } from './components/SidebarRail'
 import { StatusBar } from './components/StatusBar'
 import { SymbolSearch } from './components/SymbolSearch'
 import { Watchlist } from './components/Watchlist'
@@ -122,10 +120,9 @@ import {
   dismissToast,
   formatPriceByTick,
   loadDrawingStyle,
-  loadSidebarPanel,
   pushToast,
   saveDrawingStyle,
-  saveSidebarPanel,
+  sidebarPanelStored,
 } from './state/chartTools'
 import { useDrawings, type DrawingsApi } from './state/drawings'
 import { anchorInputs, useIndicators } from './state/indicators'
@@ -156,12 +153,8 @@ import {
   type ReplayMark,
 } from './state/paperFeeds'
 import { savePrefs } from './state/prefs'
-import { loadRegimeOn, saveRegimeOn } from './state/regimePref'
-import {
-  derivativesVenueBlocked,
-  loadDerivativesOn,
-  saveDerivativesOn,
-} from './state/derivativesPref'
+import { regimeOnStored } from './state/regimePref'
+import { derivativesOnStored, derivativesVenueBlocked } from './state/derivativesPref'
 import { replayKeyAction } from './state/replay'
 import {
   applyCandleColorsToDocument,
@@ -171,6 +164,7 @@ import {
   type Settings,
 } from './state/settings'
 import { appShortcut, isMacPlatform, shortcutRepeats } from './state/shortcuts'
+import { useStoredState } from './state/storedValue'
 import {
   createLiveStore,
   headerLiveSelector,
@@ -574,7 +568,7 @@ function App() {
   const [crosshairSync] = useState(createCrosshairSync)
 
   const [search, setSearch] = useState<SearchState | null>(null)
-  const [panel, setPanel] = useState<SidebarPanel | null>(loadSidebarPanel)
+  const [panel, setPanel] = useStoredState(sidebarPanelStored)
   const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false)
   /** Instance whose settings dialog is open. */
   const [settingsUid, setSettingsUid] = useState<string | null>(null)
@@ -675,7 +669,7 @@ function App() {
   const onPanelLive = liveStore.report
 
   // Strategy Tester: dock layout, panel state (kept here so a run survives closing the dock).
-  const [dock, setDock] = useState<DockPrefs>(loadDockPrefs)
+  const [dock, setDock] = useStoredState(dockPrefsStored)
   const [tester, dispatchTester] = useReducer(testerReducer, null, () =>
     initTesterState(loadPlanText()),
   )
@@ -696,14 +690,6 @@ function App() {
   useEffect(() => {
     savePrefs({ symbol: first.symbol, interval: first.interval, chartType: first.chartType })
   }, [first.symbol, first.interval, first.chartType])
-
-  useEffect(() => {
-    saveSidebarPanel(panel)
-  }, [panel])
-
-  useEffect(() => {
-    saveDockPrefs(dock)
-  }, [dock])
 
   useEffect(() => {
     savePlanText(tester.planText, tester.planEdited)
@@ -770,18 +756,12 @@ function App() {
   }
 
   // ---- Regime ribbon (all panels; remembered across visits) ----
-  const [regimeOn, setRegimeOn] = useState(loadRegimeOn)
-  useEffect(() => {
-    saveRegimeOn(regimeOn)
-  }, [regimeOn])
-  const toggleRegime = useCallback(() => setRegimeOn((on) => !on), [])
+  const [regimeOn, setRegimeOn] = useStoredState(regimeOnStored)
+  const toggleRegime = useCallback(() => setRegimeOn((on) => !on), [setRegimeOn])
 
   // ---- Funding / OI panes (all panels; remembered; Binance global spot charts only) ----
-  const [derivativesOn, setDerivativesOn] = useState(loadDerivativesOn)
-  useEffect(() => {
-    saveDerivativesOn(derivativesOn)
-  }, [derivativesOn])
-  const toggleDerivatives = useCallback(() => setDerivativesOn((on) => !on), [])
+  const [derivativesOn, setDerivativesOn] = useStoredState(derivativesOnStored)
+  const toggleDerivatives = useCallback(() => setDerivativesOn((on) => !on), [setDerivativesOn])
   const derivativesBlocked = derivativesVenueBlocked(venue)
 
   // The active chart has more than one plotted bar (bar replay needs them): changes once per
@@ -1395,6 +1375,7 @@ function App() {
       activateIndex,
       loadPlanIntoTester,
       labBlockedNotice,
+      setDock,
     ],
   )
 
@@ -1404,7 +1385,7 @@ function App() {
       setDock((d) => (d.open ? d : { ...d, open: true }))
       setResearchOpen(false)
     },
-    [loadPlanIntoTester],
+    [loadPlanIntoTester, setDock],
   )
 
   const closeResearch = useCallback(() => setResearchOpen(false), [])
@@ -1432,14 +1413,17 @@ function App() {
     setResearchOpen((o) => !o)
   }, [])
 
-  const resizeDock = useCallback((height: number) => {
-    setDock((d) => ({ ...d, height: clampDockHeight(height, window.innerHeight) }))
-  }, [])
-  const closeDock = useCallback(() => setDock((d) => ({ ...d, open: false })), [])
+  const resizeDock = useCallback(
+    (height: number) => {
+      setDock((d) => ({ ...d, height: clampDockHeight(height, window.innerHeight) }))
+    },
+    [setDock],
+  )
+  const closeDock = useCallback(() => setDock((d) => ({ ...d, open: false })), [setDock])
   // Close on a sidebar panel that failed to load (LazyBoundary): collapse the sidebar, as its rail
   // button does.
-  const closeSidebar = useCallback(() => setPanel(null), [])
-  const toggleDock = useCallback(() => setDock((d) => ({ ...d, open: !d.open })), [])
+  const closeSidebar = useCallback(() => setPanel(null), [setPanel])
+  const toggleDock = useCallback(() => setDock((d) => ({ ...d, open: !d.open })), [setDock])
 
   // The persisted symbol may not exist on this provider (e.g. SUIUSDT after switching to
   // Coinbase). Checked once, when the provider's symbol list first arrives, so it cannot loop.
@@ -1624,7 +1608,7 @@ function App() {
       selectSymbol(event.symbol)
       setPanel('alerts')
     },
-    [selectSymbol],
+    [selectSymbol, setPanel],
   )
   const dismiss = useCallback((key: string) => setToasts((ts) => dismissToast(ts, key)), [])
 
@@ -1855,7 +1839,7 @@ function App() {
   const openSearchBlank = useCallback(() => openSearch(), [openSearch])
   const toggleWatchlistPanel = useCallback(
     () => setPanel((p) => (p === 'watchlist' ? null : 'watchlist')),
-    [],
+    [setPanel],
   )
   const layoutKind = layout.kind
   const syncSymbol = layout.syncSymbol

@@ -1,38 +1,16 @@
 /* Settings dialog (theme, candle colours, provider, time zone). Palette and fonts from index.css;
    the only colour literals are the fixed dark/light theme chips, which must not follow the
    active theme. */
+/* Shared chrome (icon button, tabs, dialog, focus ring, scrollbar, panel head): primitives.css. */
 
 .set-dialog {
-  display: flex;
-  flex-direction: column;
   width: min(680px, 100%);
   height: min(540px, 88vh);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel);
   color: var(--text);
-  box-shadow: 0 24px 64px var(--shadow-strong);
-  overflow: hidden;
-  animation: dialog-in 140ms ease-out;
-}
-
-.set-dialog:focus {
-  outline: none;
 }
 
 .set-dialog__head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
   padding: 12px 12px 11px 20px;
-  border-bottom: 1px solid var(--border);
-}
-
-.set-dialog__title {
-  flex: 1;
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
 }
 
 .set-dialog__main {
@@ -43,12 +21,9 @@
 }
 
 .set-dialog__foot {
-  display: flex;
-  align-items: center;
   justify-content: flex-end;
   gap: 12px;
   padding: 10px 14px 10px 20px;
-  border-top: 1px solid var(--border);
 }
 
 .set-dialog__foot-note {
@@ -70,20 +45,13 @@
 }
 
 .set-nav__tab {
-  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
   height: 36px;
   padding: 0 12px;
-  border: 0;
   border-radius: 4px;
-  background: transparent;
-  color: var(--text-muted);
-  font: inherit;
-  font-weight: 500;
   text-align: left;
-  cursor: pointer;
   transition:
     background-color 120ms ease,
     color 120ms ease;
@@ -114,11 +82,6 @@
   color: var(--accent);
 }
 
-.set-nav__tab:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
 /* ---------- Content (right) ---------- */
 
 .set-panel {
@@ -129,8 +92,6 @@
   padding: 18px 22px 22px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: var(--panel-hover) transparent;
 }
 
 .set-group {
@@ -183,8 +144,6 @@
 
 .set-link:focus-visible {
   border-radius: 2px;
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
 }
 
 /* ---------- Theme segmented control ---------- */
@@ -228,11 +187,6 @@
   background: var(--panel-hover);
   color: var(--text);
   box-shadow: 0 1px 2px var(--shadow-soft);
-}
-
-.set-segmented__opt:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
 }
 
 /* A tiny two-tone tile showing each theme's chart background and chrome. */
@@ -322,7 +276,6 @@
 }
 
 .set-swatch:focus-visible {
-  outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
 
@@ -348,11 +301,6 @@
 .set-custom-color--active {
   border-color: var(--text-muted);
   color: var(--text);
-}
-
-.set-custom-color:focus-within {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 
 .set-custom-color__input {
@@ -433,11 +381,6 @@
 .set-provider--selected {
   border-color: color-mix(in srgb, var(--accent) 70%, var(--border));
   background: color-mix(in srgb, var(--accent) 7%, var(--bg));
-}
-
-.set-provider:focus-within {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 
 .set-provider__radio {

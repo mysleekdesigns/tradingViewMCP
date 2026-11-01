@@ -17,15 +17,8 @@
 import type {
   AutoscaleInfo,
   IChartApi,
-  IChartApiBase,
-  IPrimitivePaneRenderer,
-  IPrimitivePaneView,
-  ISeriesApi,
-  ISeriesPrimitive,
   Logical,
   PrimitiveHoveredItem,
-  SeriesAttachedParameter,
-  SeriesType,
   Time,
 } from 'lightweight-charts'
 import { INDICATOR_BY_ID } from '../indicators/registry'
@@ -46,12 +39,12 @@ import type {
 } from '../indicators/types'
 import type { IndicatorConfig } from '../state/indicators'
 import type { Candle } from '../types'
+import { LayerHost, LayerPrimitive, NO_DASH, hLine, type BitmapScope } from './layers/base'
 import { BarLineage } from './structureBars'
 import type { ChartPalette } from './theme'
 import { barSpacingOf, sameViewSignature, viewSignature, type ViewSignature } from './viewSignature'
 
-type RenderTarget = Parameters<IPrimitivePaneRenderer['draw']>[0]
-type BitmapScope = Parameters<Parameters<RenderTarget['useBitmapCoordinateSpace']>[0]>[0]
+export type { PrimitiveHost } from './layers/base'
 
 export interface VolumeProfileColors {
   /** Volume of bars that closed at or above their open. */
@@ -498,17 +491,6 @@ export function nextProfileCache(
 /* Renderer + primitive                                                                        */
 /* ------------------------------------------------------------------------------------------ */
 
-function hLine(scope: BitmapScope, x0: number, x1: number, y: number, width: number): void {
-  const ctx = scope.context
-  const yb = Math.round(y * scope.verticalPixelRatio) + (width % 2 ? 0.5 : 0)
-  ctx.beginPath()
-  ctx.moveTo(Math.round(x0 * scope.horizontalPixelRatio), yb)
-  ctx.lineTo(Math.round(x1 * scope.horizontalPixelRatio), yb)
-  ctx.stroke()
-}
-
-/** `setLineDash` copies its argument, so one empty pattern serves every call. */
-const NO_DASH: number[] = []
 let vaDashRatio = Number.NaN
 let vaDash: number[] = NO_DASH
 
@@ -650,31 +632,6 @@ export function drawProfile(
   ctx.restore()
 }
 
-class ProfileRenderer implements IPrimitivePaneRenderer {
-  geom: ProfileGeometry | null = null
-  colors: VolumeProfileColors = DEFAULT_VOLUME_PROFILE_COLORS
-
-  draw(target: RenderTarget): void {
-    const geom = this.geom
-    if (geom === null) return
-    target.useBitmapCoordinateSpace((scope) => drawProfile(scope, geom, this.colors))
-  }
-}
-
-class ProfilePaneView implements IPrimitivePaneView {
-  readonly renderer_ = new ProfileRenderer()
-
-  zOrder(): 'normal' {
-    return 'normal'
-  }
-
-  renderer(): IPrimitivePaneRenderer {
-    return this.renderer_
-  }
-}
-
-type AttachedParam = Pick<SeriesAttachedParameter<Time>, 'chart' | 'series' | 'requestUpdate'>
-
 /**
  * What the last frame's geometry was built from. `sig` covers scroll, bar spacing, pane width,
  * the y of the profile's lowest and highest prices and the primitive's `version`; `xFrom` / `xTo`
@@ -690,43 +647,19 @@ interface FrameCache {
   geom: ProfileGeometry | null
 }
 
-/** One indicator instance's profile on the main series. */
-export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
-  readonly uid: string
+/**
+ * One indicator instance's profile on the main series ('normal' z-order: over the candles'
+ * pane background, under the drawings). `version` is bumped on every change the view
+ * signature cannot see: profile, colours, visibility, host.
+ */
+export class VolumeProfilePrimitive extends LayerPrimitive<ProfileGeometry, VolumeProfileColors> {
   private profile: VolumeProfile | null = null
   /** `profileStats(profile)`, computed on `setProfile`. */
   private stats: ProfileStats | null = null
-  private visible = true
-  private chart: IChartApiBase<Time> | null = null
-  private series: ISeriesApi<SeriesType, Time> | null = null
-  private requestUpdate: (() => void) | null = null
-  /** Bumped on every change the view signature cannot see: profile, colours, visibility, host. */
-  private version = 0
   private frame: FrameCache | null = null
-  private builds = 0
-  private readonly yOfPrice = (price: number): number | null =>
-    this.series === null ? null : this.series.priceToCoordinate(price)
-  private readonly paneView = new ProfilePaneView()
-  private readonly paneViewList: readonly IPrimitivePaneView[] = [this.paneView]
 
   constructor(uid: string, colors: VolumeProfileColors) {
-    this.uid = uid
-    this.paneView.renderer_.colors = colors
-  }
-
-  attached(param: AttachedParam): void {
-    this.chart = param.chart
-    this.series = param.series
-    this.requestUpdate = param.requestUpdate
-    this.invalidate()
-  }
-
-  detached(): void {
-    this.chart = null
-    this.series = null
-    this.requestUpdate = null
-    this.paneView.renderer_.geom = null
-    this.invalidate()
+    super(uid, { colors, paint: drawProfile, zOrder: 'normal', snap: 'nearest' })
   }
 
   getProfile(): VolumeProfile | null {
@@ -737,40 +670,16 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
     if (profile === this.profile) return
     this.profile = profile
     this.stats = profile !== null && profile.rows.length > 0 ? profileStats(profile) : null
-    this.invalidate()
-    this.requestUpdate?.()
+    this.changed()
   }
 
-  setVisible(visible: boolean): void {
-    if (visible === this.visible) return
-    this.visible = visible
-    this.invalidate()
-    this.requestUpdate?.()
-  }
-
-  setColors(colors: VolumeProfileColors): void {
-    this.paneView.renderer_.colors = colors
-    this.invalidate()
-    this.requestUpdate?.()
-  }
-
-  /** The geometry drawn on the last frame (null = nothing drawn). */
-  geometry(): ProfileGeometry | null {
-    return this.paneView.renderer_.geom
-  }
-
-  /** Geometry builds so far (tests: an unchanged view must not rebuild). */
-  buildCount(): number {
-    return this.builds
-  }
-
-  private invalidate(): void {
-    this.version++
+  protected override invalidate(): void {
+    super.invalidate()
     this.frame = null
   }
 
   updateAllViews(): void {
-    this.paneView.renderer_.geom = this.currentGeometry()
+    this.renderer_.geom = this.currentGeometry()
   }
 
   /**
@@ -786,12 +695,13 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
     if (!this.visible || profile === null || stats === null || chart === null || series === null)
       return null
     const ts = chart.timeScale()
+    const coords = this.coords
+    coords.ts = ts
+    coords.series = series
     // Nearest bar: the chart plots traded bars only, so a range edge on a no-trade bar
     // snaps to its neighbour; logicalToCoordinate also places off-screen bars.
-    const iFrom = ts.timeToIndex(profile.from as Time, true)
-    const iTo = ts.timeToIndex(profile.to as Time, true)
-    const xFrom = iFrom === null ? null : ts.logicalToCoordinate(iFrom as unknown as Logical)
-    const xTo = iTo === null ? null : ts.logicalToCoordinate(iTo as unknown as Logical)
+    const xFrom = coords.xOfTime(profile.from)
+    const xTo = coords.xOfTime(profile.to)
     if (xFrom === null || xTo === null) {
       this.frame = null
       return null
@@ -819,13 +729,9 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
     const width = sig !== null ? sig.width : ts.width()
     const geom = spanOffscreen(span, width)
       ? null
-      : geometryInSpan(profile, span, this.yOfPrice, stats)
+      : geometryInSpan(profile, span, coords.yOfPrice, stats)
     this.frame = sig === null ? null : { sig, xFrom, xTo, pocY, geom }
     return geom
-  }
-
-  paneViews(): readonly IPrimitivePaneView[] {
-    return this.paneViewList
   }
 
   /** Includes the profile's price range while any of its bars is in the visible range. */
@@ -848,7 +754,7 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
   }
 
   hitTest(x: number, y: number): PrimitiveHoveredItem | null {
-    const geom = this.paneView.renderer_.geom
+    const geom = this.renderer_.geom
     if (geom === null || !hitProfile(geom, x, y)) return null
     return {
       externalId: `indicator:${this.uid}`,
@@ -864,13 +770,19 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
 /* Layer                                                                                       */
 /* ------------------------------------------------------------------------------------------ */
 
-/** The part of a series the layer uses (an `ISeriesApi` satisfies it). */
-export type PrimitiveHost = Pick<ISeriesApi<SeriesType>, 'attachPrimitive' | 'detachPrimitive'>
-
 interface Entry {
   primitive: VolumeProfilePrimitive
   cache: ProfileCache | null
 }
+
+/** The colour fields whose change is a new theme for the layer. */
+const COLOR_KEYS: readonly (keyof VolumeProfileColors)[] = [
+  'up',
+  'down',
+  'poc',
+  'valueArea',
+  'text',
+]
 
 /**
  * Every range indicator (a def with `profile`) drawn on the main series: one primitive per
@@ -880,40 +792,19 @@ interface Entry {
  * chart's shared `BarLineage` (as for market structure and sessions): with it a live tick
  * checks the in-range bars without reading them.
  */
-export class VolumeProfileLayer {
-  private series: PrimitiveHost | null = null
-  private readonly entries = new Map<string, Entry>()
-  private colors: VolumeProfileColors
+export class VolumeProfileLayer extends LayerHost<
+  VolumeProfileColors,
+  VolumeProfilePrimitive,
+  Entry
+> {
   private readonly lineage: BarLineage
 
   constructor(
     colors: VolumeProfileColors = DEFAULT_VOLUME_PROFILE_COLORS,
     lineage: BarLineage = new BarLineage(),
   ) {
-    this.colors = colors
+    super(colors, COLOR_KEYS)
     this.lineage = lineage
-  }
-
-  /** Attach every primitive to `series` (moving them off a previous one). */
-  attach(series: PrimitiveHost): void {
-    if (this.series === series) return
-    if (this.series !== null) this.detach()
-    this.series = series
-    for (const e of this.entries.values()) series.attachPrimitive(e.primitive)
-  }
-
-  /**
-   * Take the primitives off the series. `alive` false = the series (or the chart) has already
-   * been removed, so only the references are dropped. Profiles stay cached for the next attach.
-   */
-  detach(alive = true): void {
-    const series = this.series
-    this.series = null
-    if (series === null) return
-    for (const e of this.entries.values()) {
-      if (alive) series.detachPrimitive(e.primitive)
-      else e.primitive.detached()
-    }
   }
 
   sync(
@@ -928,9 +819,10 @@ export class VolumeProfileLayer {
       keep.add(config.uid)
       let entry = this.entries.get(config.uid)
       if (entry === undefined) {
-        entry = { primitive: new VolumeProfilePrimitive(config.uid, this.colors), cache: null }
-        this.entries.set(config.uid, entry)
-        this.series?.attachPrimitive(entry.primitive)
+        entry = this.add(config.uid, {
+          primitive: new VolumeProfilePrimitive(config.uid, this.colors),
+          cache: null,
+        })
       }
       entry.primitive.setVisible(config.visible)
       // Hidden instances draw nothing and are not recomputed until shown again.
@@ -945,34 +837,6 @@ export class VolumeProfileLayer {
       )
       entry.primitive.setProfile(entry.cache.profile)
     }
-    for (const [uid, entry] of this.entries) {
-      if (keep.has(uid)) continue
-      this.series?.detachPrimitive(entry.primitive)
-      this.entries.delete(uid)
-    }
-  }
-
-  setColors(colors: VolumeProfileColors): void {
-    const c = this.colors
-    if (
-      c.up === colors.up &&
-      c.down === colors.down &&
-      c.poc === colors.poc &&
-      c.valueArea === colors.valueArea &&
-      c.text === colors.text
-    )
-      return
-    this.colors = { ...colors }
-    for (const e of this.entries.values()) e.primitive.setColors(this.colors)
-  }
-
-  /** Uids with a primitive, in creation order (tests, debugging). */
-  uids(): string[] {
-    return [...this.entries.keys()]
-  }
-
-  /** The primitive of `uid` (tests, debugging). */
-  primitiveOf(uid: string): VolumeProfilePrimitive | undefined {
-    return this.entries.get(uid)?.primitive
+    this.sweep(keep)
   }
 }

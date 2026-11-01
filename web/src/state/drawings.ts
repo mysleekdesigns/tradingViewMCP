@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import type { Drawing, DrawingPatch } from '../chart/drawings/types'
 import {
   DRAWING_ID_RE,
@@ -8,6 +8,7 @@ import {
   type DrawingsClient,
 } from '../data/drawingsApi'
 import { MAX_PUT_RETRIES, PersistenceError, PUT_RETRY_BASE_MS } from '../data/persistence'
+import { useController } from './useController'
 
 /**
  * Drawings of one symbol, persisted per symbol: a localStorage mirror (`tv.drawings.v1.SYM`,
@@ -787,8 +788,6 @@ export function createDrawingsStore(opts: DrawingsStoreOptions): DrawingsStore {
 // ---------------------------------------------------------------------------------------------
 
 interface Snapshot {
-  symbol: string
-  client: DrawingsClient | null
   items: readonly Drawing[]
   status: DrawingsSyncStatus
 }
@@ -801,22 +800,16 @@ interface Snapshot {
  */
 export function useDrawings(symbol: string, client: DrawingsClient | null): DrawingsApi {
   const sym = normalizeDrawingSymbol(symbol)
-  const [snap, setSnap] = useState<Snapshot | null>(null)
-  const storeRef = useRef<DrawingsStore | null>(null)
-
-  useEffect(() => {
-    const store = createDrawingsStore({
-      symbol: sym,
-      client,
-      onChange: (items, status) => setSnap({ symbol: sym, client, items, status }),
-    })
-    storeRef.current = store
-    store.start()
-    return () => {
-      store.dispose()
-      if (storeRef.current === store) storeRef.current = null
-    }
-  }, [sym, client])
+  // `current` is null until this symbol + client's store has emitted.
+  const { snapshot: current, controllerRef: storeRef } = useController<DrawingsStore, Snapshot>(
+    (emit) =>
+      createDrawingsStore({
+        symbol: sym,
+        client,
+        onChange: (items, status) => emit({ items, status }),
+      }),
+    [sym, client],
+  )
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -828,12 +821,11 @@ export function useDrawings(symbol: string, client: DrawingsClient | null): Draw
     }
     window.addEventListener('storage', onStorage)
     return () => window.removeEventListener('storage', onStorage)
-  }, [sym])
+  }, [sym, storeRef])
 
   // Before this symbol's store has emitted, show its mirror synchronously. A client change
   // re-reads the (possibly edited) mirror, so `client` is a real input of the read.
   const mirror = useMemo(() => readMirrorForClient(sym, client), [sym, client])
-  const current = snap !== null && snap.symbol === sym && snap.client === client ? snap : null
   const items = current?.items ?? mirror
   const status: DrawingsSyncStatus = current?.status ?? (client === null ? 'local-only' : 'loading')
 
@@ -842,7 +834,7 @@ export function useDrawings(symbol: string, client: DrawingsClient | null): Draw
       const store = storeRef.current
       return store !== null && store.symbol === sym ? store.dispatch(action) : false
     },
-    [sym],
+    [sym, storeRef],
   )
   const add = useCallback((drawing: Drawing) => run({ type: 'add', drawing }), [run])
   const update = useCallback(

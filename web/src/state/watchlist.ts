@@ -6,6 +6,8 @@ import {
   type PersistenceClient,
   type ServerSync,
 } from '../data/persistence'
+import { storedValue, type ValueStorage } from './storedValue'
+import { useController } from './useController'
 
 /** Symbols shown on first run (and whenever the stored list is missing or invalid). */
 export const DEFAULT_WATCHLIST: readonly string[] = [
@@ -126,42 +128,23 @@ export function serializeWatchlist(items: readonly string[]): string {
 }
 
 /** Minimal storage surface, so tests can pass a fake. */
-export interface KeyValueStorage {
-  getItem(key: string): string | null
-  setItem(key: string, value: string): void
-}
+export type KeyValueStorage = ValueStorage
 
-function defaultStorage(): KeyValueStorage | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage
-  } catch {
-    return null
-  }
-}
+/** Stored as a JSON array (serializeWatchlist); a missing or invalid list reads as the default. */
+export const watchlistStored = storedValue<readonly string[]>(WATCHLIST_STORAGE_KEY, {
+  parse: (raw) => validateWatchlist(raw) ?? DEFAULT_WATCHLIST,
+  fallback: () => DEFAULT_WATCHLIST,
+  serialize: serializeWatchlist,
+})
 
 /** Stored list, or the default when storage is unavailable, empty, or invalid. */
-export function loadWatchlist(
-  storage: KeyValueStorage | null = defaultStorage(),
-): readonly string[] {
-  if (storage === null) return DEFAULT_WATCHLIST
-  try {
-    return parseWatchlist(storage.getItem(WATCHLIST_STORAGE_KEY)) ?? DEFAULT_WATCHLIST
-  } catch {
-    return DEFAULT_WATCHLIST
-  }
+export function loadWatchlist(storage?: KeyValueStorage | null): readonly string[] {
+  return watchlistStored.load(storage)
 }
 
 /** Persist the list; failures (private mode, quota) are ignored. */
-export function saveWatchlist(
-  items: readonly string[],
-  storage: KeyValueStorage | null = defaultStorage(),
-): void {
-  if (storage === null) return
-  try {
-    storage.setItem(WATCHLIST_STORAGE_KEY, serializeWatchlist(items))
-  } catch {
-    // Storage full or blocked: the list still works for this session.
-  }
+export function saveWatchlist(items: readonly string[], storage?: KeyValueStorage | null): void {
+  watchlistStored.save(items, storage)
 }
 
 /**
@@ -192,25 +175,17 @@ export function createWatchlistSync(
 export function useWatchlist(): WatchlistApi {
   const [items, dispatch] = useReducer(watchlistReducer, undefined, () => loadWatchlist())
   const itemsRef = useRef(items)
-  const syncRef = useRef<ServerSync<readonly string[]> | null>(null)
-
-  useEffect(() => {
-    const sync = createWatchlistSync(itemsRef.current, (next) =>
-      dispatch({ type: 'replace', items: next }),
-    )
-    syncRef.current = sync
-    sync.start()
-    return () => {
-      sync.dispose()
-      if (syncRef.current === sync) syncRef.current = null
-    }
-  }, [])
+  const { controllerRef: syncRef } = useController<ServerSync<readonly string[]>>(
+    () =>
+      createWatchlistSync(itemsRef.current, (next) => dispatch({ type: 'replace', items: next })),
+    [],
+  )
 
   useEffect(() => {
     itemsRef.current = items
     saveWatchlist(items)
     syncRef.current?.update(items)
-  }, [items])
+  }, [items, syncRef])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -225,7 +200,7 @@ export function useWatchlist(): WatchlistApi {
     }
     window.addEventListener('storage', onStorage)
     return () => window.removeEventListener('storage', onStorage)
-  }, [])
+  }, [syncRef])
 
   const add = useCallback((symbol: string) => dispatch({ type: 'add', symbol }), [])
   const remove = useCallback((symbol: string) => dispatch({ type: 'remove', symbol }), [])

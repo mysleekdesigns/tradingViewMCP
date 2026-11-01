@@ -3,12 +3,11 @@ import type {
   CandlestickSeriesPartialOptions,
   CreatePriceLineOptions,
   LineData,
-  UTCTimestamp,
 } from 'lightweight-charts'
 import type { Candle, ChartType } from '../types'
 import { heikinAshi, heikinAshiFrom, type HeikinAshiBar } from './heikinAshi'
 import { colors, mainSeriesOptionsFor, realPriceLineOptions, type ChartPalette } from './theme'
-import { toCandlestickPoint } from './seriesSync'
+import { toCandlestickPoint, toCloseLinePoint } from './points'
 
 /** Which Lightweight Charts series definition draws each chart type. */
 export type MainSeriesKind = 'candlestick' | 'line' | 'area'
@@ -37,14 +36,8 @@ export function sameSeriesKind(a: ChartType, b: ChartType): boolean {
 /** A point for the main series: OHLC for candle types, close-only for line/area. */
 export type MainPoint = CandlestickData | LineData
 
-/** Line/area points plot the close. */
-export function toLinePoint(c: Candle): LineData {
-  return { time: c.time as UTCTimestamp, value: c.close }
-}
-
-function haPoint(b: HeikinAshiBar): CandlestickData {
-  return { time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close }
-}
+// Line/area points plot the close; the mapper lives in points.ts (re-exported under its old name).
+export { toCloseLinePoint as toLinePoint } from './points'
 
 /** Full main-series data, plus the HA bars (Heikin-Ashi only) to reuse for tail updates. */
 export interface MainSeriesData {
@@ -59,10 +52,10 @@ export function mainSeriesData(type: ChartType, candles: readonly Candle[]): Mai
       return { points: candles.map(toCandlestickPoint), ha: null }
     case 'line':
     case 'area':
-      return { points: candles.map(toLinePoint), ha: null }
+      return { points: candles.map(toCloseLinePoint), ha: null }
     case 'heikin-ashi': {
       const ha = heikinAshi(candles)
-      return { points: ha.map(haPoint), ha }
+      return { points: ha.map(toCandlestickPoint), ha }
     }
   }
 }
@@ -81,11 +74,13 @@ export function mainSeriesTail(
   if (type === 'heikin-ashi') {
     const ha =
       prevHa && prevHa.length >= from ? heikinAshiFrom(prevHa, candles, from) : heikinAshi(candles)
-    return { points: ha.slice(from).map(haPoint), ha }
+    return { points: ha.slice(from).map(toCandlestickPoint), ha }
   }
   const tail = candles.slice(from)
   const points =
-    seriesKindFor(type) === 'candlestick' ? tail.map(toCandlestickPoint) : tail.map(toLinePoint)
+    seriesKindFor(type) === 'candlestick'
+      ? tail.map(toCandlestickPoint)
+      : tail.map(toCloseLinePoint)
   return { points, ha: null }
 }
 

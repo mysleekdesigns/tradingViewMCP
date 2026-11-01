@@ -1,7 +1,5 @@
-import type { CandlestickData, HistogramData, UTCTimestamp } from 'lightweight-charts'
 import { knownSamePrefix } from '../data/candleStore'
 import type { Candle } from '../types'
-import type { VolumeColors } from './volume'
 
 /** Live ticks append at most one bar; a short gap fill may add a few. More than this → setData. */
 export const MAX_APPENDED_BARS = 5
@@ -190,16 +188,5 @@ export function clickedBarTime(c: TimeClickInput): number | null | undefined {
   return typeof c.barTime === 'number' ? c.barTime : null
 }
 
-/** One candle as a Lightweight Charts candlestick point. */
-export function toCandlestickPoint(c: Candle): CandlestickData {
-  return { time: c.time as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close }
-}
-
-/** One candle as a volume histogram point; doji counts as up, like `toVolumeData`. */
-export function toVolumePoint(c: Candle, palette: VolumeColors): HistogramData {
-  return {
-    time: c.time as UTCTimestamp,
-    value: c.volume,
-    color: c.close >= c.open ? palette.up : palette.down,
-  }
-}
+// The candle → point mappers live in points.ts; re-exported here for existing importers.
+export { toCandlestickPoint, toVolumePoint } from './points'

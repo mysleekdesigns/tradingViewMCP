@@ -1,6 +1,7 @@
-import { memo, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
+import { memo, useEffect, useId, useRef, useState } from 'react'
 import type { ToolMode } from '../chart/drawings/types'
 import { DRAWING_TOOLS, clearAllPrompt, nextTool, toolTitle } from './drawingTools'
+import { useModalKeys } from './useModalKeys'
 import './Drawings.css'
 
 export interface DrawingToolbarProps {
@@ -48,13 +49,7 @@ export const DrawingToolbar = memo(function DrawingToolbar({
     if (refocus) clearRef.current?.focus()
   }
 
-  const onPopKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      e.stopPropagation()
-      closeConfirm(true)
-    }
-  }
+  const onPopKeyDown = useModalKeys(null, () => closeConfirm(true), { listen: 'element' })
 
   const empty = drawingCount === 0
 

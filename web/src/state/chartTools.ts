@@ -8,6 +8,7 @@ import type { AlertToast } from '../components/AlertToasts'
 import type { SidebarPanel } from '../components/SidebarRail'
 import type { Alert } from '../data/alertTypes'
 import { parseDrawingStyle } from '../data/drawingsApi'
+import { storedValue, type ValueStorage } from './storedValue'
 
 /** Upper bound on decimals derived from a tick size (Binance ticks go down to 1e-8). */
 const MAX_DECIMALS = 10
@@ -156,64 +157,40 @@ export function dismissToast(toasts: readonly AlertToast[], key: string): AlertT
 export const DRAWING_STYLE_KEY = 'tv.drawingStyle.v1'
 export const SIDEBAR_PANEL_KEY = 'tv.sidebar.v1'
 
-export type UiStorage = Pick<Storage, 'getItem' | 'setItem'>
+export type UiStorage = ValueStorage
 
-function defaultStorage(): UiStorage | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage
-  } catch {
-    return null
-  }
-}
+/** The saved default drawing style; null when never saved or invalid. */
+export const drawingStyleStored = storedValue<DrawingStyle | null>(DRAWING_STYLE_KEY, {
+  parse: parseDrawingStyle,
+  fallback: () => null,
+})
 
-function readJson(storage: UiStorage | null, key: string): unknown {
-  if (!storage) return undefined
-  try {
-    const text = storage.getItem(key)
-    return text === null ? undefined : (JSON.parse(text) as unknown)
-  } catch {
-    return undefined
-  }
-}
-
-function writeJson(storage: UiStorage | null, key: string, value: unknown): void {
-  if (!storage) return
-  try {
-    storage.setItem(key, JSON.stringify(value))
-  } catch {
-    // Quota exceeded or storage disabled: keep it in memory only.
-  }
-}
+/** The sidebar panel; 'none' is stored for a closed sidebar (null). */
+export const sidebarPanelStored = storedValue<SidebarPanel | null>(SIDEBAR_PANEL_KEY, {
+  parse: (raw) => {
+    if (raw === 'watchlist' || raw === 'alerts' || raw === 'paper') return raw
+    if (raw === 'none') return null
+    return 'watchlist'
+  },
+  fallback: () => 'watchlist',
+  serialize: (panel) => JSON.stringify(panel ?? 'none'),
+})
 
 /** The remembered default style for new drawings, or `fallback` when none (or invalid). */
-export function loadDrawingStyle(
-  fallback: DrawingStyle,
-  storage: UiStorage | null = defaultStorage(),
-): DrawingStyle {
-  return parseDrawingStyle(readJson(storage, DRAWING_STYLE_KEY)) ?? { ...fallback }
+export function loadDrawingStyle(fallback: DrawingStyle, storage?: UiStorage | null): DrawingStyle {
+  return drawingStyleStored.load(storage) ?? { ...fallback }
 }
 
-export function saveDrawingStyle(
-  style: DrawingStyle,
-  storage: UiStorage | null = defaultStorage(),
-): void {
+export function saveDrawingStyle(style: DrawingStyle, storage?: UiStorage | null): void {
   const clean = parseDrawingStyle(style)
-  if (clean !== null) writeJson(storage, DRAWING_STYLE_KEY, clean)
+  if (clean !== null) drawingStyleStored.save(clean, storage)
 }
 
 /** The sidebar panel open at the last visit; 'watchlist' when never saved or unreadable. */
-export function loadSidebarPanel(
-  storage: UiStorage | null = defaultStorage(),
-): SidebarPanel | null {
-  const raw = readJson(storage, SIDEBAR_PANEL_KEY)
-  if (raw === 'watchlist' || raw === 'alerts' || raw === 'paper') return raw
-  if (raw === 'none') return null
-  return 'watchlist'
+export function loadSidebarPanel(storage?: UiStorage | null): SidebarPanel | null {
+  return sidebarPanelStored.load(storage)
 }
 
-export function saveSidebarPanel(
-  panel: SidebarPanel | null,
-  storage: UiStorage | null = defaultStorage(),
-): void {
-  writeJson(storage, SIDEBAR_PANEL_KEY, panel ?? 'none')
+export function saveSidebarPanel(panel: SidebarPanel | null, storage?: UiStorage | null): void {
+  sidebarPanelStored.save(panel, storage)
 }

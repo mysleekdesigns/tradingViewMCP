@@ -2,6 +2,8 @@
 // and custom timeframes are aggregated from the finest native source that tiles them
 // (`baseFor`): Binance `1s` klines for seconds, a native Interval for the rest.
 import type { Candle, Interval, Timeframe } from '../types'
+import { sameCandle } from './guards'
+import { clampLimit } from './http'
 import { RunningBucket, aggregateCandles } from './aggregate'
 import { MarketDataError, type MarketDataProvider, type SubscribeOptions } from './provider'
 import {
@@ -122,11 +124,6 @@ interface BaseFeed {
   ): () => void
 }
 
-function clampLimit(limit: number): number {
-  if (!Number.isFinite(limit)) return DEFAULT_LIMIT
-  return Math.min(BASE_PAGE, Math.max(1, Math.floor(limit)))
-}
-
 function unsupported(tf: Timeframe): MarketDataError {
   return new MarketDataError(
     'http',
@@ -240,7 +237,14 @@ export function createTimeframeProvider(
       const feed = feedFor(tf)
       const tfSec = timeframeSeconds(tf)
       if (tfSec === feed.seconds) return feed.getCandles(symbol, limit, endTime, o?.signal)
-      return fetchAggregated(feed, symbol, tf, clampLimit(limit), endTime, o?.signal)
+      return fetchAggregated(
+        feed,
+        symbol,
+        tf,
+        clampLimit(limit, BASE_PAGE, DEFAULT_LIMIT),
+        endTime,
+        o?.signal,
+      )
     },
 
     subscribeCandles(symbol, tf, onCandle, o) {
@@ -367,17 +371,6 @@ interface BucketState {
    * bar is not settled yet). It is emitted again only when its values or flag change.
    */
   provisionalSent: Candle | null
-}
-
-function sameCandle(a: Candle, b: Candle): boolean {
-  return (
-    a.time === b.time &&
-    a.open === b.open &&
-    a.high === b.high &&
-    a.low === b.low &&
-    a.close === b.close &&
-    a.volume === b.volume
-  )
 }
 
 /** Record base bar `c` of `st` (replacing an earlier send of the same time). */

@@ -1,5 +1,7 @@
 import type { Candle, ConnectionStatus, Ticker } from '../types'
 import { backoffDelay, openReconnectingSocket, type SocketControl } from './binanceStream'
+import { changePct } from './binanceTicker'
+import { finite, isRecord, sameCandle } from './guards'
 import { MarketDataError } from './provider'
 
 /*
@@ -24,18 +26,6 @@ import { MarketDataError } from './provider'
  *   and report 'live' only on the first answer to the subscribe (`liveOnFirstMessage`).
  * - There is no kline channel, so the forming bar is built here from `matches`.
  */
-
-/** Strict numeric field: finite number or non-empty numeric string, else null. */
-function finite(value: unknown): number | null {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  if (typeof value !== 'string' || value.trim() === '') return null
-  const n = Number(value)
-  return Number.isFinite(n) ? n : null
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === 'object' && !Array.isArray(v)
-}
 
 const ISO_FRACTION_RE = /^(.*T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
 
@@ -158,7 +148,7 @@ export function makeTickerFields(
     low: s.low,
     volume: s.volume,
     quoteVolume: s.volume * s.last,
-    changePct: s.open === 0 ? 0 : ((s.last - s.open) / s.open) * 100,
+    changePct: changePct(s.last, s.open),
     time,
   }
 }
@@ -230,17 +220,6 @@ function extend(bar: Candle, t: CoinbaseTrade): Candle {
 
 function barFromTrade(time: number, t: CoinbaseTrade): Candle {
   return { time, open: t.price, high: t.price, low: t.price, close: t.price, volume: t.size }
-}
-
-function sameBar(a: Candle, b: Candle): boolean {
-  return (
-    a.time === b.time &&
-    a.open === b.open &&
-    a.high === b.high &&
-    a.low === b.low &&
-    a.close === b.close &&
-    a.volume === b.volume
-  )
 }
 
 export const DEFAULT_RECONCILE_DELAY_MS = 1_500
@@ -633,7 +612,7 @@ export function openCoinbaseCandleStream(opts: CandleStreamOptions): () => void 
           return
         }
         const fixed = emitted === null ? rest : mergeBars(rest, emitted, liveHasClose)
-        emitSettled(emitted !== null && sameBar(fixed, emitted) ? emitted : fixed)
+        emitSettled(emitted !== null && sameCandle(fixed, emitted) ? emitted : fixed)
       })
     }, reconcileRetryMs)
   }

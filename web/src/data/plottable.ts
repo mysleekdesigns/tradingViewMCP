@@ -9,6 +9,7 @@
 // pagination, gap fills, and the quote. Nothing is forward-filled or synthesised; times stay in
 // UNIX seconds.
 
+import { lowerBoundByTime } from '../chart/util/search'
 import type { Candle } from '../types'
 import { lineageOf, recordLineage } from './candleStore'
 
@@ -54,18 +55,6 @@ function firstUntradedOf(raw: readonly Candle[]): number {
   return first
 }
 
-/** First index of ascending `bars` with time >= `t`. */
-function lowerBoundTime(bars: readonly Candle[], t: number): number {
-  let lo = 0
-  let hi = bars.length
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (bars[mid].time < t) lo = mid + 1
-    else hi = mid
-  }
-  return lo
-}
-
 /**
  * `raw.filter(isTradedBar)` built from the plotted array of `raw`'s recorded parent, reading
  * only the bars after the kept prefix. `same` = how many leading bars it shares with that
@@ -82,7 +71,7 @@ function filteredFromLineage(
   const s = step.samePrefix
   // plotted = parent's traded bars in order (same objects), so those taken from parent[0..s)
   // are exactly the ones opening before parent[s] (times ascending and unique).
-  const keep = s >= parent.length ? plotted.length : lowerBoundTime(plotted, parent[s].time)
+  const keep = s >= parent.length ? plotted.length : lowerBoundByTime(plotted, parent[s].time)
   const tail: Candle[] = []
   for (let i = s; i < raw.length; i++) if (isTradedBar(raw[i])) tail.push(raw[i])
   let m = 0

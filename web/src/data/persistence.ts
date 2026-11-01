@@ -9,9 +9,12 @@
 export const DEFAULT_PERSISTENCE_ID = 'default'
 export const PERSISTENCE_TIMEOUT_MS = 5000
 
-const ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+import { isRecord } from './guards'
+import { fetchWithin, globalFetch, jsonInit, type FetchLike } from './http'
 
-export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
+export type { FetchLike } from './http'
+
+const ID_RE = /^[A-Za-z0-9_-]{1,64}$/
 
 export interface PersistenceClientOptions {
   /** Defaults to the global `fetch`, looked up at call time. */
@@ -55,10 +58,6 @@ export class PersistenceError extends Error {
   }
 }
 
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
-}
-
 function parseStoredWatchlist(v: unknown): StoredWatchlist {
   if (
     !isRecord(v) ||
@@ -89,14 +88,7 @@ function parseStoredLayout(v: unknown): StoredLayout {
 export function createPersistenceClient(opts: PersistenceClientOptions = {}): PersistenceClient {
   const baseUrl = opts.baseUrl ?? ''
   const timeoutMs = opts.timeoutMs ?? PERSISTENCE_TIMEOUT_MS
-  const doFetch: FetchLike =
-    opts.fetchImpl ??
-    ((input, init) => {
-      if (typeof globalThis.fetch !== 'function') {
-        return Promise.reject(new Error('fetch is not available'))
-      }
-      return globalThis.fetch(input, init)
-    })
+  const doFetch: FetchLike = opts.fetchImpl ?? globalFetch
 
   function url(collection: 'watchlists' | 'layouts', id: string): string {
     if (!ID_RE.test(id)) throw new PersistenceError('bad-id', `invalid id: ${id}`)
@@ -104,40 +96,33 @@ export function createPersistenceClient(opts: PersistenceClientOptions = {}): Pe
   }
 
   /** JSON body of a 2xx response, null for 404 when `allow404`, otherwise throws. */
-  async function request(
-    target: string,
-    init: RequestInit,
-    allow404: boolean,
-  ): Promise<unknown | null> {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
-    try {
-      let res: Response
-      try {
-        res = await doFetch(target, { ...init, signal: controller.signal })
-      } catch (e) {
-        throw new PersistenceError(
-          'network',
-          controller.signal.aborted ? 'request timed out' : `request failed: ${String(e)}`,
-        )
-      }
-      if (allow404 && res.status === 404) return null
-      if (!res.ok) throw new PersistenceError('http', `HTTP ${res.status}`, res.status)
-      try {
-        return (await res.json()) as unknown
-      } catch {
-        throw new PersistenceError('parse', 'response is not JSON', res.status)
-      }
-    } finally {
-      clearTimeout(timer)
-    }
+  function request(target: string, init: RequestInit, allow404: boolean): Promise<unknown> {
+    return fetchWithin(
+      {
+        fetchImpl: doFetch,
+        url: target,
+        init,
+        timeoutMs,
+        failures: {
+          // No caller signal here: our timer is the only thing that aborts.
+          aborted: () => new PersistenceError('network', 'request timed out'),
+          timeout: () => new PersistenceError('network', 'request timed out'),
+          network: (e) => new PersistenceError('network', `request failed: ${String(e)}`),
+        },
+      },
+      async (res) => {
+        if (allow404 && res.status === 404) return null
+        if (!res.ok) throw new PersistenceError('http', `HTTP ${res.status}`, res.status)
+        try {
+          return (await res.json()) as unknown
+        } catch {
+          throw new PersistenceError('parse', 'response is not JSON', res.status)
+        }
+      },
+    )
   }
 
-  const jsonPut = (body: unknown): RequestInit => ({
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
+  const jsonPut = (body: unknown): RequestInit => jsonInit('PUT', body)
 
   return {
     async getWatchlist(id) {
