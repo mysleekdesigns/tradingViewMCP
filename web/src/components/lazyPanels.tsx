@@ -25,30 +25,46 @@ import { LazyLoadError, retryableLazy } from './lazyLoad'
 import type { ShortcutsDialogProps } from './ShortcutsDialog'
 import { useEscapeToClose } from './useEscapeToClose'
 
-export const BacktestPanel = retryableLazy('the Strategy Tester', () =>
-  import('./BacktestPanel').then((m) => m.BacktestPanel),
+export const BacktestPanel = retryableLazy(
+  'the Strategy Tester',
+  () => import('./BacktestPanel').then((m) => m.BacktestPanel),
+  { exportName: 'BacktestPanel' },
 )
-export const ResearchPage = retryableLazy('Research', () =>
-  import('./ResearchPage').then((m) => m.ResearchPage),
+export const ResearchPage = retryableLazy(
+  'Research',
+  () => import('./ResearchPage').then((m) => m.ResearchPage),
+  { exportName: 'ResearchPage' },
 )
-export const PaperTradingPanel = retryableLazy('paper trading', () =>
-  import('./PaperTradingPanel').then((m) => m.PaperTradingPanel),
+export const PaperTradingPanel = retryableLazy(
+  'paper trading',
+  () => import('./PaperTradingPanel').then((m) => m.PaperTradingPanel),
+  { exportName: 'PaperTradingPanel' },
 )
-export const SeasonalsView = retryableLazy('Seasonals', () =>
-  import('./SeasonalsView').then((m) => m.SeasonalsView),
+export const SeasonalsView = retryableLazy(
+  'Seasonals',
+  () => import('./SeasonalsView').then((m) => m.SeasonalsView),
+  { exportName: 'SeasonalsView' },
 )
-export const SettingsDialog = retryableLazy('Settings', () =>
-  import('./SettingsDialog').then((m) => m.SettingsDialog),
+export const SettingsDialog = retryableLazy(
+  'Settings',
+  () => import('./SettingsDialog').then((m) => m.SettingsDialog),
+  { exportName: 'SettingsDialog' },
 )
 
-const LazyIndicatorSettings = retryableLazy('indicator settings', () =>
-  import('./IndicatorSettings').then((m) => m.IndicatorSettings),
+const LazyIndicatorSettings = retryableLazy(
+  'indicator settings',
+  () => import('./IndicatorSettings').then((m) => m.IndicatorSettings),
+  { exportName: 'IndicatorSettings' },
 )
-const LazyAlertDialog = retryableLazy('the alert dialog', () =>
-  import('./AlertDialog').then((m) => m.AlertDialog),
+const LazyAlertDialog = retryableLazy(
+  'the alert dialog',
+  () => import('./AlertDialog').then((m) => m.AlertDialog),
+  { exportName: 'AlertDialog' },
 )
-const LazyShortcutsDialog = retryableLazy('keyboard shortcuts', () =>
-  import('./ShortcutsDialog').then((m) => m.ShortcutsDialog),
+const LazyShortcutsDialog = retryableLazy(
+  'keyboard shortcuts',
+  () => import('./ShortcutsDialog').then((m) => m.ShortcutsDialog),
+  { exportName: 'ShortcutsDialog' },
 )
 
 /*

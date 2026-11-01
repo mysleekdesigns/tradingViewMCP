@@ -134,3 +134,51 @@ upstream has the next one.
   dynamic `import()` for the life of the document, so Retry sends no new request and the card
   stays. Possible fix: retry the failed chunk URL with a cache-busting query in `lazyLoad.ts`.
   Not changed; listed for the owner.
+
+## Third pass (2026-11-01): lazy-panel Retry fix, React Compiler profiling pass
+
+### Lazy-panel Retry (fixed)
+
+`retryableLazy` (`web/src/components/lazyLoad.ts`) now reads the failed chunk URL from the
+browser's error. On Retry it imports that URL with a fresh `?retry=n` query and takes the
+component by `exportName`, which all eight lazy panels pass. Re-checked in headless Chrome on a
+production build (chunk blocked, then unblocked, then Retry): the browser requested
+`SettingsDialog-*.js?retry=1` and `BacktestPanel-*.js?retry=1`, and both panels rendered styled.
+
+### React Compiler: `annotation` (current) vs `infer`
+
+`all` was not tried: `vite.config.ts` records that it rewrites plain helpers (the indicator
+steppers) with `useMemoCache` and throws outside a render.
+
+| | `annotation` | `infer` |
+|---|---|---|
+| Main chunk (minified, gzip) | 150.4 KB | 175.7 KB (+25.3 KB) |
+| Single panel, idle JS / 10 s (2 runs) | 20.4 / 19.6 ms | 21.6 / 23.3 ms |
+| Single panel, crosshair JS / 10 s | 188.6 / 194.5 ms | 176.9 / 162.3 ms |
+| 4 panels, idle JS / 10 s (clean storage, 2 runs) | 48.3 / 47.4 ms | 44.8 / 47.1 ms |
+| 4 panels, crosshair JS / 10 s (clean storage, 2 runs) | 233.8 / 236.2 ms | 241.6 / 232.3 ms |
+| React share, 4-panel crosshair | 41.4 / 43.9 ms | 39.3 / 37.4 ms |
+
+The two builds are within run-to-run noise. `infer` shaves a few ms of React work per 10 s of
+crosshair movement but costs 25 KB on the main chunk, which breaks the ~150 KB Done-when target.
+An earlier pair of 4-panel crosshair readings for `annotation` (411 and 419 ms) was traced to
+leftover storage on that origin (the Strategy Tester dock was still open, so the charts painted
+more). Every chart-library function was slower in those runs. They are excluded; the harness now
+clears storage before seeding.
+
+### Retry fix: review follow-up
+
+Following the code review, two more changes:
+- **Stale build:** a failed fresh-URL import now fires `vite:preloadError`, so main.tsx's
+  once-a-minute reload guard can still recover a chunk that is gone after a rebuild.
+- **Stylesheets:** each retry first re-requests same-origin stylesheets that failed to load. In
+  Chrome a failed `<link>` still has a `sheet`, but reading its `cssRules` throws
+  `SecurityError`; that is how a failure is detected. Re-checked in headless Chrome with both the
+  Settings JS and CSS blocked, then unblocked: Retry requested `SettingsDialog-*.css?retry=1` and
+  `SettingsDialog-*.js?retry=2`, and the dialog rendered fully styled.
+- **Known limit:** after a combined JS and CSS outage it takes two Retry clicks. The first failure
+  names only the stylesheet ("Unable to preload CSS"), so the chunk URL is learned on the first
+  retry.
+
+Final `/run-gate 19`: PASS (web 3465, server 475, lab 2597, agents 938; main chunk 150.79 KB
+gzip).

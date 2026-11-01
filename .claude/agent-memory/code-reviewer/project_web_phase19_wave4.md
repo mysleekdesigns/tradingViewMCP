@@ -1,6 +1,6 @@
 ---
 name: web-phase19-wave4
-description: Phase 19 wave 4 (startup/bundle) - lazyPanels/Suspense, InertWhile, vendor codeSplitting groups, font preloads, React Compiler annotation mode via @rolldown/plugin-babel; confirmed facts 2026-10-30 and open gaps
+description: Phase 19 wave 4 (startup/bundle) - lazyPanels/Suspense, chunk-retry ?retry=n fix (2026-11-01), InertWhile, vendor codeSplitting groups, font preloads, React Compiler annotation mode via @rolldown/plugin-babel; confirmed facts 2026-10-30 and open gaps
 metadata:
   type: project
 ---
@@ -21,8 +21,13 @@ Review-fix round (2026-10-30, tsc/lint/541 tests green, scratch build checked):
 - Closed: rail preload calls import() directly; vite:preloadError gated on panelLoadInFlight (counter inc/dec in the lazy factory's try/finally; React calls the factory once per lazy, so StrictMode/unmount cannot skew it; event fires inside __vitePreload before load() rejects).
 - CSS: BacktestShell.css (grid rows, .tester frame, .bt-pane-legend) in main CSS at Chart.tsx's old import spot; Backtest.css now only .tester__*/.tester descendant rules (no shared selectors), so later load order is harmless. Main chunk 150.7 KB gzip.
 
+Chunk-retry fix (reviewed 2026-11-01; do not re-flag):
+- Closed: LazyBoundary.componentWillUnmount calls retry() when it holds a LazyLoadError.
+- Chrome poisons the module map for a failed import() AND a failed <link rel=modulepreload> (spec behaviour); Vite 8 __vitePreload adds modulepreload for the chunk itself, and caches each dep href once per document (zv map), so a failed CSS link is never re-added.
+- retryableLazy re-imports the URL parsed from "dynamically imported module: <url>" with ?retry=n via raw import() (no __vitePreload, so no vite:preloadError on retries). Verified: built panel chunks import only startup chunks (index, react, provider), relative imports resolve to the same records; dev transform of X.tsx?retry=1 is byte-identical except sourcemap. Panels + bundled helpers have no module-level mutable state, so a second evaluation is harmless.
+- Open: full outage (CSS+JS failed) recovers only on the 2nd Retry and renders unstyled for the document's life; stale-build 404 can no longer be recovered by Retry (old path reloaded via preloadError after 60 s); Safari message has no URL so plain retry (never recovers); fix silently stops working if a panel ever gets a non-startup shared chunk.
+
 Open:
-- LazyBoundary drops a failed lazy only via its own Retry/Close: unmounting it any other way (rail toggle of dock/Research, switching sidebar panel) leaves the rejected lazy, so the next open shows "Couldn't load" instantly with no download. Fix: retry in componentWillUnmount when caught is a LazyLoadError.
 - LazyLoadFailed overlay/dialog Escape is a container onKeyDown (dead once focus leaves the card); Retry drops focus to body while the fallback shows.
 - A hung real load keeps panelLoadInFlight true, so a later failed hover preload would reload (edge).
 
