@@ -1327,6 +1327,64 @@ shadow judge are byte-identical; and every test, typecheck and lint stays green.
 
 ---
 
+## Phase 21 — Key Levels & Range Overlay (chart)
+
+Why: the 2026-11-01 review of The Rumers' "If You Only Have $50, Do This Every Morning (The 3R Rule)"
+([youtube.com/watch?v=XBOGd67BJks](https://www.youtube.com/watch?v=XBOGd67BJks), report
+`agents/research/reports/3R rule day trading research.md`, transcript read) describes a day-trading
+check with three inputs. (1) The daily trend: price above or below the 50-day SMA. (2) Key levels: the
+previous day's high and low. (3) Range: daily ATR(14) as the day's expected move; skip targets that need
+more than 100% of it, and fade a move that has already used 1–2× ATR into a prior-day level. The video
+shows no record or backtest. The literature does not support the fade: intraday momentum continues on SPY
+and BTC (Gao, Han, Li & Zhou 2018; Shen et al. 2022). Trend filters are an exhausted family in this
+lab. Only prior-day levels and the "share of daily range used" are untested here. The chart shows none of
+these today, and there is no ATR indicator. This phase is a **visual tool only**, like Phases 16 and 18:
+no edge claim, no backtest, nothing in `lab/`. It lets the owner see whether prior-UTC-day levels tend to
+hold or break on BTC/ETH before any lab budget is spent. It touches only `web/` (plus `server/` only if
+the daily candle source needs it).
+
+Definitions (fixed before building):
+- **Day** = UTC calendar day, matching Binance 1d klines. **Week** = Monday 00:00 UTC to Sunday.
+- **Daily inputs come from closed 1d candles only.** The current UTC day's 1d candle is still forming
+  and never feeds a level, the ATR or the SMA. They are fetched through the existing provider / server
+  cache, not aggregated from the loaded intraday bars, because 5m history may not cover 50 days.
+- **Previous-day high/low (PDH/PDL)** = high/low of the last closed 1d candle. Drawn as a step line on
+  intraday bars: every bar of UTC day D shows day D−1's levels. Optional previous-week high/low (PWH/PWL)
+  from the last closed week. A missing daily candle leaves a gap; it is never forward-filled.
+- **Daily ATR** = Wilder ATR(14) over closed 1d candles (the existing `primitives.ts` Wilder smoothing).
+  **Range used** = (current UTC day's high − low, from closed intraday bars of that day) ÷ the daily ATR
+  as of the previous close, shown as a percentage. It changes during the day by design and is labelled
+  "live".
+- **Trend bias** = last closed daily close above or below SMA(50) of closed daily closes. Shown as a
+  legend badge, not a direction signal.
+- Shown only on intervals below 1d. Defaults: ATR 14, SMA 50, PWH/PWL off.
+
+### Checklist
+- [x] Research record: video notes at `agents/research/research_notes/3R rule day trading research/video_notes.md` (transcript read in the owner's Chrome, untrusted-source callout) and report at `agents/research/reports/3R rule day trading research.md` (evidence check, fit with this project, what is rejected and why)
+- [ ] ATR indicator: pure compute `web/src/indicators/atr.ts` (Wilder ATR, period input, default 14) as a pane indicator on any interval, via `/add-indicator`; known-value test on a hand-built fixture (first value = SMA of the first N true ranges, Wilder after); no-look-ahead perturbation test; incremental tail recompute matches a full recompute
+- [ ] Daily candle source for intraday charts: closed 1d candles for the chart's symbol, enough for SMA(50) + ATR(14) warm-up, loaded through the existing provider / server cache path; refreshed when a UTC day closes; the forming 1d candle is excluded (test); a symbol switch drops the old symbol's daily data (test)
+- [ ] Pure compute `web/src/indicators/keyLevels.ts`: PDH/PDL step lines (optional PWH/PWL), daily ATR, range used and trend bias from closed 1d candles plus closed intraday bars, in one pass; inputs `atrPeriod`, `smaPeriod`, `showWeekly`
+- [ ] Rendering: PDH/PDL (and PWH/PWL) as step lines or a series primitive under the drawings, labelled at the right edge; range used (%) and trend bias (above/below SMA 50) in the indicator legend; themed for light and dark; per-part toggles in the settings dialog; hidden on 1d and above
+- [ ] Tests: known values on a fixture that crosses a UTC midnight and a week boundary, with each level, ATR, range-used and bias value worked out by hand; a no-look-ahead perturbation test (changing bars after `t` leaves every output at or before `t` unchanged); the forming intraday bar and the forming 1d candle never move a level; a missing day leaves a gap, never a forward-filled level; incremental tail recompute matches a full recompute
+- [ ] Definitions written in `web/README.md` ("visual only, no edge claim"; the video's fade rule is contradicted by the intraday-momentum literature); code review and quant review (look-ahead focus); `npx tsc -b`, `npx vitest run`, `npm run lint`, then `/run-gate 21`
+- [ ] Browser checks run by Claude (headless Chrome harness): on BTCUSDT 1h and 5m, PDH/PDL step at each UTC midnight and match the previous 1d candle's high/low; the legend's range used and bias match a hand calculation from the 1d candles; nothing moves while a candle is forming; the overlay is hidden on 1d
+
+Not in this phase: any lab work. Testing prior-day levels as a strategy needs owner registry
+features under the lab lock (`prev_day_high` / `prev_day_low` as ratios to close, and
+`day_range_used` = current UTC day's range ÷ prior daily ATR, each with a perturbation test). It then
+needs one pre-registered run on BTC/ETH 1h (not 5m: costs), untuned: fade at the prior-day high vs
+break-and-continue, with the intraday-momentum prior written down first. The expected and acceptable
+outcome is "no edge" (DSR N is already in the thousands). Consider it only if this overlay makes the
+levels look real. Fixed R:R targets, the "3 of 5 profitable days" scaling gate and counter-trend
+scalping are not adopted (report section 4); the sizing lessons are already in Phase 20 Part E2.
+
+**Done when:** on BTCUSDT 1h and 5m the overlay draws previous-UTC-day high/low step lines from closed
+1d candles, the legend shows daily-ATR range used and the 50-day SMA bias, nothing moves while an
+intraday bar or the daily candle is forming, the ATR pane indicator works on any interval, and the
+known-value, no-look-ahead, forming-bar, gap and incremental-vs-full tests pass.
+
+---
+
 ## Testing Strategy
 
 - **Unit (Vitest):** indicator math, data mappers (Binance kline → Candle).
@@ -1358,6 +1416,7 @@ shadow judge are byte-identical; and every test, typecheck and lint stays green.
 | hedgeFund code assumes daily bars | Audit before reuse; wrap or extend for intraday |
 | Regime model fitted with future data (smoothed HMM, full-sample fit, label switching) | Forward-filtered probabilities only, refit on past rows, labels ordered inside each fit window, perturbation test (Phase 20) |
 | Paper results counted as N confirmations across correlated coins | Report N_eff from the return correlation matrix beside per-coin verdicts (Phase 20) |
+| Higher-timeframe levels read from a forming daily candle (repainting PDH/PDL, ATR, SMA bias) | Closed 1d candles only, step lines from the next UTC day, perturbation and forming-candle tests (Phase 21) |
 
 ---
 
@@ -1386,5 +1445,6 @@ shadow judge are byte-identical; and every test, typecheck and lint stays green.
 | 18 | Session ranges overlay (Asia/London/New York boxes and UTC opening range; visual only, no lab changes) | Small |
 | 19 | Web performance & DRY (per-tick scans and root re-renders removed, primitive frame path cleaned, forming bar from the hub + compression, code splitting + React Compiler, ~1.7–2k duplicate lines consolidated; no visual change) | Large |
 | 20 | Regime model, persistence & paper risk controls (causal HMM features, `persist(c, k)`, one pre-registered HMM overlay run, paper protections + circuit breaker, pre-registered paper position sizing, N_eff, crash-episode table, ribbon confidence + paper monitor; owner parts under the lab lock) | Large |
+| 21 | Key levels & range overlay (previous-UTC-day/week high-low from closed 1d candles, daily-ATR range used, 50-day SMA bias badge, ATR pane indicator; visual only, no lab changes) | Small–Medium |
 
 **First usable version = end of Phase 3.**
