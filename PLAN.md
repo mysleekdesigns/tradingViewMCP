@@ -1210,6 +1210,15 @@ closes all, a lock file that needs a manual restart) and correlation checks. It 
 results. The transcript could not be fetched; the review used the video's chapter list and two
 third-party summaries, so treat the details as second-hand.
 
+Position sizing (added 2026-11-01): the owner's review of Tom Sosnoff's "I Stopped Trading On
+Feeling; It's Why I'm Profitable" ([youtube.com/watch?v=M5jKMWpg9Tg](https://www.youtube.com/watch?v=M5jKMWpg9Tg),
+notes in `agents/research/research_notes/Position sizing research/video_notes.md`, transcript read)
+adds sizing rules to the paper risk controls (Part E2): a small fixed fraction at risk per trade,
+smaller stakes when volatility is high, a cap on total exposure, conviction worth at most 2× base
+size, no averaging down (Martingale), and at least 3 months at each size level before stepping up.
+Paper stakes today are a flat 100 of a 1000 wallet per trade. Sizing controls risk; it does not
+create an edge, and none of these rules may be used to rescue a plan that fails the lab.
+
 What is already covered and stays out: walk-forward, benchmarks and random nulls (Phase 7, stricter
 here); Markov regime features (`regime_state`, `regime_signal`; run r-20261026-142915-4bdd2b, idea 13:
 no edge, DD 74%); volatility targeting (run r-20261025-125744-12221d: no edge); volatility and SMA200
@@ -1233,8 +1242,11 @@ Rules for this phase:
   the Phase 17 shadow judge are not changed. New risk controls apply only to paper tests started
   after this phase.
 - **Paper only.** No Alpaca, no leverage, no live orders, no 5-minute HMM, no 252-day windows.
+- **Sizing is pre-registered.** Every sizing number (risk per trade, volatility window and target,
+  exposure cap, size multiplier cap) is written in the paper protocol before the test starts and
+  never changed mid-test; a different size is a new test. Sizing never enters lab plans or criteria.
 
-Parts A, E and part of H are open to Claude. Parts B, C, D and G touch `lab/lab/registry/`,
+Parts A, E, E2 and part of H are open to Claude. Parts B, C, D and G touch `lab/lab/registry/`,
 `lab/lab/research/` or `lab/config/`, which are read-only under the lab lock, so they are **(owner)**
 items: Claude writes the proposal, the owner applies it. Needs Phase 13 (paper protocol) and Phase 15
 (overlay question).
@@ -1269,6 +1281,16 @@ Part E — Paper-trading risk controls (future paper tests only)
 - [ ] Circuit breaker in `paper_trade.py`: when a threshold trips, stop that dry-run process and write `agents/data/paper/<test>/halt.lock` (reason, threshold, value, time); `prepare`/`start` refuse while the lock exists; only the owner deletes it, outside Claude Code; the halt is logged in the test's journal
 - [ ] Tests on fixture dry-run DBs: each threshold trips at the right bar and not before; the lock blocks restart; dry-run only (no live mode reachable, hooks unchanged)
 
+Part E2 — Position sizing rules (future paper tests only)
+- [x] Research record: Sosnoff position-sizing video notes saved at `agents/research/research_notes/Position sizing research/video_notes.md` (transcript read in the owner's Chrome, untrusted-source callout, assessment for this project; commit 4daf24a)
+- [ ] Protocol `sizing` block, fixed before start: `risk_per_trade_pct` (one value in 0.5–1.5% of the paper wallet, with a one-line justification), so stake = wallet × risk_per_trade_pct / stop distance, capped at `max_stake_pct` of the wallet; `max_total_exposure_pct` (≤ 100%, no leverage) enforced through `max_open_trades` × stake and `tradable_balance_ratio`; the protocol's sha256 covers the block. Tests: stake arithmetic on known values; a protocol without a stoploss is refused when `risk_per_trade_pct` is set
+- [ ] Volatility-adjusted stake: stake scales by `vol_target / realized_vol` over a fixed window of closed bars (365-day annualisation), clipped to [`min_stake_pct`, `max_stake_pct`]; window and target fixed in the protocol. Sosnoff's "more total exposure when implied volatility is high" is **not** adopted (it is specific to selling options). Tests: perturbation test (changing prices after bar t leaves the stake at t identical); a vol spike shrinks the next stake; the clip holds at both ends
+- [ ] No averaging down: `prepare` refuses a protocol or strategy with `position_adjustment_enable` that adds to a losing position, or any loss-triggered stake increase (Martingale); the refusal names the rule. Tests: a DCA-on-loss fixture is refused; a plain fixed-stake fixture passes
+- [ ] Conviction cap: `size_multiplier` in the protocol is 1 by default and refused above 2; no LLM (Jev or Claude) may set or change it (Phase 17 rule: judges watch and never steer). Test: a protocol with 3 is refused
+- [ ] Size steps need proof: a protocol may name a `prior_test` at a smaller size; `prepare` refuses a step up unless that test ran at least 90 days and its pre-registered paper criteria passed in `compare`, and refuses more than one step (2×) at a time. Tests: 89 days refused, 90 days with a pass accepted, a failed prior refused
+- [ ] `compare` sizes the backtest side with the same `sizing` block (same stake function in the Freqtrade strategy), so paper and backtest trade the same size (test: a mismatch is refused); the paper monitor (Part H) shows stake, risk per trade and total exposure per test
+- [ ] The paper report template and (owner, `.claude/skills/` is protected) the `honest-backtesting` checklist gain a sizing line: risk per trade, exposure cap, the largest single loss as % of wallet, and a statement that sizing does not change whether the plan has an edge
+
 Part F — Correlation-aware paper evaluation
 - [ ] `paper_trade.py compare --portfolio` (information only): pairwise daily-return correlations across concurrent paper tests and the effective number of independent bets, N_eff = (Σλ)² / Σλ² over the correlation matrix's eigenvalues, with the window and method stated
 - [ ] Rule added to `.claude/rules/research-agents.md` and the `honest-backtesting` checklist: confirmations across correlated coins are one piece of evidence, not N; the 2026-12-25 HC write-up reports N_eff next to the per-coin verdicts without changing any frozen verdict
@@ -1288,13 +1310,18 @@ Part I — Review and gate
 - [ ] Quant review of Parts B–G (look-ahead, label switching, cache invalidation, pre-registration, holdout untouched); `uv run pytest -q` and `uv run ruff check .` in `lab/` and `agents/`; then `/run-gate 20`
 
 Not in this phase: any live or Alpaca order path, leverage, regime-scaled position sizing beyond
-0/1 exposure (needs an engine change), HMM on intraday bars below 1h, a regime model as an entry
-signal, and choosing the number of states by searching the design window.
+0/1 exposure in the lab engine (needs an engine change; Part E2 sizing lives in the Freqtrade paper
+side only), Kelly sizing (edge estimates are too noisy; no plan has passed the lab), raising exposure
+with volatility, HMM on intraday bars below 1h, a regime model as an entry signal, and choosing the
+number of states by searching the design window.
 
 **Done when:** `hmm_state` and `hmm_bear_prob` pass the perturbation test and the hedgeFund
 cross-check; `persist(c, k)` is in the plan language with its tests; one pre-registered HMM overlay
 run is in the journal with its outcome; a new paper test can carry pre-registered protections and a
-circuit breaker whose `halt.lock` blocks restart, with `compare` using the same protections; `compare
+circuit breaker whose `halt.lock` blocks restart, with `compare` using the same protections; a new
+paper test can carry a pre-registered `sizing` block (risk per trade, volatility-adjusted stake,
+exposure cap, multiplier ≤ 2, no averaging down, size steps only after a 90-day passing test) that
+`compare` applies to both sides; `compare
 --portfolio` reports N_eff; `get_report` shows the crash-episode table; the HC tests and the Phase 17
 shadow judge are byte-identical; and every test, typecheck and lint stays green.
 
@@ -1358,6 +1385,6 @@ shadow judge are byte-identical; and every test, typecheck and lint stays green.
 | 17 | Jev trade-time judge (forward-only shadow judge on the HC paper bots, hash-chained decision log, pre-registered take-vs-skip test; optional decision panel) | Medium |
 | 18 | Session ranges overlay (Asia/London/New York boxes and UTC opening range; visual only, no lab changes) | Small |
 | 19 | Web performance & DRY (per-tick scans and root re-renders removed, primitive frame path cleaned, forming bar from the hub + compression, code splitting + React Compiler, ~1.7–2k duplicate lines consolidated; no visual change) | Large |
-| 20 | Regime model, persistence & paper risk controls (causal HMM features, `persist(c, k)`, one pre-registered HMM overlay run, paper protections + circuit breaker, N_eff, crash-episode table, ribbon confidence + paper monitor; owner parts under the lab lock) | Large |
+| 20 | Regime model, persistence & paper risk controls (causal HMM features, `persist(c, k)`, one pre-registered HMM overlay run, paper protections + circuit breaker, pre-registered paper position sizing, N_eff, crash-episode table, ribbon confidence + paper monitor; owner parts under the lab lock) | Large |
 
 **First usable version = end of Phase 3.**
