@@ -1140,12 +1140,19 @@ bar in history) pay a second copy for the plotted array: ~164 µs at 150k. For t
 scripting time that does not grow with history length" check, this copy is the accepted residual.
 Everything else on the tick path must stay flat. The Heikin-Ashi tail is flat (~0.13 µs) and the
 plotted-array cache no longer adds ~110 µs of GC per tick.
+Owner decision (2026-11-01): Lightweight Charts 5.2.1 (the latest release) rebuilds every series' item
+array on each `series.update()`, so its own per-tick cost grows with history length: about 1.2 ms
+at 1k bars, 7.8 ms at 20k and 58 ms at 150k for 3 series, with conflation on or off
+(`agents/research/research_notes/2026-11-01-phase19-browser-traces.md`). This is accepted as a
+library limit. The trace checks for "per-tick scripting time that does not grow with history
+length" apply to app code, measured by bundle in the CPU profile: 3.4 ms per 10 s at 501 bars,
+1.9 ms at 20,002 bars.
 
 ### Checklist
 
 Wave 1 — per-tick waste (highest payoff)
-- [ ] Baseline traces recorded and saved under `agents/research/research_notes/` before any change (single and 4-panel, Binance 1m, plus Coinbase BTC-USD 1m)
-- [ ] Tail detection by lineage/version instead of full scans: `data/candleStore.ts` `applyLiveCandle`, `data/plottable.ts` `every(isTradedBar)`, `chart/seriesSync.ts` `tailMatch`; volume profile layer takes the shared `BarLineage` like structure and sessions; per-tick scripting time independent of history length in the trace
+- [x] Baseline traces recorded and saved under `agents/research/research_notes/` before any change (single and 4-panel, Binance 1m, plus Coinbase BTC-USD 1m)
+- [x] Tail detection by lineage/version instead of full scans: `data/candleStore.ts` `applyLiveCandle`, `data/plottable.ts` `every(isTradedBar)`, `chart/seriesSync.ts` `tailMatch`; volume profile layer takes the shared `BarLineage` like structure and sessions; per-tick scripting time independent of history length in the trace
 - [x] Live snapshots out of App state: `lives` becomes a small external store read by the quote, StatusBar and paper feed only; status/closedThrough/error stay in React state; `indicatorSeries` stops emitting on 'update' plans; `useLiveCandles` returns a stable object; keydown handler reads `lastClose` from a ref; React Profiler shows no shell commit (Header, SidebarRail, StatusBar, DrawingToolbar, Watchlist) on a forming-bar tick
 - [x] `memo()` the shell: Header (hoisted callbacks, memoised LayoutMenu element), Watchlist and `WatchlistRow` (symbol-keyed stable callbacks, cached `Intl.NumberFormat`), StatusBar (cached clock formatter per timezone), SidebarRail, AlertsPanel props hoisted
 - [x] Coinbase forming-bar emits coalesced per animation frame (or 100–250 ms), same pattern as the existing ticker flush in `coinbaseStream.ts`
@@ -1161,8 +1168,8 @@ Wave 2 — per-frame path (crosshair, scroll, zoom, drawing drag)
 Wave 3 — history load, bar close, network
 - [x] Rolling-window indicator primitives (`indicators/primitives.ts`) use a ring buffer with running sum and sum-of-squares (periodic re-sum for drift); 'prepend' computes only the new head and splices; perturbation and known-value tests unchanged; a 1000-bar prepend on a 150k history no longer resets every runner
 - [x] Prepend/gap merge by binary-search splice of two sorted arrays (no Map + sort); one plotted-times `Set` and one `barsKey` shared by `Chart.tsx`, `backtestOverlay` and `derivativesPanes`; `series.update()` for the newest point when only the tail grew; volume `setData` gated on up/down colour actually changing; same-kind chart-type switches use `applyOptions` + `setData` without removing the series
-- [ ] Server: candles route serves the forming bar from the hub's last kline so a warm-cache `/api/candles` makes zero upstream calls (verified in the server log); `@fastify/compress` (brotli/gzip); `Cache-Control: immutable` + ETag on closed-history pages (`endTime` set)
-- [ ] Ref-counted live-candle controller cache keyed on provider/symbol/interval so two panels on the same market share one socket and one REST load; Coinbase REST pages fetched in parallel within the 125 ms throttle budget
+- [x] Server: candles route serves the forming bar from the hub's last kline so a warm-cache `/api/candles` makes zero upstream calls (verified in the server log); `@fastify/compress` (brotli/gzip); `Cache-Control: immutable` + ETag on closed-history pages (`endTime` set)
+- [x] Ref-counted live-candle controller cache keyed on provider/symbol/interval so two panels on the same market share one socket and one REST load; Coinbase REST pages fetched in parallel within the 125 ms throttle budget
 
 Wave 4 — startup and bundle
 - [x] `TesterIcon` and `ResearchIcon` moved out of `BacktestPanel`/`ResearchPage` into a small icons module; `React.lazy` + `Suspense` for ResearchPage, BacktestPanel, PaperTradingPanel, SeasonalsView and SettingsDialog (their CSS splits with them); vendor groups via `build.rolldownOptions.output.codeSplitting.groups` for react/react-dom, lightweight-charts and lwc-plugin-accessibility; main chunk under ~150 KB gzip and vendor hashes stable across an app-only change
@@ -1173,7 +1180,7 @@ Wave 5 — DRY consolidation (interleave with waves 1–4 where a fix touches th
 - [x] `web/src/data/http.ts` (one typed request helper: fetch, JSON, abort, Retry-After, error mapping) and `web/src/data/guards.ts` (isRecord/finite/nonEmptyString/toFiniteNumber/dedupeByTime/candle equality) replace the copies in `binance.ts`, `coinbase.ts`, `server.ts`, `persistence.ts`, `labApi.ts`, `researchApi.ts`, `drawingsApi.ts`
 - [x] `chart/layers/base.ts`: shared primitive base (uid, visible, attach/detach, paneViews, updateAllViews, render-target types), shared layer host (entries map, keep-set sweep, setColors fan-out), shared coords adapter, lineage prefix memo inside `BarLineage`; `chart/util/search.ts` with one `lowerBound`; one luminance function (pick Rec.709 or Rec.601, used everywhere); one candle→point mapper set
 - [x] State/UI: one `storedValue<T>` + `useStoredState` for the six localStorage pairs and eight persist-on-change effects; `useModalKeys` extended to the twelve hand-rolled Escape handlers; a `useMenu` hook for TimeframePicker, ChartTypeMenu and LayoutMenu; a `useController(factory, deps)` hook for the seven controller-in-state hooks
-- [ ] `components/primitives.css`: icon button, tab with accent underline, dialog shell/head/foot, `:focus-visible` ring, thin scrollbar, panel head/title/empty chrome; the seven-plus copies removed from the component stylesheets; visual diff shows no change
+- [x] `components/primitives.css`: icon button, tab with accent underline, dialog shell/head/foot, `:focus-visible` ring, thin scrollbar, panel head/title/empty chrome; the seven-plus copies removed from the component stylesheets; visual diff shows no change
 - [ ] After each wave: code review (`code-reviewer`; `quant-reviewer` for anything under `web/src/indicators/`), `npx tsc -b`, `npx vitest run`, `npm run lint` in `web/`; `npx tsc --noEmit`, `npx vitest run` in `server/`; then `/run-gate 19`; browser checks listed for the owner
 
 Not in this phase: a Web Worker for indicators (only worth it for full recomputes on very long

@@ -68,3 +68,69 @@ despite the request interceptor. Two test trendlines (`be66e1e3…`, `1af6500a�
 BTCUSDT. They were deleted on 2026-11-01, and `GET /api/drawings?symbol=BTCUSDT` is back to `[]`.
 The indicator layout was not changed. Next time: run against a separate server (`TV_PORT`,
 `TV_DB_PATH` in a temp directory) instead of relying on interception.
+
+## Second pass (2026-11-01): baseline, sharing, server, visual diff
+
+All runs below used a throwaway server (`TV_PORT=8790`, `TV_DB_PATH` in a temp directory) and
+production builds served with `vite preview`. Nothing touched the owner's server or database.
+
+### Baseline: pre-Phase-19 build (`1bc71a1`) vs current (`16a5cb4` + PLAN edits)
+
+The baseline ships as one bundle, so only total JS compares like for like.
+
+| 10 s window | Baseline JS | Current JS | Shell components rendering on a tick (baseline → current) |
+|---|---|---|---|
+| Single, 501 bars, idle | 27.6 ms | 21.4 ms | App, Header, SidebarRail, StatusBar, DrawingToolbar + ~30 icons, every tick → none |
+| Single, crosshair | 168.7 ms | 172.0 ms | same → none |
+| Single, ~20k bars, idle | 97.1 ms | 78.4 ms | same → none |
+| 4 panels, idle | 63.6 ms | 47.8 ms | same → none |
+| 4 panels, crosshair | 235.0 ms | 208.6 ms | same → none |
+| Coinbase BTCUSD 1m, idle | 79.7 ms | 52.7 ms | same, about 104 renders per 10 s → none |
+| Coinbase, crosshair | 269.3 ms | 247.2 ms | same → StatusBar once in 10 s (bar count changed; not per tick) |
+
+No long tasks in any run of either build.
+
+### Shared live controller
+
+| Layout | Build | `/ws/klines` sockets | 1m `/api/candles` loads |
+|---|---|---|---|
+| 2 panels, both BTCUSDT 1m | baseline | 2 | 2 |
+| 2 panels, both BTCUSDT 1m | current (4 runs) | 1 | 1 `start` |
+| 4 panels: 1m, 1m, 1m, 1h | current | 2 (1m + 1h) | 1 |
+
+Now and then a second 1m request appears. Its initiator stack is `requestGapFill`: the
+controller's recovery fetch after a reconnect status at startup, not a second panel loading.
+Coinbase parallel paging is covered by the `CoinbaseProvider parallel candle paging (Phase 19)`
+tests: starts are at least 125 ms apart, and it finishes in about (pages − 1) × 125 ms plus one
+round trip.
+
+### Server warm cache (throwaway server log, live `/ws/klines` subscriber held)
+
+Five requests 20 s apart across a bar close: upstream calls 1, 0, 0, 1, 0. Inside a bar, a
+warm-cache request makes zero upstream calls. The first request after each bar closes makes one
+(`missing+fresh`) to store the closed bar: the cache's clock-skew guard stores a bar only once
+upstream has the next one.
+
+### Visual diff: `primitives.css` consolidation (pre-Wave-5 `48b862c` vs current)
+
+- **Method:** 17 UI states at 1920×1080. Each state starts from a fresh reload with storage
+  reseeded. Both builds were served the same recorded `/api` responses, with WebSocket stubbed,
+  `Date` frozen and transitions off.
+- **States:** main view, symbol search, more timeframes, chart type, indicators menu, alert
+  dialog, layout menu, shortcuts, settings, indicator settings, Seasonals, alerts panel, paper
+  panel, Strategy Tester, Research, keyboard focus ring, light theme.
+- **Result:** 0 differing pixels in all 17 (threshold: summed RGB difference above 24). The
+  Settings PNGs are byte-identical.
+- **Sensitivity check:** two screens that differ only by a focus ring gave 316 differing pixels.
+
+### Lazy panels
+
+- All five lazy panels open: Settings, Seasonals, paper trading, Strategy Tester and Research.
+  Research shows its own "lab unavailable" state, because the lab was not running.
+- With a panel's chunk blocked, the first open reloads the page once, by design (`main.tsx`
+  `vite:preloadError`). The second open shows "Couldn't load Settings" / "Couldn't load the
+  Strategy Tester" with Retry and Close.
+- **Bug:** in Chrome, Retry does not recover after the network returns. Chrome keeps the failed
+  dynamic `import()` for the life of the document, so Retry sends no new request and the card
+  stays. Possible fix: retry the failed chunk URL with a cache-busting query in `lazyLoad.ts`.
+  Not changed; listed for the owner.
