@@ -1,0 +1,70 @@
+# Phase 19 browser traces (2026-11-01)
+
+How: headless Chrome for Testing 151 driven over the DevTools protocol. A production build
+(`vite build --minify false`, so component names survive) was served by `vite preview` on
+127.0.0.1:4174, with `/api` proxied to the owner's server on 8787. The setup was the owner's
+saved layout (Market Structure, EMA 20, RSI 14) plus one trendline, on BTCUSDT 1m.
+
+Measured per phase:
+- CPU profile sampled every 100 µs.
+- React commits, from a `__REACT_DEVTOOLS_GLOBAL_HOOK__` shim that uses the same "did this
+  component render" rule as React DevTools (PerformedWork flag, bailed-out subtrees skipped).
+  "Outside" means a component rendered that is not under ChartPanel.
+- Long tasks (PerformanceObserver).
+- WebSocket frames.
+- Allocation sampling.
+
+Every phase is 10 s unless stated. The harness lives in the session scratchpad and is not
+committed. These are historical measurements on one machine, not a guarantee.
+
+## Results
+
+| Scenario | Ticks / 10 s | JS / 10 s (app · React · LWC) | Long tasks | Commits rendering outside ChartPanel |
+|---|---|---|---|---|
+| Single, 501 bars, idle | 5 kline | 20.4 ms (3.4 · 4.7 · 9.2) | 0 | quote + last-update leaves; Watchlist on ticker frames only |
+| Single, crosshair moving 60 Hz | 8 | 188.8 ms (22.7 · 45.0 · 88.2) | 0 | same |
+| Single, 20,002 bars, idle | 5 | 79.1 ms (1.9 · 2.7 · 71.3) | 0 | same |
+| 4 panels (1m/1h/4h/1d), idle | 20 kline | 47.3 ms (5.1 · 6.2 · 30.1) | 0 | same |
+| 4 panels, crosshair | 25 | 236.7 ms | 0 | same |
+| Coinbase BTCUSD 1m (direct), idle | 94 forming flushes | 74.7 ms (10.4 · 8.7 · 43.5) | 0 | quote + last-update leaves only |
+| Coinbase, crosshair | 88 | 254.5 ms | 0 | same |
+
+- **Shell commits on a forming-bar tick.** Header, SidebarRail, StatusBar and DrawingToolbar
+  never rendered in any phase. The components that did render outside ChartPanel are the live
+  store's leaf readers (`QuoteView`/`QuoteReadout`, `LastUpdateClock`/`LastUpdateText`), once
+  per tick, which is the Wave 1 design. `Watchlist`/`WatchlistRow` rendered exactly once per
+  `/ws/tickers` frame (10 per 10 s), never on kline frames.
+- **String / `Intl` work while the crosshair moves.** The only hit was `format` with no app
+  frame, 0.45–0.65 ms per 10 s: LWC's own axis labels. No app code formats on the paint path.
+- **App per-tick work is flat in history length.** App JS was 3.4 ms per 10 s at 501 bars and
+  1.9 ms at 20,002 bars, at the same zoom (about 120 bars visible).
+- **Lightweight Charts' per-tick work is not flat.** At 20,002 bars it took 71 ms per 10 s and
+  allocated about 8 MB in 30 s (two LWC frames, both `rows().map(...)`). Cause, in LWC 5.2.1
+  `dist/lightweight-charts.development.mjs` `_internal__makeValid`: any data change, including
+  one `series.update()`, sets `_dataInvalidated`, and `_fillRawPoints` then rebuilds every
+  series' full item array. 5.2.1 is the latest release (npm, 2026-11-01).
+- **LWC alone** (3 series, 130 bars visible, one update per 100 ms), JS + GC per tick:
+
+  | History | Conflation off | Conflation on |
+  |---|---|---|
+  | 1,000 bars | 1.19 + 0.09 ms | 0.99 + 0.12 ms |
+  | 20,000 bars | 7.80 + 0.97 ms | 8.04 + 0.96 ms |
+  | 150,000 bars | 58.2 + 14.7 ms | 60.2 + 13.8 ms |
+
+  Conflation makes no difference. At the 150k cap a Coinbase chart (10 flushes/s) would spend
+  most of the main thread inside LWC.
+- **Allocation, 30 s of idle ticks.** 309 kB sampled at 501 bars, nearly all LWC. 10 MB at
+  20,002 bars, of which about 8.3 MB is LWC `_fillRawPoints`. `applyLiveCandle` accounts for
+  117 kB, the accepted one-copy residual.
+- **Server responses.** Every `/api/candles` response was `content-encoding: br`. Closed-history
+  pages (`endTime` set) carry `cache-control: public, max-age=31536000, immutable` and an ETag;
+  the live page carries `no-cache`. Zero upstream calls on a warm cache is not observable from
+  the browser: the owner checks the server terminal.
+
+## Incident
+
+When the harness closed its tabs, the app's `keepalive` drawing saves reached the owner's server
+despite the request interceptor. Two test trendlines (`be66e1e3…`, `1af6500a…`) were written to
+BTCUSDT. They were deleted on 2026-11-01, and `GET /api/drawings?symbol=BTCUSDT` is back to `[]`.
+The indicator layout was not changed. Next time: run against a separate server (`TV_PORT`,
+`TV_DB_PATH` in a temp directory) instead of relying on interception.
