@@ -207,3 +207,4 @@ Registered 2026-10-29T22:42:48+00:00 before the first dry-run trade. Venue: freq
 
 ## Verdicts (appended by `paper_trade.py compare`)
 - 2026-11-01 (data to 2026-11-01 12:00 UTC): **continue**, 2.5 days. continue: 2.5 of 56.0 days elapsed; no fail rule tripped Comparison: `comparison-2026-11-01.json`.
+- 2026-11-02 (data to 2026-11-02 12:00 UTC): **continue**, 3.5 days. continue: 3.5 of 56.0 days elapsed; no fail rule tripped Comparison: `comparison-2026-11-02.json`.
