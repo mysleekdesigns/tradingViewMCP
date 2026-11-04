@@ -77,8 +77,8 @@ What this means for Phase 20:
 1. **PLAN.md Part B says "number of states (3, from the source)". The sources read do not support 3.** Every setup
    above that drives a decision uses 2. Nystrup (2014) reports that two-state strategies beat three-state ones in
    sample and argues that "it is easier to distinguish between two than three states", while saying better three-state
-   strategies cannot be ruled out. Three states is the video's low end, not a literature value. This needs the
-   owner's decision before Part B; see `Phase 20 lab lock proposal.md`.
+   strategies cannot be ruled out. Three states is the video's low end, not a literature value. Owner decision
+   2026-11-04: 2 states; see `Phase 20 lab lock proposal.md`.
 2. **The published persistence control is a confidence threshold, not a bar count.** Nystrup (2014) uses 92% and notes
    that it "plays the same role as the time lag in the median filter" (Bulla et al. 2011 used the median of six
    predictions). 92% was picked by that author, who remarks a slightly lower value might have been better out of

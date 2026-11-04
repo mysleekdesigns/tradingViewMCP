@@ -276,9 +276,8 @@ uv run python paper_trade.py compare --portfolio [--candidates a,b]   # informat
   would then report the clipped stake as an implementation problem. `min_stake_pct` must give at least 7.5 (Binance's 5 USDT
   minimum plus freqtrade's stop-loss reserve), and with a volatility target it may not exceed the
   base stake, or the floor itself would risk more than registered.
-- **Volatility only shrinks a stake.** The scale is `min(1, vol_target / realized_vol)`. PLAN.md
-  Part E2 wrote `vol_target / realized_vol` without the cap; low volatility would then push risk
-  above the registered 0.5-1.5%, so the cap is the owner-visible rule.
+- **Volatility only shrinks a stake.** The scale is `min(1, vol_target / realized_vol)`, so low
+  volatility can never push risk above the registered 0.5-1.5% (PLAN.md Part E2).
 - **Size steps need proof.** A step up names `prior_test`, which must be the very same plan
   (`plan_hash`, not just `logic_hash`: logic drops parameters, literals, stops and the interval,
   so EMA 5/60 at a 2.5% stop once borrowed the pass of EMA 8/30 at 10% and staked 4x at "2x"), with
