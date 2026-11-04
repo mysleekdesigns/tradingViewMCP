@@ -6,6 +6,7 @@ market-data-only hosts); no API keys anywhere.
 
 - Port: `TV_PORT` env, default `8787`. Host is always `127.0.0.1`.
 - Database: `TV_DB_PATH` env, default `server/data/app.db` (gitignored). Tests use `:memory:`.
+- Paper tests folder: `PAPER_DIR` env, default `agents/data/paper`. Read only, see `/api/paper/monitor`.
 - Market data venue: `TV_MARKET_VENUE` env, `binance` (default) or `binance-us`. See "Market
   data venue" below.
 - Alerts: `TV_DESKTOP_NOTIFY` (`auto` | `always` | `off`, default `auto`) and optional
@@ -145,6 +146,18 @@ where `ErrorKind` is one of the web `MarketDataErrorKind` values:
   `DELETE /api/drawings/:id` → `204` (404 if absent).
 - ids: `^[A-Za-z0-9_-]{1,64}$`, otherwise 400. The app uses id `default` for its single
   watchlist and layout.
+- `GET /api/paper/monitor` → `{ "generatedAt": number, "tests": PaperMonitorTest[] }`, one row per
+  folder under `PAPER_DIR` that holds a `protocol.json` (types in `src/routes/paperMonitor.ts`).
+  Read only: dry-run DBs open read-only, and nothing here starts, stops or unlocks a test. P&L is
+  realised; open positions are not marked. `id` is the folder name. `read.protocol` and
+  `read.trades` say which sources were read: when one is false, the fields taken from it are
+  placeholders, not facts, and `malformed` flags a `protections` or `circuit_breaker` block that is
+  present but unusable. `protections` only means configured; `protectionLock` is a running lock
+  from freqtrade's `pairlocks` table (`active` and ending after now), leaving out the post-exit
+  `Auto lock` it sets after every trade. `stake.openExposurePct` is the open trades' stake in
+  percent of the wallet. A bad folder sets that row's `error`, beside whatever else could be read,
+  and never fails the others. On a stopped bot's WAL database, SQLite may leave
+  empty `-wal` and `-shm` files beside it; the database itself is unchanged.
 
 ### Compression
 

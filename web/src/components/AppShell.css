@@ -101,6 +101,7 @@
 }
 
 .regime-chip__swatch {
+  flex: none;
   width: 4px;
   height: 10px;
   border-radius: 1px;
@@ -122,6 +123,14 @@
   color: var(--text);
   font-family: var(--font-num);
   font-variant-numeric: tabular-nums;
+}
+
+/* Small multi-chart cells keep the live state or the error and drop the key, which stays in the tooltip:
+   the full chip would cover the legend's symbol title. */
+@media (max-width: 1500px) {
+  .chart-cell--multi .regime-chip__key {
+    display: none;
+  }
 }
 
 .regime-chip__state {

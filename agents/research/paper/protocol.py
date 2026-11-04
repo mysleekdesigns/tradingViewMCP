@@ -98,7 +98,7 @@ import sqlite3
 import tempfile
 import tomllib
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -129,11 +129,23 @@ from lab.stats.sharpe import (
 from lab.types import CostModel, Plan, bars_per_year, interval_seconds
 from research.journal import guard_holdout, parse_frontmatter
 from research.paper.freqtrade import check_candidate_name, startup_candle_count
+from research.paper.risk import (
+    PaperConfig,
+    RiskControls,
+    Sizing,
+    check_frozen_config,
+    check_one_wallet,
+    check_sizing_against_plan,
+    paper_config_from_dict,
+    risk_controls_from_dict,
+    sizing_from_dict,
+)
 
 AGENTS_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_PROTOCOL_CONFIG = AGENTS_DIR / "config" / "paper_protocol.toml"
 DEFAULT_CANDLE_HOST = "data-api.binance.vision"
 PROTOCOL_VERSION = 7  # v7: START entry gate in the rules; v6: data.warm_from; v5: irregular
+RISK_PROTOCOL_VERSION = 8  # only with a risk_controls or sizing block (PLAN.md Phase 20)
 PROTOCOL_FILE = "protocol.json"
 SECONDS_PER_DAY = 86_400
 WEEK_SECONDS = 7 * SECONDS_PER_DAY
@@ -142,13 +154,15 @@ WEEK_SECONDS = 7 * SECONDS_PER_DAY
 LEDGER_MIN_SCHEMA = 4
 VERDICTS_HEADING = "## Verdicts (appended by `paper_trade.py compare`)"
 PROTOCOL_HEADING = "## Registered protocol (frozen before the first dry-run trade)"
+HALT_HEADING = "## Circuit breaker (appended by `paper_trade.py guard`)"
+REWRITE_HEADING = "## Files rewritten after trades (appended by `paper_trade.py prepare`)"
 
 Mode = Literal["sharpe_and_implementation", "implementation_only"]
 VerdictName = Literal["pass", "fail", "continue", "inconclusive"]
 ClaimSource = Literal["walk_forward_oos", "owner_supplied"]
 CandleSource = Literal["api", "archive"]
 CheckStatus = Literal["ok", "fail", "pending"]
-CheckKind = Literal["regime", "implementation", "performance"]
+CheckKind = Literal["regime", "implementation", "performance", "circuit_breaker"]
 FINAL_VERDICTS: frozenset[str] = frozenset({"pass", "fail", "inconclusive"})
 LockedSplitCheck = Literal[
     "passed", "unchecked", "family_checked_not_this_plan", "passed_other_ledger"
@@ -165,6 +179,10 @@ LOCKED_SPLIT_STATES: tuple[str, ...] = (
 # was off in either direction (1.8% vs 10%; 5.9% vs 0.8%). Printed beside every estimate.
 SIMULATED_FALSE_FAIL_RANGE: tuple[float, float] = (0.0, 0.10)
 LATE_LABEL = "the backtest acted earlier than live: possible look-ahead in the lab"
+UNJUDGED_CHECKS = ("shortfall", "blocked_share")  # still pending at the decision bar: no pass
+# Read through the lab replay (name prefixes), so unknown without the protected backtest. Entries,
+# exposure and Sharpe come from the dry-run DB and the candles and stay judged.
+REPLAY_CHECKS = ("irregular_fills", "shortfall")
 EARLY_LABEL = "the bot acted before the bar closed: possible use of the still-forming candle"
 UNMATCHED_PAPER_LABEL = (
     "the bot traded where the lab did not (or more than the match tolerance off its bar): it is "
@@ -932,6 +950,11 @@ class PaperProtocol:
     inconclusive_reasons: tuple[str, ...]  # known upfront: the best verdict is inconclusive
     rules: tuple[str, ...]
     config_sha256: str
+    # PLAN.md Phase 20: omitted from the dict (and the sha256) when None, so a protocol without
+    # them keeps its version 7 bytes and hash
+    risk_controls: RiskControls | None = None
+    sizing: Sizing | None = None
+    paper_config: PaperConfig | None = None  # version 8 only, and always there
 
 
 def _finite(x: float) -> float | None:
@@ -1046,11 +1069,29 @@ def build_protocol(
     claim_note: str,
     candle_source: CandleSource = "api",
     candle_host: str = DEFAULT_CANDLE_HOST,
+    risk_controls: RiskControls | None = None,
+    sizing: Sizing | None = None,
+    paper_config: PaperConfig | None = None,
 ) -> PaperProtocol:
     """Freeze the forward-test expectations of ``plan`` from its design-window ``design`` stats
-    and the ledger ``link`` (see the module docstring for every formula). Pure: no I/O."""
+    and the ledger ``link`` (see the module docstring for every formula). Pure: no I/O.
+
+    ``risk_controls`` and ``sizing`` (PLAN.md Phase 20) are frozen as given and make the protocol
+    version :data:`RISK_PROTOCOL_VERSION`, which also needs the ``paper_config`` its
+    ``config.json`` is rendered from; without them the result is a plain version
+    :data:`PROTOCOL_VERSION` protocol, byte for byte."""
     check_candidate_name(candidate)
     p = plan if isinstance(plan, Plan) else parse_plan(plan)
+    check_one_wallet(risk_controls, sizing)
+    if risk_controls is None and sizing is None:
+        if paper_config is not None:
+            raise ValueError("paper_config comes with risk_controls or sizing, never alone")
+    elif paper_config is None:
+        raise ValueError("a protocol with risk_controls or sizing must freeze its paper_config")
+    else:
+        check_frozen_config(paper_config, risk_controls, sizing)
+    if sizing is not None:
+        check_sizing_against_plan(sizing, p.risk.stop_loss_pct)
     if design.interval != p.interval:
         raise ValueError(f"design stats are {design.interval}, the plan is {p.interval}")
     if not math.isfinite(claimed_sharpe_annual):
@@ -1255,7 +1296,9 @@ def build_protocol(
             "inside it"
         )
     proto = PaperProtocol(
-        version=PROTOCOL_VERSION,
+        version=PROTOCOL_VERSION
+        if risk_controls is None and sizing is None
+        else RISK_PROTOCOL_VERSION,
         candidate=candidate,
         plan_hash=plan_hash(p),
         logic_hash=logic_hash(p),
@@ -1288,8 +1331,11 @@ def build_protocol(
         inconclusive_reasons=tuple(inconclusive),
         rules=(),
         config_sha256=config.config_sha256,
+        risk_controls=risk_controls,
+        sizing=sizing,
+        paper_config=paper_config,
     )
-    return _with_rules(proto)
+    return _with_rules(proto, stop_loss_pct=p.risk.stop_loss_pct)
 
 
 LOCKED_SPLIT_WHY: dict[str, str] = {
@@ -1338,7 +1384,93 @@ def _claim_label(sh: SharpeRule) -> str:
     return "walk-forward OOS" if sh.claim_source == "walk_forward_oos" else "owner-supplied"
 
 
-def _with_rules(p: PaperProtocol) -> PaperProtocol:
+def _risk_rules(p: PaperProtocol, stop_loss_pct: float | None) -> list[str]:
+    """The frozen ``risk_controls`` and ``sizing`` blocks in words; empty without them."""
+    rules: list[str] = []
+    controls = p.risk_controls
+    if controls is not None and (g := controls.protections) is not None:
+        rules.append(
+            f"Protections (freqtrade, frozen; compare backtests with --enable-protections): "
+            f"CooldownPeriod {g.cooldown_candles} candles; StoplossGuard "
+            f"{g.stoploss_guard_trade_limit} stops in {g.stoploss_guard_lookback_candles} candles "
+            f"pause {g.stoploss_guard_stop_candles}; MaxDrawdown "
+            f"{g.max_drawdown_allowed:.2%} with {g.max_drawdown_trade_limit} trades in "
+            f"{g.max_drawdown_lookback_candles} candles pauses {g.max_drawdown_stop_candles}. "
+            "The lab replay is re-run with entries off on bars inside the protected backtest's "
+            f"recorded locks; above {g.max_blocked_share:.0%} of its entries masked, the best "
+            "verdict at the decision bar is a final inconclusive. The frozen entry and exposure "
+            "bands come from an unprotected design replay, so they lean towards false fails for "
+            "a bot that protections keep out of the market."
+        )
+    if controls is not None and (b := controls.circuit_breaker) is not None:
+        rules.append(
+            f"Circuit breaker (frozen; `paper_trade.py guard --watch`): "
+            f"{b.max_daily_loss_pct:g}% loss within a UTC day or {b.max_drawdown_pct:g}% drawdown "
+            f"from the equity peak, on the frozen {b.wallet:g} wallet, stops the dry-run and "
+            "writes halt.lock; only the owner removes it, outside Claude Code. It acts only while "
+            "the watcher runs; compare applies the same thresholds afterwards, and a trip there "
+            "is a final fail."
+        )
+    if (s := p.sizing) is not None:
+        vol = (
+            "no volatility scaling"
+            if s.vol_target_annual is None
+            else f"volatility target {s.vol_target_annual:g} over {s.vol_window_bars} closed bars "
+            "(365-day annualisation; the scale stops at 1, so volatility only shrinks a stake)"
+        )
+        worst = s.max_stake_pct * (stop_loss_pct or 0.0) / 100.0
+        rules.append(
+            f"Sizing (frozen; a different size is a new test): risk per trade "
+            f"{s.risk_per_trade_pct:g}% of the {s.wallet:g} wallet ({s.justification}); stake "
+            f"between {s.min_stake_pct:g}% and {s.max_stake_pct:g}% of the wallet, multiplier "
+            f"{s.size_multiplier:g}, {vol}; exposure cap {s.max_total_exposure_pct:g}% over "
+            f"{s.max_open_trades} open trades; prior test {s.prior_test or 'none'}; no averaging "
+            f"down. Largest single loss at the stop: {worst:.2f}% of the wallet before fees and "
+            "gaps. Sizing does not change whether the plan has an edge."
+        )
+    if (c := p.paper_config) is not None:
+        rules.append(
+            f"Config (frozen): stake {c.stake_amount}, wallet {c.dry_run_wallet:g}, "
+            f"max_open_trades {c.max_open_trades}, exchange {c.exchange}, public API host "
+            f"{c.public_api_host or 'none'}. compare, guard and a re-prepare refuse a config.json "
+            "that differs from a fresh render of these values in any key. They read the file as "
+            "it stands, so a test is only as frozen as the file the bot started from."
+        )
+    if p.version >= RISK_PROTOCOL_VERSION:
+        rules.append(_order_rule(p))
+    return rules
+
+
+def _order_rule(p: PaperProtocol) -> str:
+    """What outranks what when a side cannot be judged: version 8 only, so the version 7 rules
+    stay byte for byte."""
+    grace = f"{p.data.grace_days:g} days after the decision bar"
+    parts = ["Verdict order: a fail is never demoted, and a circuit-breaker trip outranks all."]
+    if p.sizing is not None:
+        parts.append(
+            "A paper stake other than the frozen one does not stop judging, because Sharpe, "
+            "entries and exposure are per unit or counted: it is named as an implementation "
+            "problem in the verdict and the journal, a rule that fails is a fail, and with every "
+            "other check fine at the decision bar the verdict is a final inconclusive, never pass."
+        )
+    if p.risk_controls is not None and p.risk_controls.protections is not None:
+        parts.append(
+            "A protected backtest that fails makes only the replay checks unknown (irregular "
+            "fills and shortfall). Entries, exposure and Sharpe are still judged and a fail there "
+            f"is a fail at any time. With none failing, compare exits 2 until {grace}, then a "
+            "final inconclusive names the reason; a replay check that would have failed cannot "
+            "show in that case."
+        )
+    parts.append(
+        "A strategy, config.json or plan.json that no longer matches this protocol refuses "
+        f"compare; from {grace} the paper data cannot be trusted, nothing is judged and the "
+        "verdict is a final inconclusive naming the void, or fail if the breaker tripped. A moved "
+        "folder is not a void: a re-prepare repairs it."
+    )
+    return " ".join(parts)
+
+
+def _with_rules(p: PaperProtocol, *, stop_loss_pct: float | None = None) -> PaperProtocol:
     t, e, s, sh, m, d, bt = (
         p.trades,
         p.exposure,
@@ -1468,6 +1600,7 @@ def _with_rules(p: PaperProtocol) -> PaperProtocol:
             + ". At the decision bar this protocol can say fail or inconclusive, never pass."
         )
     rules.append(f"Locked-split check: {locked_split_text(p)}")
+    rules.extend(_risk_rules(p, stop_loss_pct))
     rules.append(
         "Verdicts: fail if any rule fails (a fail on entries/exposure while every fill matched "
         "the lab at lag 0 is labelled a regime difference, timing/shortfall fails an "
@@ -1494,6 +1627,9 @@ def protocol_to_dict(p: PaperProtocol) -> dict[str, Any]:
     d["rules"] = list(p.rules)
     d["inconclusive_reasons"] = list(p.inconclusive_reasons)
     d["source"]["wf_evidence_ids"] = list(p.source.wf_evidence_ids)
+    for block in ("risk_controls", "sizing", "paper_config"):
+        if d[block] is None:
+            del d[block]  # a new key would change every existing protocol's sha256
     return d
 
 
@@ -1501,8 +1637,23 @@ def protocol_from_dict(d: Mapping[str, Any]) -> PaperProtocol:
     """Inverse of :func:`protocol_to_dict`; ``ValueError`` on a missing or unknown field."""
     try:
         data = dict(d)
-        if data.get("version") != PROTOCOL_VERSION:
-            raise ValueError(f"unsupported protocol version {data.get('version')!r}")
+        version = data.get("version")
+        if version not in (PROTOCOL_VERSION, RISK_PROTOCOL_VERSION):
+            raise ValueError(f"unsupported protocol version {version!r}")
+        blocks = [k for k in ("risk_controls", "sizing") if k in data]
+        carried = [*blocks, *(["paper_config"] if "paper_config" in data else [])]
+        if version == PROTOCOL_VERSION and carried:
+            raise ValueError(f"protocol version {version} cannot carry {', '.join(carried)}")
+        if version == RISK_PROTOCOL_VERSION and not blocks:
+            raise ValueError(f"protocol version {version} needs risk_controls or sizing")
+        if version == RISK_PROTOCOL_VERSION and "paper_config" not in data:
+            raise ValueError(f"protocol version {version} needs paper_config")
+        if "risk_controls" in data:  # a null block is refused by the strict parsers
+            data["risk_controls"] = risk_controls_from_dict(data["risk_controls"])
+        if "sizing" in data:
+            data["sizing"] = sizing_from_dict(data["sizing"])
+        if "paper_config" in data:
+            data["paper_config"] = paper_config_from_dict(data["paper_config"])
         src = dict(data["source"])
         src["wf_evidence_ids"] = tuple(src["wf_evidence_ids"])
         data["source"] = SourceInfo(**src)
@@ -1582,6 +1733,12 @@ class ObservedPaper:
     # changes the lab replay from there on); equals ``irregular`` when no bar is missing
     irregular_before_gap: int
     bar_returns: tuple[float, ...]  # per-bar paper returns, fully invested, net of fees
+    breaker_trip: str | None = None  # why the frozen circuit breaker tripped (Phase 20)
+    blocked_entries: int = 0  # unprotected replay entries the protections masked (Phase 20)
+    replay_entries: int = 0  # entries of the unprotected replay
+    # why the protected backtest failed: the replay checks are unknown (Phase 20)
+    replay_unknown: str | None = None
+    stake_problem: str | None = None  # how the paper stake differs from the frozen one (Phase 20)
 
     @property
     def matched_early(self) -> int:
@@ -1871,6 +2028,39 @@ def _decision_checks(protocol: PaperProtocol, o: ObservedPaper) -> list[Check]:
     return out
 
 
+def _blocked_share_check(protocol: PaperProtocol, o: ObservedPaper) -> list[Check]:
+    """The frozen cap on masked replay entries: only with protections, ``pending`` above it."""
+    controls = protocol.risk_controls
+    if controls is None or controls.protections is None or o.replay_entries == 0:
+        return []
+    limit = controls.protections.max_blocked_share
+    share = o.blocked_entries / o.replay_entries
+    note = f"protections masked {o.blocked_entries} of {o.replay_entries} replay entries"
+    if share <= limit:
+        return [Check("blocked_share", "ok", share, None, limit, note)]
+    note += (
+        f" ({share:.0%}, above the frozen max_blocked_share {limit:.0%}): this measured the "
+        "protections more than the plan"
+    )
+    return [Check("blocked_share", "pending", share, None, limit, note)]
+
+
+def _unknown_check(check: Check) -> Check:
+    """A replay check without its replay: the numbers came from the unmasked one, so none stay."""
+    note = "not judged: the protected replay did not run"
+    return replace(check, status="pending", observed=None, note=note)
+
+
+def _named_problems(o: ObservedPaper) -> tuple[str, ...]:
+    """What the verdict must name besides its checks; a trip is then the only reason given."""
+    if o.breaker_trip is not None:
+        return ()
+    named = () if o.replay_unknown is None else (f"cannot be judged: {o.replay_unknown}",)
+    if o.stake_problem is not None:
+        named += (f"implementation problem: {o.stake_problem}",)
+    return named
+
+
 def _label(checks: Sequence[Check], o: ObservedPaper) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Fail reasons prefixed with what kind of difference they show, and the kinds."""
     fails = [c for c in checks if c.status == "fail"]
@@ -1879,8 +2069,18 @@ def _label(checks: Sequence[Check], o: ObservedPaper) -> tuple[tuple[str, ...], 
     reasons: list[str] = []
     kinds: set[str] = set()
     for c in fails:
+        if c.kind == "circuit_breaker":
+            reasons.append(c.note)
+            kinds.add("circuit_breaker")
+            continue
         if c.kind == "regime":
-            if not impl and on_time:
+            if o.replay_unknown is not None:
+                label = (
+                    "regime or implementation difference (timing unknown: the protected replay "
+                    "did not run)"
+                )
+                kinds.update(("regime", "implementation"))
+            elif not impl and on_time:
                 label = (
                     "regime difference (entries/exposure outside the design range while every "
                     "fill matched the lab at lag 0)"
@@ -1954,7 +2154,16 @@ def evaluate(protocol: PaperProtocol, observed: ObservedPaper) -> Verdict:
       whatever the missing data hold, else ``continue``, and ``grace_days`` after the decision
       bar a final ``inconclusive`` ("data").
     * With every check inside tolerance: ``inconclusive`` when the protocol cannot discriminate
-      (weak / vacuous bands, too few judged fills), else ``pass``.
+      (weak / vacuous bands, too few judged fills, more replay entries masked than the frozen
+      ``max_blocked_share``), else ``pass``.
+    * A fail is never demoted. ``observed.stake_problem`` stops nothing: it is named, a rule that
+      fails is a ``fail``, and with every other check fine at the decision bar the verdict is a
+      final ``inconclusive``, never ``pass``. ``observed.replay_unknown`` makes only the replay
+      checks unknown (:data:`REPLAY_CHECKS`); anything else that fails is a ``fail`` at any time,
+      and otherwise it is ``continue`` until ``grace_days`` after the decision bar (``compare``
+      then exits 2 rather than record it), then a final ``inconclusive`` naming why.
+    * A tripped circuit breaker (``observed.breaker_trip``) is a final fail at any time, and the
+      only reason given: the test stopped, so what stopping did to the other checks says nothing.
     """
     at_decision = observed.asof >= protocol.decision_end
     asof = min(observed.asof, protocol.decision_end)
@@ -2033,6 +2242,7 @@ def evaluate(protocol: PaperProtocol, observed: ObservedPaper) -> Verdict:
     # --- the decision bar
     if at_decision:
         checks.extend(_decision_checks(protocol, observed))
+        checks.extend(_blocked_share_check(protocol, observed))
     else:
         note = (
             f"{n} entries, {observed.matched_entries} matched of {observed.lab_entries} lab; "
@@ -2040,11 +2250,24 @@ def evaluate(protocol: PaperProtocol, observed: ObservedPaper) -> Verdict:
         )
         checks.append(Check("progress", "pending", None, None, None, note))
 
+    if observed.replay_unknown is not None:
+        checks = [_unknown_check(c) if c.name.startswith(REPLAY_CHECKS) else c for c in checks]
+        weeks, alerts = [], ()  # their fills were matched to the unmasked replay
+
     data_note = (
         f"incomplete data: {observed.bars_elapsed} of {observed.bars_expected} bars, "
         f"{observed.fills_missing_candle} fills unjudged"
     )
-    reasons, kinds = _label(checks, observed)
+    if observed.breaker_trip is None:
+        reasons, kinds = _label(checks, observed)
+    else:
+        note = observed.breaker_trip
+        tripped = Check("circuit_breaker", "fail", None, None, None, note, "circuit_breaker")
+        checks.append(tripped)
+        reasons, kinds = _label([tripped], observed)
+    named = _named_problems(observed)
+    extra = "".join(f" ({n})" for n in named)
+    grace_over = observed.observed_until >= grace_end
     verdict: VerdictName
     if reasons:
         verdict = "fail"
@@ -2053,31 +2276,42 @@ def evaluate(protocol: PaperProtocol, observed: ObservedPaper) -> Verdict:
             headline += f" ({data_note}; this fails whatever the missing data hold)"
         if protocol.mode == "implementation_only":
             headline += " [implementation-only protocol: the Sharpe was not under test]"
+        headline += extra
+        reasons = (*reasons, *named)
+        if observed.stake_problem is not None and observed.breaker_trip is None:
+            kinds = tuple(sorted({*kinds, "implementation"}))
     elif not at_decision:
         verdict = "continue"
-        reasons = () if complete else (data_note,)
+        reasons = (*(() if complete else (data_note,)), *named)
         headline = (
             f"continue: {elapsed:.1f} of {protocol.decision_days:.1f} days elapsed; no fail rule "
-            "tripped" + ("" if complete else f" ({data_note})")
+            "tripped" + ("" if complete else f" ({data_note})") + extra
         )
-    elif not complete and observed.observed_until >= grace_end:
+    elif not complete and grace_over:
         verdict = "inconclusive"
         reasons = (
             f"data: {data_note} {protocol.data.grace_days:g} days after the decision bar; no "
             "rule fails whatever the missing data hold",
+            *named,
         )
-        headline = "inconclusive: " + reasons[0]
+        headline = "inconclusive: " + "; ".join(reasons)
     elif not complete:
-        verdict, reasons = "continue", (data_note,)
+        verdict, reasons = "continue", (data_note, *named)
         headline = (
             f"continue: {data_note}; the decision bar has passed but no rule fails whatever the "
             f"missing data hold; re-run compare with complete candles (a final inconclusive "
-            f"after {_utc(grace_end)})"
+            f"after {_utc(grace_end)})" + extra
         )
+    elif observed.replay_unknown is not None and not grace_over:
+        verdict, reasons = "continue", named
+        headline = f"continue: {'; '.join(named)}; a final inconclusive after {_utc(grace_end)}"
     else:
         vague = list(protocol.inconclusive_reasons)
-        vague += [c.note for c in checks if c.name == "shortfall" and c.status == "pending"]
-        if vague:
+        vague += [c.note for c in checks if c.name in UNJUDGED_CHECKS and c.status == "pending"]
+        if named:
+            verdict, reasons = "inconclusive", (*named, *vague)
+            headline = "inconclusive: " + "; ".join(reasons)
+        elif vague:
             verdict, reasons = "inconclusive", tuple(vague)
             headline = (
                 "inconclusive: every check is inside tolerance but the protocol cannot "
@@ -2101,6 +2335,38 @@ def evaluate(protocol: PaperProtocol, observed: ObservedPaper) -> Verdict:
         bars_expected=observed.bars_expected,
         bars_present=observed.bars_elapsed,
         fills_unjudged=observed.fills_missing_candle,
+        protocol_sha256=protocol_sha256(protocol),
+    )
+
+
+def void_verdict(protocol: PaperProtocol, why: str, *, breaker_trip: str | None) -> Verdict:
+    """The final verdict of a test whose frozen files no longer match past the grace period. No
+    check runs: the paper data cannot be trusted. A trip is still a ``fail``."""
+    if breaker_trip is None:
+        check = Check("frozen_files", "pending", None, None, None, why)
+        verdict: VerdictName = "inconclusive"
+        reasons: tuple[str, ...] = (f"void: {why}",)
+        kinds: tuple[str, ...] = ()
+        headline = f"inconclusive: void: {why}"
+    else:
+        check = Check("circuit_breaker", "fail", None, None, None, breaker_trip, "circuit_breaker")
+        verdict, reasons, kinds = "fail", (breaker_trip,), ("circuit_breaker",)
+        headline = f"fail: {breaker_trip} (also void: {why})"
+    return Verdict(
+        verdict=verdict,
+        mode=protocol.mode,
+        headline=headline,
+        reasons=reasons,
+        fail_kinds=kinds,
+        alerts=(),
+        checks=(check,),
+        weeks=(),
+        elapsed_days=protocol.decision_days,
+        at_decision=True,
+        data_complete=False,
+        bars_expected=protocol.decision_bars,
+        bars_present=0,
+        fills_unjudged=0,
         protocol_sha256=protocol_sha256(protocol),
     )
 
@@ -2200,6 +2466,49 @@ def registered_hashes(
     return out
 
 
+def size_steps_from(paper_dir: Path, journal_dir: Path | None, prior: str) -> tuple[str, ...]:
+    """Every test naming ``prior`` as its ``prior_test``, in the paper folders and in the journal
+    (deleting a folder cannot free a proof for a second use). ``ValueError`` naming an unreadable
+    file: the one-proof-one-step rule fails closed."""
+    found: set[str] = set()
+    root = Path(paper_dir)
+    for path in sorted(root.glob(f"*/{PROTOCOL_FILE}")) if root.is_dir() else []:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if (data.get("sizing") or {}).get("prior_test") == prior:
+                found.add(str(data["candidate"]))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ValueError(f"cannot read {path} for the size step check: {exc}") from None
+    jroot = Path(journal_dir) if journal_dir is not None else None
+    for path in sorted(jroot.glob("*-paper-*.md")) if jroot and jroot.is_dir() else []:
+        try:
+            front = parse_frontmatter(path.read_text(encoding="utf-8"))
+            if front.get("prior_test") == prior:
+                found.add(str(front["candidate"]))
+        except (OSError, ValueError, KeyError) as exc:
+            raise ValueError(f"cannot read {path} for the size step check: {exc}") from None
+    return tuple(sorted(found))
+
+
+def _size_step_chain(paper_dir: Path, prior: str | None) -> set[str]:
+    """``prior`` and the tests it stepped up from in turn. Each link was proved when it was
+    registered, so a chain A -> B -> C is one hypothesis at several proven sizes. A link missing
+    from the paper folder ends the walk: its journal entry then refuses the plan (fail closed)."""
+    chain: set[str] = set()
+    name = prior
+    while name is not None and name not in chain:
+        chain.add(name)
+        path = protocol_path(paper_dir, name)
+        if not path.is_file():
+            break
+        try:
+            sizing = json.loads(path.read_text(encoding="utf-8")).get("sizing") or {}
+            name = sizing.get("prior_test")
+        except (OSError, ValueError, AttributeError) as exc:
+            raise ValueError(f"cannot read {path} for the duplicate check: {exc}") from None
+    return chain
+
+
 def check_not_registered_elsewhere(
     paper_dir: Path,
     candidate: str,
@@ -2207,6 +2516,7 @@ def check_not_registered_elsewhere(
     *,
     journal_dir: Path | None = None,
     family: LedgerLink | None = None,
+    size_step_of: str | None = None,
 ) -> None:
     """``ValueError`` naming the existing candidate when a protocol under ``paper_dir`` or a
     paper journal entry under ``journal_dir`` with another candidate name has the same
@@ -2215,14 +2525,21 @@ def check_not_registered_elsewhere(
     candidate name has the same journal slug (``foo_bar`` / ``foo-bar``). With ``family`` (the
     :func:`ledger_link` of ``plan``, i.e. the lab's behaviour family) a registered plan in that
     family (a no-op-clause twin, the same rule re-tuned, returns correlated >= the lab's family
-    threshold, or an uncomparable same-feature plan: fail closed) is refused too."""
+    threshold, or an uncomparable same-feature plan: fail closed) is refused too.
+    ``size_step_of`` is the sizing block's ``prior_test``: a size step may share its PLAN with that
+    candidate and with the tests it stepped up from, because a different size of the same plan is
+    a new test. Only the plan: a re-tuned plan in that chain is refused like any other, so a name
+    in ``prior_test`` never excuses one. The caller must prove the step first
+    (:func:`research.paper.risk.check_size_step`): it needs a passing prior test, so this never
+    lets a failed test be retried."""
     p = plan if isinstance(plan, Plan) else parse_plan(plan)
     ph, lh = plan_hash(p), logic_hash(p)
     fam_logic = set(family.family_logic_hashes) if family is not None else set()
     fam_uncertain = set(family.family_uncertain) if family is not None else set()
     fam_plans = set(family.family_plan_hashes) if family is not None else set()
+    chain = _size_step_chain(paper_dir, size_step_of)
     for cand, other_ph, other_lh, where in registered_hashes(paper_dir, journal_dir):
-        if cand == candidate:
+        if cand == candidate or (cand in chain and other_ph == ph):
             continue
         if _slug(cand) == _slug(candidate):
             raise ValueError(
@@ -2294,6 +2611,11 @@ def render_journal_entry(protocol: PaperProtocol) -> str:
         f"protocol_sha256: {_yaml(sha)}",
         f"mode: {_yaml(p.mode)}",
         f"locked_split_check: {_yaml(p.locked_split_check)}",
+        *(
+            [f"prior_test: {_yaml(p.sizing.prior_test)}"]
+            if p.sizing is not None and p.sizing.prior_test is not None
+            else []
+        ),
         'outcome: "pending"',
         "tags: [paper-trade]",
         "---",
@@ -2490,19 +2812,59 @@ def recorded_final_comparison(journal: Path) -> str | None:
     return m.group(1) if m else None
 
 
-def append_verdict(journal: Path, verdict: Verdict, *, asof: int, comparison: str = "") -> str:
+def _append_before_verdicts(journal: Path, heading: str, line: str) -> bool:
+    """Record ``line`` under ``heading``, placed BEFORE the verdicts heading: verdict lines are
+    appended at the end of the entry and the last line after that heading must stay the final
+    verdict, so nothing else lands there. The frontmatter and the registered section are not
+    touched, so the protocol sha256 and the recorded verdict stand. Written under the journal
+    lock (fresh fsynced file, atomic replace). The same line is written once; returns whether it
+    was written."""
+    guard_holdout(line)
+    with _journal_lock(journal):
+        text = journal.read_text(encoding="utf-8")
+        if line in text:
+            return False
+        if text.count(VERDICTS_HEADING) != 1:
+            raise ProtocolChangedError(f"{journal} has no verdicts section; was it edited by hand?")
+        head, sep, tail = text.partition(VERDICTS_HEADING)
+        if heading in head:
+            before, mark, after = head.partition(heading)
+            body, next_heading, rest = after.partition("\n## ")
+            head = f"{before}{mark}{body.rstrip()}\n{line}\n\n{next_heading[1:]}{rest}"
+        else:
+            head = f"{head}{heading}\n\n{line}\n\n"
+        _replace_atomic(journal, (head + sep + tail).encode("utf-8"))
+    return True
+
+
+def append_halt(journal: Path, line: str) -> bool:
+    """Record a circuit-breaker halt under :data:`HALT_HEADING`."""
+    return _append_before_verdicts(journal, HALT_HEADING, line)
+
+
+def append_rewrite(journal: Path, line: str) -> bool:
+    """Record that a re-prepare rewrote a file of a traded test, under :data:`REWRITE_HEADING`."""
+    return _append_before_verdicts(journal, REWRITE_HEADING, line)
+
+
+def append_verdict(
+    journal: Path, verdict: Verdict, *, asof: int, comparison: str = "", note: str = ""
+) -> str:
     """Append one dated verdict line under the verdicts heading (the registered protocol
     section is never edited). The first final verdict (pass / fail / inconclusive) also sets
     the frontmatter ``outcome`` with ``verdict_asof`` and ``verdict_protocol_sha256``; it is
     write-once: :class:`FinalVerdictRecordedError` once a final verdict is recorded. The read,
     check and write happen under an exclusive lock, and the new text goes to a fresh fsynced
-    temporary file that replaces the entry atomically. Returns the line."""
+    temporary file that replaces the entry atomically. Returns the line. ``note`` (one sentence,
+    the sizing line) goes before the comparison name, which must stay last on the line."""
     line = (
         f"- {datetime.now(UTC).strftime('%Y-%m-%d')} (data to {_utc(asof)}): "
         f"**{verdict.verdict}**, {verdict.elapsed_days:.1f} days. {verdict.headline}"
     )
     if verdict.alerts:
         line += " Alerts: " + "; ".join(verdict.alerts) + "."
+    if note:
+        line += f" {note}"
     if comparison:
         line += f" Comparison: `{comparison}`."
     guard_holdout(line)
@@ -2535,10 +2897,15 @@ __all__ = [
     "DEFAULT_PROTOCOL_CONFIG",
     "EARLY_LABEL",
     "FINAL_VERDICTS",
+    "HALT_HEADING",
     "LATE_LABEL",
     "LEDGER_MIN_SCHEMA",
     "LOCKED_SPLIT_STATES",
+    "REPLAY_CHECKS",
+    "REWRITE_HEADING",
+    "RISK_PROTOCOL_VERSION",
     "SIMULATED_FALSE_FAIL_RANGE",
+    "UNJUDGED_CHECKS",
     "UNMATCHED_LAB_LABEL",
     "UNMATCHED_PAPER_LABEL",
     "BootstrapEstimate",
@@ -2554,6 +2921,8 @@ __all__ = [
     "ProtocolChangedError",
     "ProtocolConfig",
     "Verdict",
+    "append_halt",
+    "append_rewrite",
     "append_verdict",
     "bootstrap_false_fail",
     "build_protocol",
@@ -2589,5 +2958,7 @@ __all__ = [
     "render_journal_entry",
     "resolve_claim",
     "sharpe_moments",
+    "size_steps_from",
+    "void_verdict",
     "weekly_shortfall",
 ]

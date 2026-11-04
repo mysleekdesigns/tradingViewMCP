@@ -1,0 +1,52 @@
+# Template for a paper test's risk controls and position sizing (PLAN.md Phase 20 Parts E and E2).
+#
+# The values below are EXAMPLES, not recommendations. Copy this file per test and choose the
+# numbers before the test starts. `paper_trade.py prepare` freezes them into the protocol, and they
+# may never change mid-test: a different size is a new test.
+#
+# Sizing controls risk. It does not create an edge and never rescues a plan that fails the lab.
+# It lives on the Freqtrade paper side only and never enters lab plans or criteria. No LLM (Jev or
+# Claude) sets or changes any value here.
+#
+# Paper only: freqtrade --dry-run, no exchange keys, no orders. Do not add any.
+#
+# `prepare` also freezes the stake, wallet, max_open_trades, exchange and public host it was run
+# with, from this file or its flags. `compare`, `guard` and a re-prepare refuse a config.json that
+# differs from a fresh render of those values in any key.
+#
+# Not adopted: Sosnoff's "more total exposure when implied volatility is high". That rule is
+# specific to selling options; for a spot buyer it runs the wrong way, so volatility here can only
+# shrink or cap a stake.
+
+[risk_controls.protections]
+# Candle counts are in the plan's interval; these examples assume 4h bars.
+cooldown_candles = 2                     # CooldownPeriod: skip 2 bars (8h) after a close, so a stop-out cannot re-enter on the next bar
+stoploss_guard_lookback_candles = 24     # StoplossGuard: look back 4 days, long enough to see a cluster of stops
+stoploss_guard_trade_limit = 3           # StoplossGuard: 3 stops in that window means the market has changed, not one bad trade
+stoploss_guard_stop_candles = 12         # StoplossGuard: pause 2 days, then allow entries again
+max_drawdown_lookback_candles = 42       # MaxDrawdown: look back 1 week of 4h bars
+max_drawdown_trade_limit = 5             # MaxDrawdown: needs at least 5 trades, so one trade cannot trigger it
+max_drawdown_stop_candles = 24           # MaxDrawdown: pause 4 days once tripped
+max_drawdown_allowed = 0.06              # MaxDrawdown: a fraction; 6% pauses entries before the 10% breaker below stops the test (at 0.1 or more it could never fire first)
+max_blocked_share = 0.333                # Required. One replay entry in three masked by protections is the most this test can pass with: beyond that it measures the protections more than the plan, and the best verdict is a final inconclusive
+
+[risk_controls.circuit_breaker]
+# Percent of equity. A trip stops the dry-run and writes agents/data/paper/<test>/halt.lock; only
+# the owner deletes that file, outside Claude Code. It acts only while `paper_trade.py guard --watch`
+# runs (`prepare --launch` does not start it); `compare` applies the same thresholds afterwards.
+max_daily_loss_pct = 3.0                 # From the Phase 20 video review (second-hand): 3% in a UTC day closes all
+max_drawdown_pct = 10.0                  # From the Phase 20 video review (second-hand): 10% from the equity peak closes all
+wallet = 1000.0                          # Required. The equity the losses are measured from; must equal sizing.wallet
+
+[sizing]
+risk_per_trade_pct = 1.0                 # Allowed range is 0.5-1.5% of the wallet; 1% is the middle of it
+justification = "Example: 1% risk per trade, the middle of the allowed 0.5-1.5% range."   # Required, one line
+wallet = 1000.0                          # Frozen paper wallet; stakes use this number and never compound
+max_stake_pct = 20.0                     # No single position above 20% of the wallet, however tight the stop
+min_stake_pct = 2.0                      # Stake used when realised volatility is unknown or very high; 20 of 1000 clears the exchange minimum (7.5)
+max_total_exposure_pct = 100.0           # No leverage: 100 is the hard ceiling
+max_open_trades = 4                      # 4 x 20% = 80%: a full book must fit in 80% of the exposure cap, so it stays fundable through a 20% loss
+size_multiplier = 1.0                    # Conviction cap: 1 by default, refused above 2; above 1 needs prior_test
+vol_target_annual = 0.5                  # 50% a year; scales the stake by min(1, target / realised), so it never raises risk. Remove with vol_window_bars for a plain stake
+vol_window_bars = 42                     # Realised volatility over 1 week of closed 4h bars, annualised with 365 days
+# prior_test = "smaller-size-test"       # Name of the smaller-size test. A step up needs a 90-day pass of the very same plan (a re-tune has to earn its own): not implementation_only, locked split passed, no halt.lock, same volatility settings, at most a 2x step that really raises a stake, and one proof unlocks one step

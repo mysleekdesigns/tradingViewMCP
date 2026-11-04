@@ -1,6 +1,6 @@
 import { HistogramSeries, type IChartApi } from 'lightweight-charts'
 import { describe, expect, it } from 'vitest'
-import type { RegimePoint } from '../data/labTypes'
+import type { RegimePoint, RegimeState } from '../data/labTypes'
 import type { Candle } from '../types'
 import {
   MAX_REGIME_BARS,
@@ -12,6 +12,9 @@ import {
   regimeRequestBars,
   regimeRibbonData,
   regimeRibbonScaleMargins,
+  regimeRun,
+  regimeRunLabel,
+  regimeRunThrough,
   regimeSourceBars,
   type RegimeColors,
 } from './regimeRibbon'
@@ -277,5 +280,93 @@ describe('RegimeRibbon', () => {
     ribbon.setPoints([{ time: 1, state: 1 }])
     expect(chart.removed).toEqual([series])
     expect(series.setDataCalls).toBe(0)
+  })
+})
+
+describe('regimeRun', () => {
+  /** Points at times 100, 200, ... with the given states. */
+  const series = (states: readonly (RegimeState | null)[]): RegimePoint[] =>
+    states.map((state, i) => ({ time: 100 * (i + 1), state }))
+
+  it('gives the newest state and the length of the run ending on it', () => {
+    expect(regimeRun(series([1, 1, 0, -1, -1, -1]))).toEqual({ state: -1, bars: 3 })
+    expect(regimeRun(series([0, 1]))).toEqual({ state: 1, bars: 1 })
+    expect(regimeRun(series([1, 1, 1, 1]))).toEqual({ state: 1, bars: 4 })
+    expect(regimeRun(series([1, -1, 0]))).toEqual({ state: 0, bars: 1 })
+  })
+
+  it('is null with no labelled bar', () => {
+    expect(regimeRun([])).toBeNull()
+    expect(regimeRun(series([null, null]))).toBeNull()
+  })
+
+  it('stops at a null: warm-up bars and gaps are never counted across', () => {
+    expect(regimeRun(series([null, null, 1, 1]))).toEqual({ state: 1, bars: 2 })
+    expect(regimeRun(series([1, 1, 1, null, 1]))).toEqual({ state: 1, bars: 1 })
+  })
+
+  it('ends on the newest labelled bar and does not count a trailing null', () => {
+    expect(regimeRun(series([0, 1, 1, null]))).toEqual({ state: 1, bars: 2 })
+  })
+
+  // Perturbation test (.claude/rules/no-lookahead): what happens after bar t cannot reach t.
+  it('never back-dates: points after bar t leave the run at t identical', () => {
+    // A fixed pseudo-random label path (seeded LCG), warm-up and gaps included.
+    let seed = 20_261_104
+    const next = () => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648
+      return seed / 2_147_483_648
+    }
+    const pick = (): RegimeState | null => {
+      const u = next()
+      return u < 0.1 ? null : u < 0.4 ? -1 : u < 0.7 ? 0 : 1
+    }
+    const points = series([null, null, ...Array.from({ length: 200 }, pick)])
+    for (let t = 0; t < points.length - 1; t++) {
+      const before = regimeRun(points.slice(0, t + 1))
+      const changed = points.map((p, i): RegimePoint => {
+        if (i <= t) return p
+        return { time: p.time, state: p.state === 1 ? -1 : 1 }
+      })
+      const appended = [...points, { time: 1e9, state: 1 as const }]
+      expect(regimeRun(changed.slice(0, t + 1))).toEqual(before)
+      expect(regimeRun(appended.slice(0, t + 1))).toEqual(before)
+    }
+  })
+})
+
+describe('regimeRunThrough', () => {
+  const candles = makeCandles(4, 100, 100) // times 100, 200, 300, 400
+  const points: RegimePoint[] = [
+    { time: 100, state: 1 },
+    { time: 200, state: 1 },
+    { time: 300, state: 1 },
+    { time: 400, state: -1 },
+  ]
+
+  it('reads the newest closed bar, not the forming one', () => {
+    expect(regimeRunThrough(points, candles, true)).toEqual({ state: 1, bars: 3 })
+    expect(regimeRunThrough(points, candles, false)).toEqual({ state: -1, bars: 1 })
+  })
+
+  it('ignores labels past a replay cursor while the previous answer is still held', () => {
+    const replay = regimeSourceBars(candles, candles.slice(0, 2))
+    expect(regimeRunThrough(points, replay.candles, replay.formingLast)).toEqual({
+      state: 1,
+      bars: 2,
+    })
+  })
+
+  it('is null until a bar has closed', () => {
+    expect(regimeRunThrough(points, candles.slice(0, 1), true)).toBeNull()
+    expect(regimeRunThrough(points, [], false)).toBeNull()
+  })
+})
+
+describe('regimeRunLabel', () => {
+  it('names the state and the bars', () => {
+    expect(regimeRunLabel({ state: 1, bars: 14 })).toBe('Bull · 14 bars')
+    expect(regimeRunLabel({ state: 0, bars: 2 })).toBe('Sideways · 2 bars')
+    expect(regimeRunLabel({ state: -1, bars: 1 })).toBe('Bear · 1 bar')
   })
 })

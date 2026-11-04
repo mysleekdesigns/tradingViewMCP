@@ -28,6 +28,12 @@
 * :func:`prepare_candidate` writes ``PAPER_DIR/<candidate>/`` (plan, strategy, config, meta)
   and returns the ``freqtrade trade --dry-run`` command; :func:`launch` re-checks every safety
   property before starting it.
+* **Risk controls and sizing (PLAN.md Phase 20), future tests only.** With a frozen ``sizing``
+  or ``risk_controls`` block, :func:`render_strategy` adds ``FROZEN_RISK``, a ``protections``
+  property, ``custom_stake_amount`` (``sized_stake``'s exact source, the same volatility column
+  the lab replay reads) and a ``confirm_trade_entry`` that blocks entries while ``halt.lock``
+  sits beside the strategy file; :func:`render_config` adds the exposure settings. Without a
+  block every output is unchanged, byte for byte, because the block code never runs.
 
 Freqtrade is GPL-3.0 and runs as a separate process in its own virtualenv (with ``lab``
 installed editable there); nothing in this module imports it. The generated strategy file
@@ -36,6 +42,8 @@ imports freqtrade, but that file only runs inside freqtrade's own environment.
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import keyword
 import os
@@ -51,7 +59,21 @@ from typing import Any
 from lab.plan.validator import checked_expressions, parse_plan, plan_hash, plan_to_dict
 from lab.registry import REGISTRY
 from lab.research.contract import PAPER_DIR
-from lab.types import Plan
+from lab.types import Plan, bars_per_year
+from research.paper import risk as risk_rules
+from research.paper.risk import (
+    HALT_LOCK,
+    UNLIMITED_STAKE,
+    PaperConfig,
+    RiskControls,
+    Sizing,
+    check_not_halted,
+    check_sizing_against_plan,
+    realized_vol_annual,
+    risk_controls_to_dict,
+    sized_stake,
+    sizing_to_dict,
+)
 
 FREQTRADE_INSTALL_HINT = (
     "freqtrade not installed (pip install in its own venv: python -m venv ~/.venvs/freqtrade && "
@@ -72,6 +94,8 @@ KNOWN_QUOTES: tuple[str, ...] = (
     "TRY",
     "USD",
 )
+DRYRUN_DB = "dryrun.sqlite"
+DB_URL_KEY = "db_url"  # the one config key that holds a path; bot_name holds only the candidate
 MIN_STARTUP_CANDLES = 200  # freqtrade's usual minimum warm-up for recursive indicators
 STARTUP_LOOKBACK_MULT = 3  # recursive EMA/RSI converge to the full-history value within ~3x
 DISABLED_ROI = {"0": 100.0}  # freqtrade's documented way to disable ROI exits (+10000%)
@@ -150,12 +174,166 @@ def class_name_for(candidate: str) -> str:
 # --------------------------------------------------------------------------- strategy
 
 
+def sizing_max_stake(sizing: Sizing) -> float:
+    """The largest stake the block allows."""
+    return sizing.wallet * sizing.max_stake_pct / 100.0
+
+
+def frozen_risk(risk_controls: RiskControls | None, sizing: Sizing | None) -> dict[str, Any]:
+    """The protocol's blocks as the plain dict rendered into a strategy as ``FROZEN_RISK``."""
+    return {
+        "risk_controls": None if risk_controls is None else risk_controls_to_dict(risk_controls),
+        "sizing": None if sizing is None else sizing_to_dict(sizing),
+    }
+
+
+def _replace_once(source: str, anchor: str, text: str) -> str:
+    if source.count(anchor) != 1:  # the template changed: never ship a half-patched strategy
+        raise ValueError(f"strategy template has no single anchor {anchor!r}")
+    return source.replace(anchor, text)
+
+
+_HALT_ENTRY_CHECK = '''
+    def confirm_trade_entry(
+        self, pair, order_type, amount, rate, time_in_force, current_time, entry_tag, side, **kwargs
+    ) -> bool:
+        """False while halt.lock sits beside this file, so a bot restarted by hand cannot enter.
+        A backtest replays the plan, not the halt, so it ignores the lock. Errors fail closed."""
+        try:
+            if not (Path(__file__).resolve().parent / HALT_LOCK).exists():
+                return True
+            return self.dp.runmode.value == "backtest"
+        except Exception:
+            logger.exception("halt.lock check failed: blocking this entry")
+            return False
+'''
+
+_SIZED_STAKE_METHOD = '''
+    def custom_stake_amount(
+        self,
+        pair,
+        current_time,
+        current_rate,
+        proposed_stake,
+        min_stake,
+        max_stake,
+        leverage,
+        entry_tag,
+        side,
+        **kwargs,
+    ) -> float:
+        """The frozen sized stake: bar t's close decides it, like the entry signal. Volatility is
+        the closed-candle column, last row of the analysed frame. No value means the minimum.
+        max_stake is the available balance: a clip below the frozen stake shows up at compare."""
+        realized = None
+        if SIZING["vol_target_annual"] is not None:
+            try:
+                frame, _ = self.dp.get_analyzed_dataframe(pair=pair, timeframe=self.timeframe)
+                realized = float(frame["lab_vol"].iloc[-1])
+            except Exception:
+                logger.exception("no realised volatility for %s: minimum stake", pair)
+        stake = sized_stake(
+            stop_distance=STOP_DISTANCE,
+            wallet=SIZING["wallet"],
+            risk_per_trade_pct=SIZING["risk_per_trade_pct"],
+            max_stake_pct=SIZING["max_stake_pct"],
+            min_stake_pct=SIZING["min_stake_pct"],
+            size_multiplier=SIZING["size_multiplier"],
+            vol_target_annual=SIZING["vol_target_annual"],
+            realized_vol_annual=realized,
+        )
+        return min(stake, max_stake)
+'''
+
+
+def _protections_property(risk_controls: RiskControls) -> str:
+    g = risk_controls.protections
+    if g is None:
+        return ""
+    entries = [
+        {"method": "CooldownPeriod", "stop_duration_candles": g.cooldown_candles},
+        {
+            "method": "StoplossGuard",
+            "lookback_period_candles": g.stoploss_guard_lookback_candles,
+            "trade_limit": g.stoploss_guard_trade_limit,
+            "stop_duration_candles": g.stoploss_guard_stop_candles,
+        },
+        {
+            "method": "MaxDrawdown",
+            "calculation_mode": "equity",
+            "lookback_period_candles": g.max_drawdown_lookback_candles,
+            "trade_limit": g.max_drawdown_trade_limit,
+            "stop_duration_candles": g.max_drawdown_stop_candles,
+            "max_allowed_drawdown": g.max_drawdown_allowed,
+        },
+    ]
+    return (
+        f"\n    @property\n    def protections(self) -> list[dict]:\n        return {entries!r}\n"
+    )
+
+
+def _with_risk(
+    source: str, plan: Plan, risk_controls: RiskControls | None, sizing: Sizing | None
+) -> str:
+    """``source`` (the plain strategy) plus the frozen blocks. Text is only added, so what the
+    plain strategy computes (signals, ``WARM_FROM``, ``START``) stays the same code."""
+    imports = ["from pathlib import Path\n"]
+    constants = [
+        "# Frozen in the paper protocol (risk_controls and sizing, under its sha256); a different\n"
+        "# size is a new test, and compare refuses a strategy file with other values.\n"
+        f"FROZEN_RISK = {frozen_risk(risk_controls, sizing)!r}\n"
+        f"HALT_LOCK = {HALT_LOCK!r}\n"
+    ]
+    methods = ""
+    if risk_controls is not None:
+        methods += _protections_property(risk_controls)
+        if risk_controls.circuit_breaker is not None:
+            methods += _HALT_ENTRY_CHECK
+    if sizing is not None:
+        check_sizing_against_plan(sizing, plan.risk.stop_loss_pct)
+        stop_pct = plan.risk.stop_loss_pct
+        assert stop_pct is not None  # checked above
+        imports.insert(0, "import math\n")
+        constants.append(
+            'SIZING = FROZEN_RISK["sizing"]\n'
+            f"STOP_DISTANCE = {stop_pct / 100.0!r}\n"
+            f"\n\n{inspect.getsource(sized_stake)}"
+        )
+        methods += _SIZED_STAKE_METHOD
+        if sizing.vol_target_annual is not None:
+            constants.append(
+                f"\n\nBARS_PER_YEAR = {bars_per_year(plan.interval)!r}\n"
+                f"VOL_WINDOW_BARS = {sizing.vol_window_bars!r}\n"
+                f"_SECONDS_PER_YEAR = {risk_rules._SECONDS_PER_YEAR!r}\n"
+                f"_BAR_STEP_TOLERANCE = {risk_rules._BAR_STEP_TOLERANCE!r}\n"
+                f"\n\n{inspect.getsource(realized_vol_annual)}"
+            )
+            exits = "        exits = np.zeros(n, dtype=bool)\n"
+            source = _replace_once(source, exits, exits + "        vol = np.full(n, np.nan)\n")
+            filled = "            exits[rows] = signals.exits.to_numpy(dtype=bool)\n"
+            column = (
+                "            vol[rows] = realized_vol_annual(\n"
+                '                candles["close"], VOL_WINDOW_BARS, BARS_PER_YEAR\n'
+                '            ).to_numpy(dtype="float64")\n'
+            )
+            source = _replace_once(source, filled, filled + column)
+            saved = '        dataframe["lab_entry"] = entries\n'
+            source = _replace_once(source, saved, '        dataframe["lab_vol"] = vol\n' + saved)
+    stdlib = "import json\nimport logging\n"
+    logger_line = "logger = logging.getLogger(__name__)\n"
+    source = _replace_once(source, stdlib, stdlib + "".join(imports))
+    source = _replace_once(source, logger_line, logger_line + "".join(constants))
+    return source + methods
+
+
 def render_strategy(
     plan: Mapping[str, Any] | Plan,
     *,
     class_name: str,
     warm_from: int | None = None,
     start: int | None = None,
+    risk_controls: RiskControls | None = None,
+    sizing: Sizing | None = None,
 ) -> str:
     """Python source of a freqtrade IStrategy (v3) running ``plan`` through ``lab.plan``.
 
@@ -166,7 +344,8 @@ def render_strategy(
     in ``compare`` (None: on every candle freqtrade holds, for previews without a protocol).
     ``start`` (the protocol's start, UTC epoch seconds) is rendered as ``START``: entry signals
     count only on candles with ``date >= START``, the lab replay's first signal bar (None: no
-    gate, for previews).
+    gate, for previews). ``risk_controls`` and ``sizing`` are the protocol's frozen blocks (see
+    the module docstring); without them the source is the plain strategy.
     """
     if not isinstance(class_name, str) or not class_name.isidentifier():
         raise ValueError(f"class_name {class_name!r} is not a valid Python identifier")
@@ -185,7 +364,7 @@ def render_strategy(
             raise ValueError(f"{name} must be a non-negative int (epoch seconds), got {value!r}")
     if warm_from is not None and start is not None and warm_from > start:
         raise ValueError(f"warm_from {warm_from} must not be after start {start}")
-    return f'''"""Generated by tradingView agents (research.paper.freqtrade). DO NOT EDIT.
+    source = f'''"""Generated by tradingView agents (research.paper.freqtrade). DO NOT EDIT.
 
 PAPER TRADING ONLY: run with `freqtrade trade --dry-run`. Entry/exit signals come from the
 tradingView lab (lab.plan.compile_plan) on closed candles: same rules and timing as the backtest
@@ -297,6 +476,9 @@ class {class_name}(IStrategy):
         dataframe["exit_long"] = dataframe["lab_exit"].astype("int64")
         return dataframe
 '''
+    if risk_controls is None and sizing is None:
+        return source
+    return _with_risk(source, p, risk_controls, sizing)
 
 
 # --------------------------------------------------------------------------- config
@@ -318,10 +500,13 @@ def _credential_paths(obj: Any, path: str = "") -> list[tuple[str, Any]]:
 
 def check_paper_config(config: Mapping[str, Any]) -> None:
     """Raise ``ValueError`` unless ``config`` is a dry-run config without credentials:
-    ``dry_run`` is ``True``, ``exchange.key``/``exchange.secret`` are empty strings, and no
-    other credential-like key (password, token, uid, ...) appears anywhere."""
+    ``dry_run`` is ``True``, ``exchange.key``/``exchange.secret`` are empty strings, no other
+    credential-like key (password, token, uid, ...) appears anywhere, and
+    ``position_adjustment_enable`` is off (no averaging down)."""
     if config.get("dry_run") is not True:
         raise ValueError(f"paper trading requires dry_run = true, got {config.get('dry_run')!r}")
+    if config.get("position_adjustment_enable"):
+        raise ValueError("no averaging down rule: config sets position_adjustment_enable")
     exchange = config.get("exchange")
     if not isinstance(exchange, Mapping):
         raise ValueError("config has no exchange object")
@@ -349,6 +534,7 @@ def render_config(
     dry_run: bool = True,
     exchange_options: Mapping[str, Any] | None = None,
     bot_name: str | None = None,
+    sizing: Sizing | None = None,
 ) -> dict[str, Any]:
     """A freqtrade config dict for a dry-run of ``plan`` on one pair.
 
@@ -363,7 +549,15 @@ def render_config(
     ``api.binance.com`` returning HTTP 451 in the owner's region (the app itself reads
     data-api.binance.vision); verified 2026-10-25 with freqtrade 2026.9 / ccxt 4.5.90 (markets
     and 1h candles load, signals compute). Re-check the bot log after upgrading either.
+
+    ``sizing`` (the protocol's frozen block) sets the wallet to ``sizing.wallet``,
+    ``max_open_trades``, ``tradable_balance_ratio`` and ``stake_amount`` to ``"unlimited"``:
+    ``custom_stake_amount`` decides every stake, and a numeric value would drop an entry whenever
+    the balance fell below it. ``stake_amount`` and ``dry_run_wallet`` are then ignored, so callers
+    refuse a contradicting value first.
     """
+    if sizing is not None:
+        stake_amount, dry_run_wallet = sizing_max_stake(sizing), sizing.wallet
     if dry_run is not True:
         raise ValueError("render_config only builds dry-run configs (dry_run must be True)")
     p = _parse(plan)
@@ -444,6 +638,10 @@ def render_config(
         "force_entry_enable": False,
         "internals": {"process_throttle_secs": 5},
     }
+    if sizing is not None:
+        config["stake_amount"] = UNLIMITED_STAKE
+        config["max_open_trades"] = sizing.max_open_trades
+        config["tradable_balance_ratio"] = sizing.max_total_exposure_pct / 100.0
     check_paper_config(config)
     return config
 
@@ -492,12 +690,15 @@ def prepare_candidate(
     now: datetime | None = None,
     warm_from: int | None = None,
     start: int | None = None,
+    risk_controls: RiskControls | None = None,
+    sizing: Sizing | None = None,
     **config_kwargs: Any,
 ) -> PreparedPaper:
     """Write ``paper_dir/<candidate>/`` (``plan.json``, ``<Class>.py``, ``config.json``,
     ``meta.json``, ``user_data/``) and return the dry-run launch command. ``warm_from`` is the
     registered protocol's ``data.warm_from`` and ``start`` is its start, both rendered into the
-    strategy (see :func:`render_strategy`); ``paper_trade.py prepare`` always passes them.
+    strategy (see :func:`render_strategy`); ``paper_trade.py prepare`` always passes them, and
+    the protocol's ``risk_controls`` and ``sizing`` when it has them.
 
     Re-preparing a candidate keeps its dry-run DB and first ``prepared_at``; a different plan
     under an existing candidate name raises ``ValueError`` (use a new name).
@@ -522,9 +723,9 @@ def prepare_candidate(
         prepared_at = old.get("prepared_at", prepared_at)
 
     class_name = class_name_for(candidate)
-    db_path = folder / "dryrun.sqlite"
+    db_path = folder / DRYRUN_DB
     config = render_config(
-        plan=p, db_path=db_path, bot_name=f"tv-paper-{candidate}", **config_kwargs
+        plan=p, db_path=db_path, bot_name=f"tv-paper-{candidate}", sizing=sizing, **config_kwargs
     )
     strategy_path = folder / f"{class_name}.py"
     config_path = folder / "config.json"
@@ -533,7 +734,14 @@ def prepare_candidate(
     )
     _atomic_write(
         strategy_path,
-        render_strategy(p, class_name=class_name, warm_from=warm_from, start=start),
+        render_strategy(
+            p,
+            class_name=class_name,
+            warm_from=warm_from,
+            start=start,
+            risk_controls=risk_controls,
+            sizing=sizing,
+        ),
     )
     _atomic_write(config_path, json.dumps(config, indent=2) + "\n")
     command = [
@@ -575,6 +783,54 @@ def prepare_candidate(
     )
 
 
+def frozen_settings(paper: PaperConfig) -> dict[str, Any]:
+    """:func:`render_config` keywords for a frozen config. A sized test's stake and wallet come
+    from its block, so ``unlimited`` is not passed on as a number."""
+    settings: dict[str, Any] = {
+        "exchange": paper.exchange,
+        "public_api_host": paper.public_api_host,
+        "dry_run_wallet": paper.dry_run_wallet,
+    }
+    if paper.stake_amount != UNLIMITED_STAKE:
+        settings["stake_amount"] = paper.stake_amount
+    return settings
+
+
+def fresh_config(
+    plan: Mapping[str, Any] | Plan,
+    *,
+    candidate: str,
+    folder: Path,
+    paper: PaperConfig,
+    sizing: Sizing | None,
+) -> dict[str, Any]:
+    """What ``config.json`` of ``folder`` must be: a render from the frozen values, the same call
+    :func:`prepare_candidate` makes, through JSON so it compares with a parsed file."""
+    config = render_config(
+        plan=plan,
+        db_path=Path(folder) / DRYRUN_DB,
+        bot_name=f"tv-paper-{candidate}",
+        sizing=sizing,
+        **frozen_settings(paper),
+    )
+    return json.loads(json.dumps(config))
+
+
+def config_differences(found: Any, fresh: Any, path: str = "") -> list[str]:
+    """Dotted keys on which two parsed configs differ, whole file: a key added, dropped or
+    changed at any depth counts."""
+    if not (isinstance(found, Mapping) and isinstance(fresh, Mapping)):
+        return [] if found == fresh else [path or "<root>"]
+    out: list[str] = []
+    for key in sorted(set(found) | set(fresh), key=str):
+        where = f"{path}.{key}" if path else str(key)
+        if key not in found or key not in fresh:
+            out.append(where)
+        else:
+            out.extend(config_differences(found[key], fresh[key], where))
+    return out
+
+
 def strategy_frozen_value(source: str, name: str) -> int | None:
     """The frozen ``<name> = <int>`` (``WARM_FROM`` or ``START``) rendered into a strategy
     file's source; ``ValueError`` when the line is missing or appears more than once (a
@@ -583,6 +839,21 @@ def strategy_frozen_value(source: str, name: str) -> int | None:
     if len(found) != 1:
         raise ValueError(f"the strategy file has no single `{name} = ...` line")
     return None if found[0] == "None" else int(found[0])
+
+
+def strategy_frozen_risk(source: str) -> dict[str, Any]:
+    """The ``FROZEN_RISK`` dict rendered into a strategy file's source; ``ValueError`` when the
+    line is missing, repeated or not a literal (a hand-edited or older file)."""
+    found = re.findall(r"^FROZEN_RISK = (.+)$", source, flags=re.M)
+    if len(found) != 1:
+        raise ValueError("the strategy file has no single `FROZEN_RISK = ...` line")
+    try:
+        value = ast.literal_eval(found[0])
+    except (ValueError, SyntaxError) as exc:
+        raise ValueError(f"the strategy file's FROZEN_RISK is not a literal: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError("the strategy file's FROZEN_RISK is not a dict")
+    return value
 
 
 def strategy_warm_from(source: str) -> int | None:
@@ -618,36 +889,51 @@ def launch(
     runner: Callable[..., Any] = subprocess.Popen,
     which: Callable[[str], str | None] = shutil.which,
     env: Mapping[str, str] | None = None,
+    pid_file: Path | None = None,
 ) -> LaunchResult:
     """Start the prepared ``freqtrade trade --dry-run`` bot with ``runner``.
 
     Refuses (``ValueError``) unless the command is ``freqtrade trade ... --dry-run`` loading
-    exactly the prepared config, and that config passes :func:`check_paper_config`. Returns
-    ``started=False`` with an install hint when ``freqtrade`` is not on PATH (never raises for
-    that). Exchange settings are stripped from the child's environment.
+    exactly the prepared config, that config passes :func:`check_paper_config`, and the folder
+    holds no ``halt.lock``. Returns ``started=False`` with an install hint when ``freqtrade`` is
+    not on PATH (never raises for that). Exchange settings are stripped from the child's
+    environment. ``pid_file``, given only for a protocol with a circuit breaker, records the
+    process id for ``paper_trade.py guard``.
     """
     _check_command(prepared)
+    check_not_halted(prepared.dir)
     config = json.loads(Path(prepared.config_path).read_text(encoding="utf-8"))
     check_paper_config(config)
     if which("freqtrade") is None:
         return LaunchResult(False, FREQTRADE_INSTALL_HINT)
     process = runner(list(prepared.command), cwd=str(prepared.dir), env=_child_env(env))
+    if pid_file is not None:
+        _atomic_write(Path(pid_file), f"{process.pid}\n")
     return LaunchResult(True, "freqtrade dry-run started: " + " ".join(prepared.command), process)
 
 
 __all__ = [
+    "DB_URL_KEY",
+    "DRYRUN_DB",
     "FREQTRADE_INSTALL_HINT",
+    "UNLIMITED_STAKE",
     "LaunchResult",
     "PreparedPaper",
     "check_candidate_name",
     "check_paper_config",
     "class_name_for",
+    "config_differences",
+    "fresh_config",
+    "frozen_risk",
+    "frozen_settings",
     "launch",
     "plan_lookback_bars",
     "prepare_candidate",
     "render_config",
     "render_strategy",
+    "sizing_max_stake",
     "startup_candle_count",
+    "strategy_frozen_risk",
     "strategy_frozen_value",
     "strategy_warm_from",
     "symbol_to_pair",

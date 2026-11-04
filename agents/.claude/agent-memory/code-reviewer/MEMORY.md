@@ -1,0 +1,1 @@
+- [Phase 20 paper monitor](project_web_phase20_monitor.md) — WAL/chunk/replay checks confirmed; open row-rendering gaps; tsx fails in sandbox, use node

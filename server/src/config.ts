@@ -19,6 +19,13 @@ const SERVER_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 export const DEFAULT_PORT = 8787
 export const DEFAULT_DB_PATH = resolve(SERVER_ROOT, 'data', 'app.db')
+export const DEFAULT_PAPER_DIR = resolve(SERVER_ROOT, '..', 'agents', 'data', 'paper')
+
+/** PAPER_DIR: the folder of paper tests the monitor reads. Default `<repo>/agents/data/paper`. */
+export function loadPaperDir(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env.PAPER_DIR
+  return raw !== undefined && raw !== '' ? resolve(raw) : DEFAULT_PAPER_DIR
+}
 
 /**
  * Reads TV_PORT, TV_DB_PATH, TV_DESKTOP_NOTIFY, TV_MARKET_VENUE and TV_ALERT_WEBHOOK_URL. The bind host is fixed

@@ -665,6 +665,99 @@
   color: var(--down-text);
 }
 
+/* ---------- Paper tests (read-only dry-run monitor) ---------- */
+
+.paper-monitor__note {
+  margin: 0;
+  padding: 7px var(--pp-pad-x);
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.paper-monitor__note code {
+  font-family: var(--font-num);
+  font-size: 10.5px;
+}
+
+.paper-monitor__summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 var(--pp-pad-x);
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.paper-monitor__title {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.paper-monitor__stale {
+  margin: 0;
+  padding: 6px var(--pp-pad-x);
+  border-bottom: 1px solid color-mix(in srgb, var(--warn) 28%, transparent);
+  background: color-mix(in srgb, var(--warn) 9%, transparent);
+  color: var(--warn-text);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* The accent sits inside the row, so a halted row keeps the column's text edge. */
+.paper-monitor__row--halted {
+  box-shadow: inset 2px 0 0 var(--down);
+  background: color-mix(in srgb, var(--down) 6%, transparent);
+}
+
+.paper-monitor__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.paper-monitor__meta {
+  flex-wrap: wrap;
+  gap: 0 10px;
+}
+
+.paper-monitor__lock,
+.paper-monitor__lock b {
+  color: var(--warn-text);
+}
+
+.paper-chip--halted {
+  flex: none;
+  background: var(--down);
+  color: var(--on-accent);
+}
+
+.paper-monitor__halt,
+.paper-monitor__error {
+  margin: 3px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.paper-monitor__halt {
+  color: var(--down-text);
+}
+
+.paper-monitor__halt strong {
+  font-weight: 600;
+}
+
+.paper-monitor__error {
+  color: var(--warn-text);
+}
+
 /* ---------- Reset (inline confirmation) ---------- */
 
 .paper-reset {

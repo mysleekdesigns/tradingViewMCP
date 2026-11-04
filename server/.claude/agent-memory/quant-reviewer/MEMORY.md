@@ -1,0 +1,1 @@
+- [Where review notes live](reference_agents_memory.md) — paper/Phase 20 notes are in agents/.claude/agent-memory, lab notes at the repo root

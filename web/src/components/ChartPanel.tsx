@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, type ReactNode } from 'react'
 import type { BacktestChartData, FocusPlan } from '../chart/backtestOverlay'
 import { Chart, type ChartApi } from '../chart/Chart'
 import { CHART_MAX_BARS } from '../chart/conflation'
-import { regimeSourceBars } from '../chart/regimeRibbon'
+import { regimeRunLabel, regimeRunThrough, regimeSourceBars } from '../chart/regimeRibbon'
 import { structureClosedThrough } from '../chart/structureBars'
 import type { CrosshairSync } from '../chart/crosshairSync'
 import type { ChartContextMenuRequest, DrawingStyle, ToolMode } from '../chart/drawings/types'
@@ -13,6 +13,7 @@ import {
   type LabDerivativesClient,
   type LabRegimeClient,
 } from '../data/labApi'
+import type { RegimeState } from '../data/labTypes'
 import { MarketDataError } from '../data/provider'
 import type { CandleSource } from '../data/timeframeProvider'
 import { timeframeSeconds } from '../data/timeframes'
@@ -362,7 +363,11 @@ export const ChartPanel = memo(function ChartPanel({
           />
         )}
         {hasBars && regimeEnabled && (
-          <RegimeChip overlay={regime} unavailable={regimeAllowed ? null : REGIME_SECONDS_TEXT} />
+          <RegimeChip
+            overlay={regime}
+            unavailable={regimeAllowed ? null : REGIME_SECONDS_TEXT}
+            source={regimeSource}
+          />
         )}
         {hasBars && derivativesEnabled && (
           <DerivativesChip
@@ -411,17 +416,28 @@ const NO_DERIVATIVES_CLIENT: LabDerivativesClient = {
 
 const REGIME_LAB_COMMAND = 'uv run python -m lab.api'
 
+/** The swatch modifier of each regime state (the chip's legend colours). */
+const REGIME_SWATCH: Readonly<Record<RegimeState, string>> = {
+  [-1]: 'bear',
+  [0]: 'side',
+  [1]: 'bull',
+}
+
 /**
- * Top-right chip naming the ribbon's parameters, with a legend in its tooltip. If the lab is
- * unreachable it says how to start it; the chart keeps working either way.
+ * Top-right chip naming the ribbon's parameters, with a legend in its tooltip, and the newest
+ * closed bar's regime with its bars in regime. If the lab is unreachable it says how to start
+ * it (no state: a held label may be old); the chart keeps working either way.
  */
 function RegimeChip({
   overlay,
   unavailable,
+  source,
 }: {
   overlay: RegimeOverlay
   /** Why the ribbon is off on this chart (no requests are made), or null. */
   unavailable: string | null
+  /** The bars the ribbon covers (`regimeSourceBars`); the legend reads closed bars only. */
+  source: { candles: readonly Candle[]; formingLast: boolean }
 }) {
   if (unavailable !== null) {
     return (
@@ -443,19 +459,38 @@ function RegimeChip({
         : `Regime labels failed: ${error}`
       : `hedgeFund regime of each closed bar from its trailing ${REGIME_WINDOW_BARS}-bar return ` +
         `(±${REGIME_THRESHOLD * 100}% bands): bull, sideways, bear. Each label uses only that ` +
-        'bar and earlier ones, so it never changes later. The forming bar has none.'
+        'bar and earlier ones, so it never changes later. The forming bar has none. ' +
+        'Bars in regime counts the labelled closed bars since the state last changed.'
+  const run =
+    points !== null && error === null
+      ? regimeRunThrough(points, source.candles, source.formingLast)
+      : null
+  // The key gives way to the live state, or to an error, in small multi-chart cells.
+  const compact = run !== null || error !== null
   return (
     <div
       className={`regime-chip${error !== null ? ' regime-chip--error' : ''}`}
       title={title}
       role={error !== null ? 'status' : undefined}
     >
-      <span className="regime-chip__swatches" aria-hidden="true">
+      {run !== null && (
+        <>
+          <span
+            className={`regime-chip__swatch regime-chip__swatch--${REGIME_SWATCH[run.state]}`}
+            aria-hidden="true"
+          />
+          <span className="regime-chip__label">{regimeRunLabel(run)}</span>
+        </>
+      )}
+      <span
+        className={`regime-chip__swatches${compact ? ' regime-chip__key' : ''}`}
+        aria-hidden="true"
+      >
         <span className="regime-chip__swatch regime-chip__swatch--bull" />
         <span className="regime-chip__swatch regime-chip__swatch--side" />
         <span className="regime-chip__swatch regime-chip__swatch--bear" />
       </span>
-      <span className="regime-chip__label">{label}</span>
+      <span className={`regime-chip__label${compact ? ' regime-chip__key' : ''}`}>{label}</span>
       {error !== null ? (
         <span className="regime-chip__state">
           {offline ? (

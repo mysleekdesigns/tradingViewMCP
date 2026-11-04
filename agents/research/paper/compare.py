@@ -5,7 +5,9 @@
   over the paper period, flat at ``start`` like the bot (signals computed on the history before
   ``end``, trades inside ``[start, end)``). They record nothing in the ledger: this is a
   consistency check of a frozen candidate, never a research input, and must not be used to
-  re-tune anything.
+  re-tune anything. For a protocol with protections, ``locks`` turns entries off on the bars a
+  protection blocks (:func:`mask_locked_entries`), so positions and later entries follow the path
+  the bot really has.
 * :func:`compare` builds the :class:`lab.research.contract.PaperComparison`; arithmetic stays
   in Python. :func:`write_comparison` stores it as JSON plus a short Markdown summary.
 * :func:`observe_paper` turns the dry-run trades into what the frozen
@@ -15,6 +17,12 @@
   bar's modelled fill, and per-bar paper returns.
 * :func:`public_kline_loader` fetches closed candles from Binance's public market-data host
   (no API key) for weeks the monthly archive does not cover yet.
+* :func:`size_both_sides` (PLAN.md Phase 20 Part E2, only for a protocol with a ``sizing``
+  block) sizes the lab replay with the same stake function as the strategy, refuses a paper stake
+  that differs, and words the sizing line. Sizing never changes whether the plan has an edge.
+* :func:`daily_paper_returns` aggregates :func:`paper_bar_returns` to UTC days for
+  ``compare --portfolio`` (Part F, information only), with :func:`daily_coin_returns` and
+  :func:`daily_in_market` beside it.
 
 Results are historical, not forward-looking.
 """
@@ -40,13 +48,15 @@ import pandas as pd
 
 from lab.config import LabConfig
 from lab.engine import run_signals
+from lab.engine.backtest import _next_tradable
 from lab.engine.costs import slippage_series
 from lab.plan import compile_plan, parse_plan
 from lab.research.contract import PaperComparison, TradeStats
 from lab.runner import CandleLoader
-from lab.types import CostModel, Plan, Trade, interval_seconds
+from lab.types import CostModel, Plan, Trade, bars_per_year, interval_seconds
 from research.paper.freqtrade import check_candidate_name
 from research.paper.protocol import Fill, ObservedPaper, PaperProtocol, Verdict
+from research.paper.risk import Sizing, realized_vol_annual, sized_stake
 
 # Verdict thresholds (one-line justification each; fixed here, not tuned per candidate).
 MIN_FORWARD_TRADES = 5  # fewer closed forward trades than this make any comparison noise
@@ -55,6 +65,13 @@ MIN_ENTRY_MATCH_RATE = 0.7  # identical logic should fire the same entries; <70%
 RETURN_DIFF_ABS = 0.05  # total returns may differ by up to 5 percentage points (fees, fills)
 RETURN_DIFF_REL = 0.5  # ...or by half the backtest's own total return, whichever is larger
 ENTRY_MATCH_BARS = 1  # a forward entry within 1 bar of the lab's fill bar counts as a match
+# Lot rounding moved real freqtrade 2026.9 BTC stakes by at most 0.40% near 200 USDT (2026-11-04).
+STAKE_TOLERANCE_REL = 0.01
+# ...but rounding is one lot, not a percentage: 0.61% near 80 USDT in the same runs, and 1e-5 BTC
+# at 150k is 7.5% of a 20 USDT stake. Amounts round DOWN: every real gap lay between -0.805 and 0
+# USDT, so the lot allowance applies downwards only and a stake above the frozen one gets just
+# the relative tolerance (a lot upwards would accept +7.5% at a 20 stake).
+STAKE_TOLERANCE_LOT = 1.5
 
 DISCLAIMER = (
     "Results are historical, not forward-looking. A consistent comparison means the paper bot "
@@ -69,7 +86,9 @@ OPTIONAL_COLUMNS: tuple[str, ...] = (
     "fee_close",
     "close_profit",
     "exit_reason",
+    "stake_amount",
 )
+SECONDS_PER_DAY = 86_400
 KLINE_PAGE_LIMIT = 1000  # Binance /api/v3/klines maximum rows per request
 # Rate limits (HTTP 429): Binance asks clients to back off for Retry-After seconds and bans
 # IPs (HTTP 418) that keep requesting. A few polite retries, then give up with a clear error.
@@ -79,6 +98,7 @@ KLINE_DEFAULT_BACKOFF_S = 2.0  # wait when Retry-After is missing or unreadable 
 # freqtrade exit reasons whose fill the lab models at the next bar's open (v3 name, legacy name).
 # Stop-loss / ROI exits fill at a level in the lab, so their shortfall is not judged.
 SIGNAL_EXIT_REASONS: frozenset[str] = frozenset({"exit_signal", "sell_signal"})
+Lock = tuple[pd.Timestamp, pd.Timestamp]  # a protection lock as recorded: (start, end)
 
 
 @dataclass(frozen=True)
@@ -96,6 +116,7 @@ class ForwardTrade:
     fee_close: float | None = None
     close_profit: float | None = None
     exit_reason: str | None = None
+    stake_amount: float | None = None
 
     @property
     def closed(self) -> bool:
@@ -176,6 +197,7 @@ def read_dryrun_trades(db_path: Path, *, pair: str | None = None) -> list[Forwar
                 fee_close=_float(d.get("fee_close")),
                 close_profit=_float(d.get("close_profit")),
                 exit_reason=None if reason is None else str(reason),
+                stake_amount=_float(d.get("stake_amount")),
             )
         )
     return out
@@ -189,6 +211,35 @@ def _utc(ts: pd.Timestamp | datetime | str) -> pd.Timestamp:
     return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
 
 
+def bar_is_locked(bar: pd.Timestamp, locks: Sequence[Lock]) -> bool:
+    """Whether a protection blocks an entry on ``bar``, exactly as freqtrade's backtest does.
+
+    A lock is recorded with the bar of the exit that caused it as its start, but ``backtest_loop``
+    runs entries BEFORE exits within a bar: the entry of a trade stopped out on its own fill bar
+    is on the lock's start bar and was not blocked. So the bars after the start count, and the end
+    bar is free again (``lock_end_time > candle date``)."""
+    return any(begin < bar < end for begin, end in locks)
+
+
+def mask_locked_entries(
+    entries: pd.Series, candles: pd.DataFrame, locks: Sequence[Lock]
+) -> pd.Series:
+    """``entries`` (decided at each row's close) with every signal off whose FILL bar is locked.
+
+    The fill bar is the next tradable row, the engine's rule; a signal on bar t is blocked by a
+    lock on t+1, where freqtrade asks. Nothing else changes: exits stay, and a signal still true
+    when the lock ends enters then, as the bot does."""
+    if not locks:
+        return entries
+    nxt = _next_tradable(candles["tradable"].to_numpy(dtype=bool))
+    kept = entries.to_numpy(dtype=bool).copy()
+    for row in np.flatnonzero(kept):
+        fill = nxt[row + 1]
+        if fill < len(candles) and bar_is_locked(candles.index[fill], locks):
+            kept[row] = False
+    return pd.Series(kept, index=entries.index, name=entries.name)
+
+
 def replay_trades(
     plan: Mapping[str, Any] | Plan,
     history: pd.DataFrame,
@@ -197,6 +248,7 @@ def replay_trades(
     end: pd.Timestamp | datetime | str,
     costs: CostModel,
     init_cash: float = 10_000.0,
+    locks: Sequence[Lock] = (),
 ) -> list[Trade]:
     """Lab-engine trades of ``plan`` on ``history`` entered in ``[start, end)``, flat at
     ``start`` (like a freshly started paper bot).
@@ -204,7 +256,8 @@ def replay_trades(
     Signals are compiled on the rows of ``history`` before ``end`` (earlier rows are warm-up;
     rows at or after ``end`` are dropped, so no look-ahead), the engine runs on the rows in
     ``[start, end)`` with ``costs`` and the plan's risk, and vol-scaled slippage is warmed up
-    on the same history. Nothing is recorded."""
+    on the same history. ``locks`` are a protected backtest's (:func:`mask_locked_entries`).
+    Nothing is recorded."""
     p = plan if isinstance(plan, Plan) else parse_plan(plan)
     t0, t1 = _utc(start), _utc(end)
     if t1 <= t0:
@@ -217,7 +270,7 @@ def replay_trades(
     candles = history.loc[mask]
     result = run_signals(
         candles,
-        sig.entries.loc[mask],
+        mask_locked_entries(sig.entries.loc[mask], candles, locks),
         sig.exits.loc[mask],
         costs=costs,
         risk=p.risk,
@@ -235,6 +288,7 @@ def backtest_same_period(
     cfg: LabConfig,
     loader: CandleLoader,
     costs: CostModel | None = None,
+    locks: Sequence[Lock] = (),
 ) -> list[Trade]:
     """Lab-engine trades of ``plan`` entered in ``[start, end)`` (:func:`replay_trades` on the
     history ``loader`` returns before ``end``), with ``costs`` (default: the lab's)."""
@@ -244,7 +298,7 @@ def backtest_same_period(
         raise ValueError(f"end {t1} must be after start {t0}")
     history = loader(p.symbol, p.interval, t1)
     return replay_trades(
-        p, history, start=t0, end=t1, costs=costs or cfg.costs, init_cash=cfg.init_cash
+        p, history, start=t0, end=t1, costs=costs or cfg.costs, init_cash=cfg.init_cash, locks=locks
     )
 
 
@@ -523,6 +577,213 @@ def paper_bar_returns(
                 growth[i] *= closes[i] / prev
             prev = closes[i]
     return growth - 1.0
+
+
+def _bars_per_day(interval: str) -> int:
+    return max(1, SECONDS_PER_DAY // interval_seconds(interval))
+
+
+def daily_paper_returns(
+    trades: Sequence[ForwardTrade], candles: pd.DataFrame, *, interval: str
+) -> pd.Series:
+    """One compounded :func:`paper_bar_returns` return per complete UTC day of ``candles``.
+
+    A day missing a bar (the partial first and last days, a gap) has no return: it is left out,
+    never filled, so it also drops out of the dates common to several tests."""
+    if candles.empty:
+        return pd.Series(dtype=float, index=pd.DatetimeIndex([], tz="UTC"))
+    bars = pd.Series(
+        paper_bar_returns(trades, candles, interval=interval), index=candles.index, dtype=float
+    )
+    days = bars.groupby(bars.index.normalize())
+    daily = days.apply(lambda day: float(np.prod(1.0 + day.to_numpy())) - 1.0)
+    return daily.loc[days.size() >= _bars_per_day(interval)]
+
+
+def daily_coin_returns(candles: pd.DataFrame, *, interval: str) -> pd.Series:
+    """The coin's own return per complete UTC day (first open to last close), the same days
+    :func:`daily_paper_returns` keeps. Position size and time in market play no part."""
+    if candles.empty:
+        return pd.Series(dtype=float, index=pd.DatetimeIndex([], tz="UTC"))
+    days = candles.groupby(pd.DatetimeIndex(candles.index).normalize())
+    daily = days["close"].last() / days["open"].first() - 1.0
+    return daily.loc[days.size() >= _bars_per_day(interval)]
+
+
+def daily_in_market(
+    trades: Sequence[ForwardTrade], candles: pd.DataFrame, *, interval: str
+) -> pd.Series:
+    """Per complete UTC day, whether a position was open at any bar close (the rule of
+    :func:`observe_paper`: opened before the close and still open at it)."""
+    if candles.empty:
+        return pd.Series(dtype=bool, index=pd.DatetimeIndex([], tz="UTC"))
+    step = pd.Timedelta(seconds=interval_seconds(interval))
+    index = pd.DatetimeIndex(candles.index)
+    held = np.zeros(len(index), dtype=bool)
+    for trade in trades:
+        opened = np.asarray(index + step > trade.open_time)
+        still = trade.close_time is None or np.asarray(index + step <= trade.close_time)
+        held |= opened & still
+    days = pd.Series(held, index=index).groupby(index.normalize())
+    return days.any().loc[days.size() >= _bars_per_day(interval)]
+
+
+@dataclass(frozen=True)
+class SizedSide:
+    """One side of a sized comparison, all on the frozen wallet (stakes never compound)."""
+
+    trades: int
+    total_return: float  # closed trades' stake x net return, as a share of the wallet
+    largest_loss_pct: float  # largest single loss as % of the wallet; 0.0 with no loser
+    exposure: float  # mean share of the wallet in positions over the period's bars
+
+
+class StakeMismatchError(ValueError):
+    """A paper stake is not the stake the frozen sizing block gives."""
+
+
+def stakes_by_fill_bar(
+    history: pd.DataFrame, sizing: Sizing, *, stop_distance: float, interval: str
+) -> pd.Series:
+    """The stake :func:`sized_stake` gives a fill at each row of ``history``, sized on the row
+    before it (bar t, closed), so nothing at or after the fill bar is read. ``history`` starts at
+    the protocol's ``warm_from``, the strategy's first indicator bar, so the volatility is the
+    strategy's own column, including its filter: a zero-volume flat row is dropped before the
+    volatility is computed (the strategy's ``lab_candles``), so it has none and neither has any
+    window across it. NaN on the first row (it has no signal bar)."""
+    closes = history["close"]
+    vol = None
+    if sizing.vol_target_annual is not None and sizing.vol_window_bars is not None:
+        ohlc = history[["open", "high", "low", "close"]].to_numpy(dtype="float64")
+        flat = (ohlc[:, 1:] == ohlc[:, :-1]).all(axis=1)
+        kept = closes[~(flat & (history["volume"].to_numpy(dtype="float64") <= 0))]
+        vol = realized_vol_annual(kept, sizing.vol_window_bars, bars_per_year(interval))
+        vol = vol.reindex(history.index)
+    stakes = [
+        sized_stake(
+            stop_distance=stop_distance,
+            wallet=sizing.wallet,
+            risk_per_trade_pct=sizing.risk_per_trade_pct,
+            max_stake_pct=sizing.max_stake_pct,
+            min_stake_pct=sizing.min_stake_pct,
+            size_multiplier=sizing.size_multiplier,
+            vol_target_annual=sizing.vol_target_annual,
+            realized_vol_annual=None if vol is None else float(vol.iloc[i]),
+        )
+        for i in range(len(closes))
+    ]
+    return pd.Series(stakes, index=history.index, dtype=float).shift(1)
+
+
+def check_paper_stakes(
+    paper: Sequence[ForwardTrade],
+    lab_trades: Sequence[Trade],
+    stakes: pd.Series,
+    *,
+    interval: str,
+    tolerance_bars: int,
+) -> None:
+    """:class:`StakeMismatchError` when a paper entry matched to a lab entry has a
+    ``stake_amount`` other than the stake for its own fill bar, or has none. Below it the gap may
+    reach :data:`STAKE_TOLERANCE_REL` or one :data:`STAKE_TOLERANCE_LOT`, whichever is larger;
+    above it only :data:`STAKE_TOLERANCE_REL`, because amounts round down. A fill on a bar without
+    a candle is left unjudged, as everywhere else in the comparison; an expected stake of zero or
+    less is never a size a bot can match."""
+    step = interval_seconds(interval)
+    paper_bars = [int(_bar_of(t.open_time, step).timestamp()) for t in paper]
+    lab_bars = [int(t.entry_time.timestamp()) for t in lab_trades]
+    for i, _ in match_fill_bars(paper_bars, lab_bars, tolerance_seconds=tolerance_bars * step):
+        trade, bar = paper[i], _bar_of(paper[i].open_time, step)
+        expected = float(stakes.loc[bar]) if bar in stakes.index else math.nan
+        if not math.isfinite(expected):
+            continue
+        if trade.stake_amount is None:
+            raise StakeMismatchError(f"the paper entry of {bar} has no stake_amount in the DB")
+        if expected <= 0:
+            raise StakeMismatchError(f"the frozen sizing gives {expected:.4f} at {bar}: no stake")
+        gap = trade.stake_amount - expected
+        above = STAKE_TOLERANCE_REL * expected
+        allowed = above if gap > 0 else max(above, STAKE_TOLERANCE_LOT)
+        if abs(gap) > allowed:
+            raise StakeMismatchError(
+                f"the paper entry of {bar} staked {trade.stake_amount:.4f}, the frozen sizing "
+                f"gives {expected:.4f} (tolerance {allowed:.4f}): the bot is not trading the "
+                "registered size"
+            )
+
+
+def _sized_side(
+    rows: Sequence[tuple[pd.Timestamp, pd.Timestamp | None, float, float | None]],
+    index: pd.DatetimeIndex,
+    wallet: float,
+) -> SizedSide:
+    """``rows`` are (entry bar, exit bar or None, stake, net return or None for an open trade)."""
+    pnl = [stake * ret for _, _, stake, ret in rows if ret is not None]
+    invested = np.zeros(len(index))
+    for entry, exit_bar, stake, _ in rows:
+        held = index >= entry if exit_bar is None else (index >= entry) & (index < exit_bar)
+        invested[np.asarray(held)] += stake
+    return SizedSide(
+        trades=len(rows),
+        total_return=float(sum(pnl)) / wallet,
+        largest_loss_pct=max(0.0, -min(pnl, default=0.0)) * 100.0 / wallet,
+        exposure=float(invested.mean()) / wallet if len(index) else 0.0,
+    )
+
+
+def size_both_sides(
+    paper: Sequence[ForwardTrade],
+    lab_trades: Sequence[Trade],
+    history: pd.DataFrame,
+    sizing: Sizing,
+    *,
+    stop_distance: float,
+    interval: str,
+    tolerance_bars: int,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> tuple[SizedSide, SizedSide]:
+    """``(replay, paper)`` for the trades entered in ``[start, end)``, the replay sized with the
+    strategy's stake at each trade's signal bar. Raises :class:`StakeMismatchError` when a
+    matched paper stake differs; nothing is judged, so sizing never touches a verdict."""
+    stakes = stakes_by_fill_bar(history, sizing, stop_distance=stop_distance, interval=interval)
+    step = interval_seconds(interval)
+    index = pd.DatetimeIndex(history.index[(history.index >= start) & (history.index < end)])
+    lab_in = [t for t in lab_trades if start <= t.entry_time < end]
+    fwd = [t for t in paper if start <= t.open_time < end]
+    check_paper_stakes(fwd, lab_in, stakes, interval=interval, tolerance_bars=tolerance_bars)
+    replay_rows = []
+    for t in lab_in:
+        stake = float(stakes.loc[t.entry_time]) if t.entry_time in stakes.index else math.nan
+        if not math.isfinite(stake):
+            raise ValueError(f"the lab entry of {t.entry_time} has no signal bar in the history")
+        ret = None if t.exit_time is None else t.return_pct
+        replay_rows.append((t.entry_time, t.exit_time, stake, ret))
+    paper_rows = []
+    for t in fwd:
+        if t.stake_amount is None:
+            raise StakeMismatchError(f"the paper entry of {t.open_time} has no stake_amount")
+        exit_bar = _bar_of(t.close_time, step) if t.closed and t.close_time is not None else None
+        paper_rows.append((_bar_of(t.open_time, step), exit_bar, t.stake_amount, t.net_return()))
+    return _sized_side(replay_rows, index, sizing.wallet), _sized_side(
+        paper_rows, index, sizing.wallet
+    )
+
+
+SIZING_LINE_PREFIX = "Sizing:"
+
+
+def sizing_line(sizing: Sizing, replay: SizedSide, paper: SizedSide) -> str:
+    """The sizing line of the report and the journal (PLAN.md Part E2): one sentence."""
+    return (
+        f"{SIZING_LINE_PREFIX} risk per trade {sizing.risk_per_trade_pct:g}% of the "
+        f"{sizing.wallet:g} wallet, exposure cap {sizing.max_total_exposure_pct:g}%; largest "
+        f"single loss {paper.largest_loss_pct:.2f}% of the wallet on paper, "
+        f"{replay.largest_loss_pct:.2f}% in the replay; sized return "
+        f"{paper.total_return:+.2%} paper vs {replay.total_return:+.2%} replay; exposure "
+        f"{paper.exposure:.1%} paper vs {replay.exposure:.1%} replay. Sizing does not change "
+        "whether the plan has an edge."
+    )
 
 
 @dataclass(frozen=True)
@@ -1077,14 +1338,26 @@ __all__ = [
     "RETURN_DIFF_ABS",
     "RETURN_DIFF_REL",
     "SIGNAL_EXIT_REASONS",
+    "SIZING_LINE_PREFIX",
+    "STAKE_TOLERANCE_LOT",
+    "STAKE_TOLERANCE_REL",
     "ForwardTrade",
+    "Lock",
+    "SizedSide",
+    "StakeMismatchError",
     "backtest_same_period",
     "backtest_stats",
+    "bar_is_locked",
+    "check_paper_stakes",
     "compare",
     "comparison_path",
+    "daily_coin_returns",
+    "daily_in_market",
+    "daily_paper_returns",
     "fill_shortfalls",
     "forward_stats",
     "frozen_costs",
+    "mask_locked_entries",
     "match_entries",
     "match_fill_bars",
     "modelled_slippage",
@@ -1095,6 +1368,9 @@ __all__ = [
     "render_comparison_markdown",
     "render_verdict_markdown",
     "replay_trades",
+    "size_both_sides",
+    "sizing_line",
+    "stakes_by_fill_bar",
     "write_comparison",
     "write_missing_comparison",
 ]

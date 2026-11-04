@@ -232,6 +232,167 @@ uv run python paper_trade.py compare --candidate NAME [--verbose]   # weekly
 - Results are historical, not forward-looking. A candidate is "successful" only after every
   success criterion **and** a passing forward test.
 
+## Paper risk controls and sizing (Phase 20)
+
+For paper tests started after Phase 20 only. A protocol without these blocks behaves exactly as
+before (version 7, same bytes, same sha256), so the HC tests and the shadow judge are untouched.
+Sizing controls risk; it does not create an edge and never rescues a plan that fails the lab.
+
+```bash
+cp config/paper_risk.example.toml my-test.toml     # the numbers are examples: choose them first
+uv run python paper_trade.py prepare --plan-file plan.json --candidate NAME \
+    --risk-config my-test.toml [--launch]
+uv run python paper_trade.py guard --candidate NAME --watch    # keep this running
+uv run python paper_trade.py guard --candidate NAME            # one check
+uv run python paper_trade.py compare --candidate NAME
+uv run python paper_trade.py compare --portfolio [--candidates a,b]   # information only
+```
+
+- **Frozen before the start.** `--risk-config` freezes `risk_controls` and/or `sizing` into a
+  version 8 protocol, so its sha256 covers them, and the journal entry states them. The template
+  is `agents/config/paper_risk.example.toml`. A registered candidate refuses other values: a
+  different size is a new test. `prepare` without the flag keeps a registered candidate's blocks,
+  and `prepare --launch` is the restart path. A circuit breaker needs a `wallet`: the losses are
+  measured from it, and it must equal `sizing.wallet` when both are set.
+- **The whole config is frozen.** Every version 8 protocol also freezes `paper_config`: the stake,
+  wallet, `max_open_trades`, exchange and public host `config.json` is rendered from, whichever
+  block the test has. On real freqtrade, editing `fee`, `dry_run_wallet` or `stake_amount` moved
+  masked entries from 1 to 3, 6 and 9 of 29, on a test that froze only protections. `compare`,
+  `guard` (each bar) and a re-prepare compare the whole file with a fresh render and refuse any
+  difference, at any depth. A flag that differs from a frozen value is refused too, whether or not
+  `config.json` still exists, so deleting the file frees nothing. `db_url` is the one key that
+  holds a path: a moved folder is named as moved. A re-prepare renders `plan.json`, the strategy,
+  `config.json` and `meta.json` again and keeps the protocol; on a test with trades, any of those
+  it changed gets a line under its own journal heading, before the verdicts. A
+  halted folder still gets its stop. These checks read the file as it stands, so a bot started on
+  an edited file that was then restored by hand is not caught, and a later change to
+  `render_config` refuses running tests, like the strategy check.
+- **Checks at `prepare`.** Any test with a block: averaging down is refused in what is about to be
+  written and in any strategy already in the folder (`position_adjustment_enable` is refused in
+  every config). With sizing: the plan needs a stop; a `--stake-amount` or `--wallet` that
+  contradicts the block is refused.
+  A full book at the maximum stake must fit in 80% of `max_total_exposure_pct`, so it stays
+  fundable through a 20% loss: freqtrade clips a stake to the available balance, and `compare`
+  would then report the clipped stake as an implementation problem. `min_stake_pct` must give at least 7.5 (Binance's 5 USDT
+  minimum plus freqtrade's stop-loss reserve), and with a volatility target it may not exceed the
+  base stake, or the floor itself would risk more than registered.
+- **Volatility only shrinks a stake.** The scale is `min(1, vol_target / realized_vol)`. PLAN.md
+  Part E2 wrote `vol_target / realized_vol` without the cap; low volatility would then push risk
+  above the registered 0.5-1.5%, so the cap is the owner-visible rule.
+- **Size steps need proof.** A step up names `prior_test`, which must be the very same plan
+  (`plan_hash`, not just `logic_hash`: logic drops parameters, literals, stops and the interval,
+  so EMA 5/60 at a 2.5% stop once borrowed the pass of EMA 8/30 at 10% and staked 4x at "2x"), with
+  a final `pass` in `compare`, a frozen decision horizon of at least 90 days, a mode other than
+  `implementation_only`, a locked-split check that passed (any other state is "NOT a success
+  candidate"), no `halt.lock`, the same volatility target and window, the same protections if it
+  had any, and its circuit breaker with no threshold looser. Each real size may at
+  most double: wallet x risk x multiplier, wallet x maximum stake, wallet x minimum stake. A step
+  must be a step: the smallest or largest stake this plan can really reach has to rise, so a
+  number no stake reaches counts for nothing and the same plan at the same size stays one
+  hypothesis. One proof unlocks one step. A default 28-56 day protocol can never unlock a step:
+  the proof needs a protocol registered with `min_days >= 90` (`--protocol-config`). A chain A -> B
+  -> C of one plan may register, each step on its own 90-day pass; a failed test can never be
+  retried this way, and a re-tuned plan is refused even if it names a `prior_test`.
+- **In the bot.** The strategy gets `custom_stake_amount` (`sized_stake`'s exact source, reading a
+  closed-candle volatility column built from the same candles as the signals), a `protections`
+  property, and `confirm_trade_entry`, which refuses entries while `halt.lock` sits beside the
+  strategy file. The config gets `max_open_trades`, the frozen wallet, `tradable_balance_ratio`
+  (the exposure cap) and `stake_amount: "unlimited"`: freqtrade checks a numeric stake against the
+  balance before `custom_stake_amount` runs and silently drops the entry when the balance is below
+  it (real run: 3 entries instead of 28).
+- **Circuit breaker.** `guard` marks equity at each closed bar (wallet + closed P&L + open
+  position at that bar's close) and finds the first bar at or beyond a frozen threshold: daily
+  loss against the last bar before that UTC day, drawdown against the running peak. On a trip it
+  writes `agents/data/paper/<NAME>/halt.lock`, stops the process, and adds a line under its own
+  journal heading, before the verdicts. Exit 0 clear, 1 halted, 2 refused or cannot check. Candles
+  that stop before the last closed bar exit 2 rather than read as clear, unless the bars present
+  already trip, so the frozen `archive` candle source, which lags, cannot be guarded. An unreadable
+  `halt.lock` is still a lock. A protocol with no circuit breaker is refused and nothing changes.
+- **The breaker acts only while `guard --watch` runs.** `--launch` does not start it; `prepare`
+  prints the command. The watcher retries network failures, rate limits, Binance's 418 and 403, a
+  locked DB and late candles at the next bar, and stops with exit 2 on anything else, and on a 403
+  at 12 checks in a row (`MAX_CONSECUTIVE_403`): that is a refusal, not a blip. A late newest
+  bar gets 3 more tries 20 s apart first, so a slow candle does not cost a whole bar. `compare`
+  applies the same thresholds
+  afterwards whether or not `guard` ran, and reads `halt.lock` too: a trip is a final `fail` with
+  its own reason, never an irregular-timing label, so it can never pass or unlock a step. That
+  catches a test nobody guarded; it does not stop a bot that went on trading until then.
+- **Stopping the bot.** `prepare --launch` writes `bot.pid` for a protocol with a circuit breaker.
+  `guard` sends SIGTERM only when the pid's command line is `freqtrade trade --dry-run` on this
+  folder's config. A bot started by hand has no `bot.pid`, and any pid that cannot be verified is
+  never signalled: `guard` prints the manual step, and the strategy check still blocks entries.
+  It keeps managing open positions until stopped. When `bot.pid`'s process no longer exists,
+  `guard` says that pid is gone and that a bot started by hand would not show there, since a stale
+  `bot.pid` says nothing about one; `ps` itself failing (a sandbox, say) is not read as gone.
+- **`halt.lock`.** `prepare` and `launch` refuse while it exists. Only the owner deletes it,
+  outside Claude Code; no code path removes it. A halted test is not resumed quietly: the bot
+  stops trading while the lab replay continues, so `compare` will show the missing trades.
+- **`compare` with protections.** It runs `freqtrade download-data`, then `freqtrade backtesting
+  --enable-protections --export trades`, then replays the lab again with entry signals off on the
+  bars a recorded lock blocks, so positions and later entries follow the bot's real path. A lock
+  blocks the bars after its start up to its end: freqtrade records it on its exit's bar and runs
+  entries before exits, so a trade stopped out on its own fill bar was not blocked. An entry
+  outside a lock stays and counts as irregular if the bot did not make it. A backtest without the
+  flag is refused. freqtrade missing, a failed run, an unexpected export (locks included), data
+  that stop more than a bar before the end, a first replay entry with no freqtrade entry, or a
+  freqtrade entry on a bar its own locks block is a bridge failure (below); there is no fallback to
+  an unprotected comparison. Limits: the locks are the backtest's, so a skip inside one is not caught for that
+  entry. The frozen entry and exposure bands come from an unprotected design replay, which biases a
+  protected test towards false fails.
+- **`max_blocked_share`.** Required with protections and frozen (the template's 0.333 is an
+  example). The share is the unprotected replay's entries that the masked replay does not make on
+  their bar, a shifted entry included, and every journal line of a protected test carries it as
+  masked/total. Above the cap the best verdict at the decision bar is a final `inconclusive` naming
+  it, never `pass`: the test measured the protections more than the plan. A real fail still fails.
+- **A fail is never demoted, and there is no verdict forever.** Final verdicts stay write-once, a
+  trip outranks everything, and once a trip is known the protected backtest is skipped.
+  - A paper stake that differs stops nothing: Sharpe, entries and exposure are per unit or counted,
+    and the masked replay is still valid. It is named as an implementation problem in the verdict
+    and the journal. A rule that fails is a `fail`; with every other check fine at the decision bar
+    the verdict is a final `inconclusive` naming it, never `pass`.
+  - A bridge failure makes only the replay checks unknown (`irregular_fills`, `shortfall*`,
+    `irregular_fills_cap`). Entries, `entries_cap`, exposure, `exposure_cap` and Sharpe come from
+    the dry-run DB and the candles and are still judged, and any of them failing is a `fail`, before
+    the grace too. With none failing, `compare` exits 2 until the decision bar plus the frozen
+    `data_grace_days`, then records a final `inconclusive` naming the reason. What a bridge failure
+    can still hide: a replay check that would have failed, past the grace, on a test where nothing
+    else fails.
+  - A strategy, `config.json` or `plan.json` that no longer matches the protocol exits 2, saying
+    what differs: restore the file, or let the grace pass. A new candidate name is no way out, the
+    same plan is refused under one. From the decision bar plus the grace, `compare` records a final
+    `inconclusive` naming the void: the paper data cannot be trusted, so this is the one case where
+    judging does not run, and there is no comparison file. A tripped breaker still gives `fail`. A
+    moved folder is not a void: a re-prepare repairs it, and until then it exits 2.
+- **`compare` with sizing.** The replay is sized with the same stake function at each trade's
+  signal bar. `compare` exits 2 when the strategy is not a fresh render of the protocol, byte for
+  byte, or when the config is not the frozen one. A matched paper stake is a problem when it is too
+  far from the expected stake: below it, 1% or one lot (1.5 USDT), whichever is larger, and above it
+  only 1%, because amounts round down (real gaps lay between -0.805 and 0 USDT; BTC lot rounding measured
+  0.40% near 200 USDT and 0.61% near 80). The report and the verdict line gain a sizing
+  line: risk per trade, exposure cap, largest single loss as % of wallet, and that sizing does not
+  change whether the plan has an edge.
+- **`compare --portfolio`.** N_eff on the coins' own daily returns over the same window, which is
+  the figure to quote, then N_eff on the bots' returns, with Pearson correlations over common
+  complete UTC days and the days each pair was in the market together. A bot is flat most days, so
+  its series reads as independent: seven coins at correlation 0.8 give 5.03 at 25% in market
+  against about 1.45 for the coins. By default it reads the largest cohort of tests with one
+  `start` and names the others as excluded, so a late entrant cannot cut the window. Short windows
+  bias N_eff low: even independent series read below their count. With no more common days than
+  coins the matrix's rank cannot support the figure, so the report says "too few days to quote"
+  instead of giving one. It writes nothing and changes no verdict. Confirmations across correlated
+  coins are one piece of evidence, not N.
+- **Checked against real freqtrade.** Version 2026.9 at `~/.venvs/freqtrade`, which the HC bots
+  use (it only needs to be on PATH), ran `download-data` and `backtesting --enable-protections`
+  on 2026-11-04 with sizing and protections: the export shape, the flags, the host override
+  (through a scratch proxy setting in the sandbox) and `custom_stake_amount` in a backtest. A bot
+  identical to its protected backtest then read 0 irregular fills against the masked replay, with
+  the modelled entry slippage at 0, on the `rsi < 42` level plan at cooldowns 1, 3, 6 and 24, on a
+  crossover plan and with `MaxDrawdown` firing. At the frozen 5 bps slippage the lab's stop sits 5
+  bps higher than the backtest's, and on that level plan with a 2% stop one such stop cost 4
+  irregular fills: 4 of 6 allowed at cooldowns 1 and 3, 9 of 6 at 6, 7 of 4 at 24. Not yet seen:
+  protections and `custom_stake_amount` in a live dry-run, another freqtrade version. Run one
+  short test and read the bot log before relying on them.
+
 ## Jev shadow judge (Phase 17)
 
 Tests, forward only, whether Jev can tell good HC paper entries from bad ones. An LLM judge
@@ -365,6 +526,8 @@ uv run python paper_trade.py shadow-report [--asof 2026-12-26T00:00Z] [--write] 
 - `prompts/{scout,designer,critic}.md`: role briefs (system prompts).
 - `research/paper/shadow.py` (+ `shadow_log.py`, `shadow_snapshot.py`, `shadow_report.py`): the
   Jev shadow judge, its decision log, blind snapshot and report.
+- `research/paper/risk.py`, `guard.py`, `protected_backtest.py`, `portfolio.py`: paper risk rules
+  and sizing, the circuit breaker, the protected backtest bridge, and correlation across tests.
 
 Results are historical backtests and are not forward-looking. A candidate becomes "successful"
 only after it passes every success criterion **and** 4–8 weeks of forward paper trading.

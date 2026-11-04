@@ -88,6 +88,55 @@ export function regimeRibbonData(
   return out
 }
 
+/** The ribbon legend's "bars in regime": the current state and how long it has held. */
+export interface RegimeRun {
+  state: RegimeState
+  /** Consecutive labelled bars ending on the newest labelled bar, that bar included. */
+  bars: number
+}
+
+/** `regimeRun` over `points[0..end)`, with no copy of the array. */
+function runEndingBefore(points: readonly RegimePoint[], end: number): RegimeRun | null {
+  let last = end - 1
+  // A trailing unlabelled bar is never counted; the run ends on the newest labelled bar.
+  while (last >= 0 && points[last].state === null) last--
+  if (last < 0) return null
+  const state = points[last].state
+  if (state === null) return null
+  let first = last
+  while (first > 0 && points[first - 1].state === state) first--
+  return { state, bars: last - first + 1 }
+}
+
+/**
+ * The newest labelled bar's state and how many consecutive labelled bars end there with that
+ * state; null when no bar is labelled. A null-state point breaks the run: it is never counted
+ * across and never forward-filled. Filtered like the labels: appending or changing points after
+ * bar t leaves the result for `points.slice(0, t + 1)` unchanged.
+ */
+export function regimeRun(points: readonly RegimePoint[]): RegimeRun | null {
+  return runEndingBefore(points, points.length)
+}
+
+/**
+ * `regimeRun` as of the chart's newest closed bar. `points` may run past it for a moment: after
+ * a replay jumps back, the previous labels stay until the new answer lands, and a legend read
+ * from them would show bars the replay has not reached yet.
+ */
+export function regimeRunThrough(
+  points: readonly RegimePoint[],
+  candles: readonly Candle[],
+  formingLast: boolean,
+): RegimeRun | null {
+  const n = closedCount(candles, formingLast)
+  return n === 0 ? null : runEndingBefore(points, upperBoundByTime(points, candles[n - 1].time))
+}
+
+/** The legend text, e.g. "Bull · 14 bars". */
+export function regimeRunLabel(run: RegimeRun): string {
+  return `${REGIME_LABELS[run.state]} · ${run.bars} ${run.bars === 1 ? 'bar' : 'bars'}`
+}
+
 /**
  * The bars the ribbon asks the lab about: every loaded bar, no-trade bars included, so the
  * trailing window counts the same rows as the lab's `regime_state` feature (which keeps

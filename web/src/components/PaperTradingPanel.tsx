@@ -25,8 +25,13 @@ import {
   type PaperSide,
 } from '../state/paper'
 import { replayTradeBlock } from '../state/paperFeeds'
+import { providerProfile } from '../state/appSettings'
+import { loadSettings } from '../state/settings'
 import type { PaperAccountApi } from '../state/usePaperAccount'
+import { usePaperMonitor } from '../state/usePaperMonitor'
 import { formatPriceByTick } from '../state/chartTools'
+import { createPaperMonitorClient } from '../data/paperMonitor'
+import { PaperMonitor } from './PaperMonitor'
 import { fmtQty, orderFeedback, type Feedback } from './paperFeedback'
 import { formatUtc } from './quote'
 import { useModalKeys } from './useModalKeys'
@@ -63,14 +68,21 @@ export interface PaperTradingPanelProps {
   onSelectSymbol?(symbol: string): void
 }
 
-type Tab = 'positions' | 'orders' | 'history'
-const TABS: readonly Tab[] = ['positions', 'orders', 'history']
+type Tab = 'positions' | 'orders' | 'history' | 'tests'
+const TABS: readonly Tab[] = ['positions', 'orders', 'history', 'tests']
 const TAB_LABELS: Readonly<Record<Tab, string>> = {
   positions: 'Positions',
   orders: 'Orders',
   history: 'History',
+  tests: 'Tests',
 }
 const PERCENTS = [0.25, 0.5, 1] as const
+
+// Module-level so the hook sees a stable client; the provider is fixed for the page's lifetime.
+// Direct providers have no local server, so the monitor makes no request there at all.
+const monitorClient = providerProfile(loadSettings().provider).direct
+  ? null
+  : createPaperMonitorClient()
 
 const MONEY = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
@@ -118,6 +130,7 @@ export function PaperTradingPanel(props: PaperTradingPanelProps) {
 
   const [tab, setTab] = useState<Tab>('positions')
   const [resetting, setResetting] = useState(false)
+  const monitor = usePaperMonitor(monitorClient, tab === 'tests')
   // The ticket's status line lives here so a position's Close can report its fill too. The panel
   // is not remounted on a symbol or account (live/replay) switch, so the line is cleared during
   // render when the ticket's key changes; switching back never brings an old message back.
@@ -146,6 +159,7 @@ export function PaperTradingPanel(props: PaperTradingPanelProps) {
     positions: positions.length,
     orders: orders.length,
     history: fills.length,
+    tests: monitor.data?.tests.length ?? 0,
   }
 
   const onTabKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
@@ -352,6 +366,7 @@ export function PaperTradingPanel(props: PaperTradingPanelProps) {
                 ))}
               </ul>
             ))}
+          {tab === 'tests' && <PaperMonitor state={monitor} />}
         </div>
       </div>
     </section>

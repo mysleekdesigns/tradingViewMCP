@@ -1254,8 +1254,8 @@ items: Claude writes the proposal, the owner applies it. Needs Phase 13 (paper p
 ### Checklist
 
 Part A — Research record
-- [ ] Save the video review as `agents/research/reports/Claude Code regime trading bot video research.md` (sources, what is covered, what is new, what is rejected and why), with the source text in an "untrusted" callout
-- [ ] Confirm the HMM overlay's literature source and published parameters through the `researcher` agent, e.g. Kritzman, Page & Turkington (2012) "Regime Shifts" or Nystrup, Madsen & Lindström (2015/2017) on HMM regime allocation; record the states, inputs and cadence they used; no parameter is picked by looking at our data
+- [x] Save the video review as `agents/research/reports/Claude Code regime trading bot video research.md` (sources, what is covered, what is new, what is rejected and why), with the source text in an "untrusted" callout
+- [x] Confirm the HMM overlay's literature source and published parameters through the `researcher` agent, e.g. Kritzman, Page & Turkington (2012) "Regime Shifts" or Nystrup, Madsen & Lindström (2015/2017) on HMM regime allocation; record the states, inputs and cadence they used; no parameter is picked by looking at our data
 
 Part B — Causal HMM regime features (owner, lab lock)
 - [ ] `[regime.hmm]` in `lab.toml`, fixed before any backtest: number of states (3, from the source), inputs (bar log return and realised volatility over a fixed window), training window in bars, refit cadence (e.g. every 42 bars = weekly on 4h), random seed, restarts; each with a one-line justification
@@ -1276,23 +1276,23 @@ Part D — One pre-registered HMM overlay run (owner criteria unchanged)
 - [ ] Outcome written in the journal whatever it is, with the `honest-backtesting` report; `docs(phase-20)` commit
 
 Part E — Paper-trading risk controls (future paper tests only)
-- [ ] Paper protocol template gains a pre-registered `risk_controls` block fixed before start: Freqtrade protections (`MaxDrawdown`, `StoplossGuard`, `CooldownPeriod`) with their values, plus portfolio circuit-breaker thresholds (daily loss and drawdown from peak); the HC protocols and strategy files are not touched (test: byte-identical before and after)
-- [ ] `compare` runs the backtest side with `--enable-protections` whenever the protocol has them, so paper and backtest trade under the same rules (test: a protocol with protections and a backtest without them is refused)
+- [x] Paper protocol template gains a pre-registered `risk_controls` block fixed before start: Freqtrade protections (`MaxDrawdown`, `StoplossGuard`, `CooldownPeriod`) with their values, plus portfolio circuit-breaker thresholds (daily loss and drawdown from peak); the HC protocols and strategy files are not touched (test: byte-identical before and after)
+- [x] `compare` runs the backtest side with `--enable-protections` whenever the protocol has them, so paper and backtest trade under the same rules (test: a protocol with protections and a backtest without them is refused)
 - [ ] Circuit breaker in `paper_trade.py`: when a threshold trips, stop that dry-run process and write `agents/data/paper/<test>/halt.lock` (reason, threshold, value, time); `prepare`/`start` refuse while the lock exists; only the owner deletes it, outside Claude Code; the halt is logged in the test's journal
-- [ ] Tests on fixture dry-run DBs: each threshold trips at the right bar and not before; the lock blocks restart; dry-run only (no live mode reachable, hooks unchanged)
+- [x] Tests on fixture dry-run DBs: each threshold trips at the right bar and not before; the lock blocks restart; dry-run only (no live mode reachable, hooks unchanged)
 
 Part E2 — Position sizing rules (future paper tests only)
 - [x] Research record: Sosnoff position-sizing video notes saved at `agents/research/research_notes/Position sizing research/video_notes.md` (transcript read in the owner's Chrome, untrusted-source callout, assessment for this project; commit 4daf24a)
-- [ ] Protocol `sizing` block, fixed before start: `risk_per_trade_pct` (one value in 0.5–1.5% of the paper wallet, with a one-line justification), so stake = wallet × risk_per_trade_pct / stop distance, capped at `max_stake_pct` of the wallet; `max_total_exposure_pct` (≤ 100%, no leverage) enforced through `max_open_trades` × stake and `tradable_balance_ratio`; the protocol's sha256 covers the block. Tests: stake arithmetic on known values; a protocol without a stoploss is refused when `risk_per_trade_pct` is set
+- [x] Protocol `sizing` block, fixed before start: `risk_per_trade_pct` (one value in 0.5–1.5% of the paper wallet, with a one-line justification), so stake = wallet × risk_per_trade_pct / stop distance, capped at `max_stake_pct` of the wallet; `max_total_exposure_pct` (≤ 100%, no leverage) enforced through `max_open_trades` × stake and `tradable_balance_ratio`; the protocol's sha256 covers the block. Tests: stake arithmetic on known values; a protocol without a stoploss is refused when `risk_per_trade_pct` is set
 - [ ] Volatility-adjusted stake: stake scales by `vol_target / realized_vol` over a fixed window of closed bars (365-day annualisation), clipped to [`min_stake_pct`, `max_stake_pct`]; window and target fixed in the protocol. Sosnoff's "more total exposure when implied volatility is high" is **not** adopted (it is specific to selling options). Tests: perturbation test (changing prices after bar t leaves the stake at t identical); a vol spike shrinks the next stake; the clip holds at both ends
-- [ ] No averaging down: `prepare` refuses a protocol or strategy with `position_adjustment_enable` that adds to a losing position, or any loss-triggered stake increase (Martingale); the refusal names the rule. Tests: a DCA-on-loss fixture is refused; a plain fixed-stake fixture passes
-- [ ] Conviction cap: `size_multiplier` in the protocol is 1 by default and refused above 2; no LLM (Jev or Claude) may set or change it (Phase 17 rule: judges watch and never steer). Test: a protocol with 3 is refused
-- [ ] Size steps need proof: a protocol may name a `prior_test` at a smaller size; `prepare` refuses a step up unless that test ran at least 90 days and its pre-registered paper criteria passed in `compare`, and refuses more than one step (2×) at a time. Tests: 89 days refused, 90 days with a pass accepted, a failed prior refused
-- [ ] `compare` sizes the backtest side with the same `sizing` block (same stake function in the Freqtrade strategy), so paper and backtest trade the same size (test: a mismatch is refused); the paper monitor (Part H) shows stake, risk per trade and total exposure per test
+- [x] No averaging down: `prepare` refuses a protocol or strategy with `position_adjustment_enable` that adds to a losing position, or any loss-triggered stake increase (Martingale); the refusal names the rule. Tests: a DCA-on-loss fixture is refused; a plain fixed-stake fixture passes
+- [x] Conviction cap: `size_multiplier` in the protocol is 1 by default and refused above 2; no LLM (Jev or Claude) may set or change it (Phase 17 rule: judges watch and never steer). Test: a protocol with 3 is refused
+- [x] Size steps need proof: a protocol may name a `prior_test` at a smaller size; `prepare` refuses a step up unless that test ran at least 90 days and its pre-registered paper criteria passed in `compare`, and refuses more than one step (2×) at a time. Tests: 89 days refused, 90 days with a pass accepted, a failed prior refused
+- [x] `compare` sizes the backtest side with the same `sizing` block (same stake function in the Freqtrade strategy), so paper and backtest trade the same size (test: a mismatch is refused); the paper monitor (Part H) shows stake, risk per trade and total exposure per test
 - [ ] The paper report template and (owner, `.claude/skills/` is protected) the `honest-backtesting` checklist gain a sizing line: risk per trade, exposure cap, the largest single loss as % of wallet, and a statement that sizing does not change whether the plan has an edge
 
 Part F — Correlation-aware paper evaluation
-- [ ] `paper_trade.py compare --portfolio` (information only): pairwise daily-return correlations across concurrent paper tests and the effective number of independent bets, N_eff = (Σλ)² / Σλ² over the correlation matrix's eigenvalues, with the window and method stated
+- [x] `paper_trade.py compare --portfolio` (information only): pairwise daily-return correlations across concurrent paper tests and the effective number of independent bets, N_eff = (Σλ)² / Σλ² over the correlation matrix's eigenvalues, with the window and method stated
 - [ ] Rule added to `.claude/rules/research-agents.md` and the `honest-backtesting` checklist: confirmations across correlated coins are one piece of evidence, not N; the 2026-12-25 HC write-up reports N_eff next to the per-coin verdicts without changing any frozen verdict
 
 Part G — Named crash-episode table (owner, lab lock)
@@ -1303,8 +1303,8 @@ Part G — Named crash-episode table (owner, lab lock)
 Part H — Chart and paper monitor (web/, server/)
 - [ ] Regime ribbon shows how sure the model is: opacity from the filtered probability of the current state, and the legend shows the state and "bars in regime"; closed bars only, never back-dated (perturbation test on the ribbon data); visual only
 - [ ] (after Part B) Ribbon source picker Markov / HMM: `POST /lab/regime` gains `model = "hmm"` using the Part B code and cache; the chart shows a loading state until the slow first fit finishes; no change to how the Markov ribbon is labelled
-- [ ] Paper monitor in `PaperTradingPanel`: per paper test, net P&L, drawdown from peak, protection and circuit-breaker state, `halt.lock` status, and the backtest-expected range from `compare`; read-only server endpoint over the dry-run DBs and protocol files
-- [ ] Code review (`code-reviewer`; `quant-reviewer` for the ribbon data), `npx tsc -b`, `npx vitest run`, `npm run lint` in `web/`; `npx tsc --noEmit`, `npx vitest run` in `server/`; browser checks run by Claude (owner preference) and recorded under `agents/research/research_notes/`
+- [x] Paper monitor in `PaperTradingPanel`: per paper test, net P&L, drawdown from peak, protection and circuit-breaker state, `halt.lock` status, and the backtest-expected range from `compare`; read-only server endpoint over the dry-run DBs and protocol files
+- [x] Code review (`code-reviewer`; `quant-reviewer` for the ribbon data), `npx tsc -b`, `npx vitest run`, `npm run lint` in `web/`; `npx tsc --noEmit`, `npx vitest run` in `server/`; browser checks run by Claude (owner preference) and recorded under `agents/research/research_notes/`
 
 Part I — Review and gate
 - [ ] Quant review of Parts B–G (look-ahead, label switching, cache invalidation, pre-registration, holdout untouched); `uv run pytest -q` and `uv run ruff check .` in `lab/` and `agents/`; then `/run-gate 20`

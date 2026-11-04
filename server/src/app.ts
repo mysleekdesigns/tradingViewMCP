@@ -4,9 +4,11 @@ import websocket from '@fastify/websocket'
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
 import { DEFAULT_ALERT_COOLDOWN_SEC } from './alerts/evaluate.ts'
 import type { AlertNotifier, DesktopNotifyMode } from './alerts/types.ts'
+import { loadPaperDir } from './config.ts'
 import type { Db } from './db/index.ts'
 import alertsRoutes from './routes/alerts.ts'
 import candlesRoutes from './routes/candles.ts'
+import paperMonitorRoutes from './routes/paperMonitor.ts'
 import persistenceRoutes from './routes/persistence.ts'
 import streamRoutes from './routes/stream.ts'
 import symbolsRoutes from './routes/symbols.ts'
@@ -37,6 +39,8 @@ export interface AppDeps {
   desktopNotifyMode?: DesktopNotifyMode
   /** Minimum seconds between two triggers of the same `every` alert. Default 60. */
   alertCooldownSec?: number
+  /** Folder of paper tests read by `/api/paper/monitor`. Default: `PAPER_DIR` from the env. */
+  paperDir?: string
 }
 
 export interface VenueInfo {
@@ -123,6 +127,7 @@ export async function buildApp(
     alertNotifier: deps.alertNotifier ?? {},
     desktopNotifyMode: deps.desktopNotifyMode ?? 'auto',
     alertCooldownSec: deps.alertCooldownSec ?? DEFAULT_ALERT_COOLDOWN_SEC,
+    paperDir: deps.paperDir ?? loadPaperDir(),
     venue: deps.venue ?? { id: DEFAULT_VENUE_ID, name: VENUES[DEFAULT_VENUE_ID].name },
     stats,
     hub,
@@ -196,6 +201,7 @@ export async function buildApp(
   await app.register(streamRoutes, routeOptions)
   await app.register(persistenceRoutes, routeOptions)
   await app.register(alertsRoutes, routeOptions)
+  await app.register(paperMonitorRoutes, routeOptions)
 
   return app
 }
