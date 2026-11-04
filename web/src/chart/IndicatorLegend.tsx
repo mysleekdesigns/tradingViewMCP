@@ -112,7 +112,11 @@ function IndicatorLegendItem({
       {visible && (
         <span className="ind-legend__values">
           {values.map((v) => (
-            <span key={v.key} className="ind-legend__value" style={{ color: v.color }}>
+            <span
+              key={v.key}
+              className={`ind-legend__value${v.chip ? ' ind-legend__value--chip' : ''}`}
+              style={{ color: v.color }}
+            >
               {v.text}
             </span>
           ))}

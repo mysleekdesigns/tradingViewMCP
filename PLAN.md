@@ -1361,13 +1361,13 @@ Definitions (fixed before building):
 
 ### Checklist
 - [x] Research record: video notes at `agents/research/research_notes/3R rule day trading research/video_notes.md` (transcript read in the owner's Chrome, untrusted-source callout) and report at `agents/research/reports/3R rule day trading research.md` (evidence check, fit with this project, what is rejected and why)
-- [ ] ATR indicator: pure compute `web/src/indicators/atr.ts` (Wilder ATR, period input, default 14) as a pane indicator on any interval, via `/add-indicator`; known-value test on a hand-built fixture (first value = SMA of the first N true ranges, Wilder after); no-look-ahead perturbation test; incremental tail recompute matches a full recompute
-- [ ] Daily candle source for intraday charts: closed 1d candles for the chart's symbol, enough for SMA(50) + ATR(14) warm-up, loaded through the existing provider / server cache path; refreshed when a UTC day closes; the forming 1d candle is excluded (test); a symbol switch drops the old symbol's daily data (test)
-- [ ] Pure compute `web/src/indicators/keyLevels.ts`: PDH/PDL step lines (optional PWH/PWL), daily ATR, range used and trend bias from closed 1d candles plus closed intraday bars, in one pass; inputs `atrPeriod`, `smaPeriod`, `showWeekly`
-- [ ] Rendering: PDH/PDL (and PWH/PWL) as step lines or a series primitive under the drawings, labelled at the right edge; range used (%) and trend bias (above/below SMA 50) in the indicator legend; themed for light and dark; per-part toggles in the settings dialog; hidden on 1d and above
-- [ ] Tests: known values on a fixture that crosses a UTC midnight and a week boundary, with each level, ATR, range-used and bias value worked out by hand; a no-look-ahead perturbation test (changing bars after `t` leaves every output at or before `t` unchanged); the forming intraday bar and the forming 1d candle never move a level; a missing day leaves a gap, never a forward-filled level; incremental tail recompute matches a full recompute
-- [ ] Definitions written in `web/README.md` ("visual only, no edge claim"; the video's fade rule is contradicted by the intraday-momentum literature); code review and quant review (look-ahead focus); `npx tsc -b`, `npx vitest run`, `npm run lint`, then `/run-gate 21`
-- [ ] Browser checks run by Claude (headless Chrome harness): on BTCUSDT 1h and 5m, PDH/PDL step at each UTC midnight and match the previous 1d candle's high/low; the legend's range used and bias match a hand calculation from the 1d candles; nothing moves while a candle is forming; the overlay is hidden on 1d
+- [x] ATR indicator: pure compute `web/src/indicators/atr.ts` (Wilder ATR, period input, default 14) as a pane indicator on any interval, via `/add-indicator`; known-value test on a hand-built fixture (first value = SMA of the first N true ranges, Wilder after); no-look-ahead perturbation test; incremental tail recompute matches a full recompute
+- [x] Daily candle source for intraday charts: closed 1d candles for the chart's symbol, enough for SMA(50) + ATR(14) warm-up, loaded through the existing provider / server cache path; refreshed when a UTC day closes; the forming 1d candle is excluded (test); a symbol switch drops the old symbol's daily data (test)
+- [x] Pure compute `web/src/indicators/keyLevels.ts`: PDH/PDL step lines (optional PWH/PWL), daily ATR, range used and trend bias from closed 1d candles plus closed intraday bars, in one pass; inputs `atrPeriod`, `smaPeriod`, `showWeekly`
+- [x] Rendering: PDH/PDL (and PWH/PWL) as step lines or a series primitive under the drawings, labelled at the right edge; range used (%) and trend bias (above/below SMA 50) in the indicator legend; themed for light and dark; per-part toggles in the settings dialog; hidden on 1d and above
+- [x] Tests: known values on a fixture that crosses a UTC midnight and a week boundary, with each level, ATR, range-used and bias value worked out by hand; a no-look-ahead perturbation test (changing bars after `t` leaves every output at or before `t` unchanged); the forming intraday bar and the forming 1d candle never move a level; a missing day leaves a gap, never a forward-filled level; incremental tail recompute matches a full recompute
+- [x] Definitions written in `web/README.md` ("visual only, no edge claim"; the video's fade rule is contradicted by the intraday-momentum literature); code review and quant review (look-ahead focus); `npx tsc -b`, `npx vitest run`, `npm run lint`, then `/run-gate 21`
+- [x] Browser checks run by Claude (headless Chrome harness): on BTCUSDT 1h and 5m, PDH/PDL step at each UTC midnight and match the previous 1d candle's high/low; the legend's range used and bias match a hand calculation from the 1d candles; nothing moves while a candle is forming; the overlay is hidden on 1d
 
 Not in this phase: any lab work. Testing prior-day levels as a strategy needs owner registry
 features under the lab lock (`prev_day_high` / `prev_day_low` as ratios to close, and
@@ -1382,6 +1382,13 @@ scalping are not adopted (report section 4); the sizing lessons are already in P
 1d candles, the legend shows daily-ATR range used and the 50-day SMA bias, nothing moves while an
 intraday bar or the daily candle is forming, the ATR pane indicator works on any interval, and the
 known-value, no-look-ahead, forming-bar, gap and incremental-vs-full tests pass.
+
+Done 2026-11-04. Browser checks: `agents/research/research_notes/2026-11-04-phase21-browser-checks.md`.
+Bundle: the owner accepted about 155.7 KB gzip for the main chunk on 2026-11-04 (151.28 KB before this
+phase, no lazy split; a measured split reached 152.84 KB at best). The review fixes made it 155.79 KB.
+Rules added in review: the oldest loaded day shows no range used unless its first bar opens at 00:00 UTC;
+a 1d row needs a later row in the same answer to count as closed; a label shows only a step covering the
+newest visible bar.
 
 ---
 

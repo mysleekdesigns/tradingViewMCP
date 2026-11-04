@@ -1,6 +1,8 @@
 import { anchoredVwapDef } from './anchoredVwap'
+import { atrDef } from './atr'
 import { bollingerDef } from './bollinger'
 import { emaDef } from './ema'
+import { keyLevelsDef } from './keyLevels'
 import { macdDef } from './macd'
 import { marketStructureDef } from './marketStructure'
 import { rsiDef } from './rsi'
@@ -22,10 +24,12 @@ export const INDICATORS: readonly IndicatorDef[] = [
   volumeProfileDef,
   marketStructureDef,
   sessionRangesDef,
+  keyLevelsDef,
   volumeMaDef,
   rsiDef,
   macdDef,
   stochDef,
+  atrDef,
 ]
 
 export const INDICATOR_BY_ID: ReadonlyMap<IndicatorId, IndicatorDef> = new Map(

@@ -53,9 +53,9 @@ describe('groupIndicators', () => {
     const groups = groupIndicators(INDICATORS)
     expect(groups.map((g) => g.label)).toEqual(['Overlays', 'Volume', 'Oscillators'])
     expect(groups.map((g) => ids(g.items))).toEqual([
-      ['sma', 'ema', 'bb', 'vwap', 'avwap', 'vprofile', 'mstructure', 'sessions'],
+      ['sma', 'ema', 'bb', 'vwap', 'avwap', 'vprofile', 'mstructure', 'sessions', 'keylevels'],
       ['volma'],
-      ['rsi', 'macd', 'stoch'],
+      ['rsi', 'macd', 'stoch', 'atr'],
     ])
     expect(GROUP_LABELS.pane).toBe('Oscillators')
   })

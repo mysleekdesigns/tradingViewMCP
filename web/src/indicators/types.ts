@@ -10,10 +10,12 @@ export type IndicatorId =
   | 'vprofile'
   | 'mstructure'
   | 'sessions'
+  | 'keylevels'
   | 'volma'
   | 'rsi'
   | 'macd'
   | 'stoch'
+  | 'atr'
 
 /**
  * Where an indicator draws:
@@ -125,6 +127,18 @@ export interface IndicatorDef {
    * bars only (never the forming bar), ascending. A box at bar t uses only bars <= t.
    */
   sessions?(closed: readonly Candle[], inputs: IndicatorInputs): SessionRanges
+  /**
+   * Key levels: prior-day and prior-week levels, drawn by a primitive instead of per-bar lines
+   * (`lines` is empty, the stepper returns {}). `daily` holds closed 1d candles, `closed` closed
+   * intraday bars, both ascending; `through` is the open time of the newest plotted bar (it may
+   * be forming; only its UTC day is read), or null. Bars of a day are read only for range used.
+   */
+  keyLevels?(
+    daily: readonly Candle[],
+    closed: readonly Candle[],
+    through: number | null,
+    inputs: IndicatorInputs,
+  ): KeyLevels
 }
 
 /** The UTC sessions of the session-ranges overlay ('opening' = the UTC-day opening range). */
@@ -151,6 +165,42 @@ export interface SessionBox {
 export interface SessionRanges {
   /** Ascending by start; equal starts in the order asia, london, newyork, opening. */
   boxes: SessionBox[]
+}
+
+export type KeyLevelKey = 'pdh' | 'pdl' | 'pwh' | 'pwl'
+
+/** One flat piece of a level's step line. */
+export interface KeyLevelStep {
+  key: KeyLevelKey
+  /** First moment the level applies (UNIX s, 00:00 UTC of a day or a Monday). */
+  start: number
+  /** Exclusive end (start of the next day or week). */
+  end: number
+  price: number
+}
+
+/** What is known of one UTC day at its start, from closed 1d candles only. */
+export interface KeyLevelDay {
+  /** 00:00 UTC of the day (UNIX s). */
+  day: number
+  /** Wilder ATR as of the previous close; null during warm-up or across a gap. */
+  atr: number | null
+  /** SMA of closed daily closes as of the previous close; null during warm-up or a gap. */
+  sma: number | null
+  /** 'above'/'below' = last closed daily close vs `sma`; null when unknown or exactly equal. */
+  bias: 'above' | 'below' | null
+}
+
+export interface KeyLevels {
+  /** Ascending by start; equal starts in the order pdh, pdl, pwh, pwl. */
+  steps: KeyLevelStep[]
+  /** Ascending by day: one per UTC day from the first closed bar's day through `through`'s. */
+  days: KeyLevelDay[]
+  /**
+   * Range used in percent per closed intraday bar, `value` = (day high - day low of the closed
+   * bars of that UTC day so far) / that day's `atr` * 100. No point where `atr` is null.
+   */
+  rangeUsed: IndicatorPoint[]
 }
 
 /** Trend state from closes through confirmed swings; 'none' until the first break. */

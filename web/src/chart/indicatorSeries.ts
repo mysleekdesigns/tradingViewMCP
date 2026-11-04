@@ -27,6 +27,7 @@ import type { Candle } from '../types'
 import { formatPrice, formatVolume, selectLegendIndex } from './legend'
 import { toLineData, toTime } from './points'
 import type { SeriesSyncPlan } from './seriesSync'
+import { KEY_LEVELS_MAX_INTERVAL_SECONDS, type KeyLevelsLegend } from './keyLevelsLayer'
 import { SESSION_MAX_INTERVAL_SECONDS, sessionsHiddenByAlignment } from './sessionRangesLayer'
 import {
   colors,
@@ -263,6 +264,66 @@ export function sessionAlignmentNote(
   return `${list} hidden: hours don't line up with the bar length`
 }
 
+/**
+ * Legend tooltip for key levels: a drawing aid, not a signal. Levels come from closed daily candles
+ * only, and range used moves during the day by design.
+ */
+export const KEY_LEVELS_HINT =
+  'Visual only, no edge claim. Prior UTC day and week levels from closed 1D candles; shown below ' +
+  '1D. Range used is live and grows during the day. Bias is a label, not a signal'
+
+/** Legend note when the closed daily candles failed, or stop short of the day the chart needs. */
+export const KEY_LEVELS_FAILED_NOTE = 'Daily candles unavailable'
+
+/** Neutral: the bias chip and range used are context, never green or red advice. */
+const KEY_LEVELS_TEXT_COLOR = 'var(--text-muted)'
+
+/** The legend's reads of the key-levels layer (`KeyLevelsLayer` provides them). */
+export interface KeyLevelsLegendSource {
+  legendAt(uid: string, time: number | undefined): KeyLevelsLegend | null
+  dailyFailed(): boolean
+}
+
+/** "Range used 62% · live" and "Above SMA 50", with a dash for what is not known. */
+export function keyLevelsLegendValues(legend: KeyLevelsLegend | null): IndicatorLegendValue[] {
+  if (legend === null) return []
+  const { rangeUsed, bias, smaPeriod, show } = legend
+  const out: IndicatorLegendValue[] = []
+  if (show.range) {
+    const pct = rangeUsed === null ? '—' : `${Math.round(rangeUsed)}%`
+    out.push({
+      key: 'rangeUsed',
+      label: 'Range used',
+      text: `Range used ${pct} · live`,
+      color: KEY_LEVELS_TEXT_COLOR,
+    })
+  }
+  if (show.bias) {
+    const side = bias === null ? '—' : bias === 'above' ? 'Above' : 'Below'
+    out.push({
+      key: 'bias',
+      label: 'Trend bias',
+      text: bias === null ? `SMA ${smaPeriod} ${side}` : `${side} SMA ${smaPeriod}`,
+      color: KEY_LEVELS_TEXT_COLOR,
+      chip: true,
+    })
+  }
+  return out
+}
+
+/** Why key levels draw nothing, or undefined. */
+export function keyLevelsNote(
+  def: IndicatorDef,
+  intervalSeconds: number | undefined,
+  source: KeyLevelsLegendSource | null,
+): string | undefined {
+  if (def.keyLevels === undefined) return undefined
+  if (intervalSeconds !== undefined && intervalSeconds >= KEY_LEVELS_MAX_INTERVAL_SECONDS) {
+    return SESSION_DAILY_NOTE
+  }
+  return source?.dailyFailed() ? KEY_LEVELS_FAILED_NOTE : undefined
+}
+
 export const ANCHOR_NOT_SET_NOTE = 'Set the anchor in Settings'
 export const ANCHOR_NOT_LOADED_NOTE =
   'Anchor is before the loaded history. Scroll left to load older bars, if the market has them.'
@@ -331,6 +392,8 @@ export interface IndicatorLegendValue {
   label: string
   text: string
   color: string
+  /** Drawn as a small neutral chip (the key-levels bias badge). */
+  chip?: boolean
 }
 
 export interface IndicatorLegendRow {
@@ -364,6 +427,8 @@ export function buildLegendRow(
   prevValues: IndicatorValues = {},
   firstTime?: number,
   intervalSeconds?: number,
+  keyLevels: KeyLevelsLegendSource | null = null,
+  time?: number,
 ): IndicatorLegendRow {
   const row: IndicatorLegendRow = {
     uid: config.uid,
@@ -385,12 +450,18 @@ export function buildLegendRow(
       }
     }),
   }
+  if (def.keyLevels !== undefined && keyLevels !== null) {
+    row.values = keyLevelsLegendValues(keyLevels.legendAt(config.uid, time))
+  }
   const note =
-    anchorNote(def, config, firstTime) ?? sessionAlignmentNote(def, config, intervalSeconds)
+    anchorNote(def, config, firstTime) ??
+    sessionAlignmentNote(def, config, intervalSeconds) ??
+    keyLevelsNote(def, intervalSeconds, keyLevels)
   if (note !== undefined) row.note = note
   if (def.profile !== undefined) row.hint = VOLUME_PROFILE_HINDSIGHT
   else if (def.structure !== undefined) row.hint = MARKET_STRUCTURE_HINT
   else if (def.sessions !== undefined) row.hint = SESSION_RANGES_HINT
+  else if (def.keyLevels !== undefined) row.hint = KEY_LEVELS_HINT
   return row
 }
 
@@ -496,6 +567,8 @@ export class IndicatorSeriesManager {
   private palette: IndicatorPalette = colors
   /** Indicator under the mouse (LWC hit testing): its lines draw one pixel wider. */
   private highlighted: string | null = null
+  /** Range used and bias for the legend (the chart's key-levels layer), once it is set. */
+  private keyLevels: KeyLevelsLegendSource | null = null
   private legendMemo: {
     snapshot: IndicatorSnapshot
     candles: readonly Candle[] | null
@@ -530,6 +603,16 @@ export class IndicatorSeriesManager {
     this.configs = []
     this.candles = null
     this.emit(true)
+  }
+
+  /** Where the legend reads range used and bias from. Kept across attach and detach. */
+  setKeyLevelsSource(source: KeyLevelsLegendSource | null): void {
+    this.keyLevels = source
+  }
+
+  /** The key-levels layer has new legend values: rebuild the rows (never on a forming tick). */
+  keyLevelsChanged(): void {
+    this.emitValues()
   }
 
   /** Bring the series in line with `configs`. `candles` = the candles the chart currently shows. */
@@ -771,6 +854,8 @@ export class IndicatorSeriesManager {
           prev,
           candles[0]?.time,
           intervalSeconds,
+          this.keyLevels,
+          time,
         ),
       )
     }

@@ -12,10 +12,12 @@ const IDS = [
   'vprofile',
   'mstructure',
   'sessions',
+  'keylevels',
   'volma',
   'rsi',
   'macd',
   'stoch',
+  'atr',
 ] as const
 
 function candles(n: number): Candle[] {
@@ -55,10 +57,12 @@ describe('indicator registry', () => {
       vprofile: 'overlay',
       mstructure: 'overlay',
       sessions: 'overlay',
+      keylevels: 'overlay',
       volma: 'volume',
       rsi: 'pane',
       macd: 'pane',
       stoch: 'pane',
+      atr: 'pane',
     })
   })
 
@@ -88,8 +92,11 @@ describe('indicator registry', () => {
 
   it('range and event indicators have no lines; every other indicator has at least one', () => {
     for (const def of INDICATORS) {
-      if (def.profile || def.structure || def.sessions) expect(def.lines).toEqual([])
-      else expect(def.lines.length).toBeGreaterThan(0)
+      if (def.profile || def.structure || def.sessions || def.keyLevels) {
+        expect(def.lines).toEqual([])
+      } else {
+        expect(def.lines.length).toBeGreaterThan(0)
+      }
     }
   })
 

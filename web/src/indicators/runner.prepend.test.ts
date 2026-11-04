@@ -43,6 +43,7 @@ const SPLICES: ReadonlySet<IndicatorId> = new Set([
   'vprofile',
   'mstructure',
   'sessions',
+  'keylevels',
 ])
 
 /** Inputs per case: the defaults plus long or unusual windows. */

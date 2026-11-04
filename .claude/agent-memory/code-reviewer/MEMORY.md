@@ -14,3 +14,4 @@
 - [Phase 19 wave 3](project_web_phase19_wave3.md) — shared live cache, splice merges, point sync, in-place type switch, server live bar/ETag confirmed; open: cross-panel paging, immutable vs venue
 - [Phase 19 wave 4](project_web_phase19_wave4.md) — lazy panels, boundaries, preload gate, ?retry=n chunk retry confirmed; open: unstyled after CSS fail, stale-404 retry
 - [Phase 20 paper monitor](project_web_phase20_monitor.md) — monitor round-2 fixes, lock rule, agents writer contract confirmed; minor open; sandbox test recipes
+- [Phase 21 key levels](project_web_phase21_key_levels.md) — layer/useDailyCandles lifecycle confirmed; open: partial-day range used, refresh from answer time, silent missing day

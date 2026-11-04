@@ -127,6 +127,15 @@
   pointer-events: auto;
 }
 
+/* A context badge (key-levels bias): neutral on purpose, it is not a signal. */
+.ind-legend__value--chip {
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 16px;
+}
+
 /*
  * Why an anchored indicator draws nothing (anchor not set / older than the loaded history).
  * Small muted text on the row's own line: the row does not wrap, and a long note is truncated

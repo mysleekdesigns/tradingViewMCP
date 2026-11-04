@@ -6,3 +6,4 @@
 - [Paper protocol review 2026-10-28](paper-protocol-review-2026-10-28.md) — P13 r5: match/family/ledger/WARM_FROM fixed; open W: bot has no START gate (pre-start signal fills at start)
 - [Overlay review 2026-10-29](overlay-review-2026-10-29.md) — P15 r1-r3: all r2 items closed r3; residual edge-sweep-of-rewrite port; near-BH alike artefact = Note
 - [Phase 20 risk review](../../../agents/.claude/agent-memory/quant-reviewer/phase20-risk-review.md) — r4 2026-11-04: verdict ordering closed; open W meta.json db_path; lives in agents/ memory
+- [Key levels review 2026-11-04](key-levels-review-2026-11-04.md) — P21 engine causal; open W: sparse weekday cuts, time-only closed daily test, stale edge label

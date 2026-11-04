@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, type ReactNode } from 'react'
 import type { BacktestChartData, FocusPlan } from '../chart/backtestOverlay'
 import { Chart, type ChartApi } from '../chart/Chart'
 import { CHART_MAX_BARS } from '../chart/conflation'
+import { keyLevelsDailyEnabled } from '../chart/keyLevelsLayer'
 import { regimeRunLabel, regimeRunThrough, regimeSourceBars } from '../chart/regimeRibbon'
 import { structureClosedThrough } from '../chart/structureBars'
 import type { CrosshairSync } from '../chart/crosshairSync'
@@ -24,6 +25,7 @@ import type { PanelState } from '../state/layout'
 import { atHistoryLimit } from '../state/liveCandles'
 import type { PanelMarket } from '../state/liveStore'
 import { REGIME_THRESHOLD, REGIME_WINDOW_BARS, regimeParamsLabel } from '../state/regimePref'
+import { useDailyCandles } from '../state/useDailyCandles'
 import { useLiveCandles, type UseLiveCandles } from '../state/useLiveCandles'
 import { regimeSupported, useRegime, type RegimeOverlay } from '../state/useRegime'
 import {
@@ -283,6 +285,14 @@ export const ChartPanel = memo(function ChartPanel({
     formingLast: regimeSource.formingLast,
   })
 
+  // Closed 1d candles for the key-levels overlay: only with a visible instance below 1d and a known
+  // venue. A failed load shows a legend note and never affects the chart.
+  const daily = useDailyCandles(
+    provider,
+    symbol,
+    keyLevelsDailyEnabled(indicators, timeframeSeconds(interval), venuePending),
+  )
+
   const cellClass = `chart-cell${multi ? ' chart-cell--multi' : ''}${
     multi && active ? ' chart-cell--active' : ''
   }${replaySession ? ' chart-cell--replay' : ''}`
@@ -344,6 +354,8 @@ export const ChartPanel = memo(function ChartPanel({
             onTimeClick={timeClick}
             replayActive={replaying}
             closedThrough={closedThrough}
+            dailyCandles={daily.candles}
+            dailyError={daily.error}
           />
         )}
         {load.kind === 'ready' && plotted.length === 0 && (

@@ -97,6 +97,7 @@ import { resolveHover } from './hover'
 import { VolumeProfileLayer, volumeProfileColorsFor } from './volumeProfileLayer'
 import { MarketStructureLayer, marketStructureColorsFor } from './marketStructureLayer'
 import { SessionRangesLayer, sessionRangesColorsFor } from './sessionRangesLayer'
+import { KeyLevelsLayer, keyLevelsColorsFor } from './keyLevelsLayer'
 import { SeriesMarkersMux } from './seriesMarkers'
 import {
   attachChartAccessibility,
@@ -322,6 +323,13 @@ interface ChartProps {
    * remove anything. Default null: no bar is known final, so no structure and no sessions.
    */
   closedThrough?: number | null
+  /**
+   * Closed 1d candles of this symbol for the key-levels overlay (null: none known yet). Keep the
+   * reference between refreshes: a new array recomputes the levels.
+   */
+  dailyCandles?: readonly Candle[] | null
+  /** Why the daily candles failed; the legend notes it unless they still cover the newest bar. */
+  dailyError?: string | null
 }
 
 const NO_INDICATORS: readonly IndicatorConfig[] = []
@@ -392,6 +400,8 @@ export function Chart({
   replayActive = false,
   derivatives = null,
   closedThrough = null,
+  dailyCandles = null,
+  dailyError = null,
 }: ChartProps) {
   // Callers may pass a fresh object per render; only the fields matter.
   const { theme, upColor, downColor, timezone } = appearance
@@ -492,6 +502,8 @@ export function Chart({
   const [sessionLayer] = useState(
     () => new SessionRangesLayer(sessionRangesColorsFor(palette), lineage),
   )
+  /** Previous-day and previous-week levels from closed 1d candles, on the main series. */
+  const [keyLevelsLayer] = useState(() => new KeyLevelsLayer(keyLevelsColorsFor(palette), lineage))
   const backtestVersion = useSyncExternalStore(
     backtestOverlay.subscribe,
     backtestOverlay.getSnapshot,
@@ -712,6 +724,7 @@ export function Chart({
     markersMux.attach(series)
     backtestOverlay.attachSeries(series)
     sessionLayer.attach(series)
+    keyLevelsLayer.attach(series)
     profileLayer.attach(series)
     structureLayer.attach(series)
     return () => {
@@ -725,6 +738,7 @@ export function Chart({
       markersMux.detach(alive)
       markersMux.clear('backtest')
       sessionLayer.detach(alive)
+      keyLevelsLayer.detach(alive)
       profileLayer.detach(alive)
       structureLayer.detach(alive)
       if (alive) series.detachPrimitive(primitive)
@@ -743,6 +757,7 @@ export function Chart({
     markersMux,
     backtestOverlay,
     sessionLayer,
+    keyLevelsLayer,
     profileLayer,
     structureLayer,
   ])
@@ -919,6 +934,32 @@ export function Chart({
     sessionLayer.sync(indicators, appliedRef.current, closedThrough, timeframeSeconds(interval))
   }, [indicators, candles, closedThrough, interval, sessionLayer])
 
+  // Key levels: the same closed, plotted bars, plus closed 1d candles. A forming-bar tick pushes
+  // nothing and moves nothing, so the legend is told only when a closed bar or the daily candles
+  // changed what it shows. Nothing is drawn on 1d and above.
+  useEffect(() => {
+    indicatorManager.setKeyLevelsSource(keyLevelsLayer)
+    const before = keyLevelsLayer.legendVersion()
+    keyLevelsLayer.sync(
+      indicators,
+      appliedRef.current,
+      closedThrough,
+      timeframeSeconds(interval),
+      dailyCandles,
+      dailyError,
+    )
+    if (keyLevelsLayer.legendVersion() !== before) indicatorManager.keyLevelsChanged()
+  }, [
+    indicators,
+    candles,
+    closedThrough,
+    interval,
+    dailyCandles,
+    dailyError,
+    keyLevelsLayer,
+    indicatorManager,
+  ])
+
   // Theme / candle colours / time zone. Everything is recoloured in place (applyOptions; one
   // volume setData, only when the up/down volume colours change), so the chart, its series,
   // drawings, indicators and the view all survive.
@@ -951,6 +992,7 @@ export function Chart({
     profileLayer.setColors(volumeProfileColorsFor(palette))
     structureLayer.setColors(marketStructureColorsFor(palette))
     sessionLayer.setColors(sessionRangesColorsFor(palette))
+    keyLevelsLayer.setColors(keyLevelsColorsFor(palette))
   }, [
     palette,
     theme,
@@ -962,6 +1004,7 @@ export function Chart({
     profileLayer,
     structureLayer,
     sessionLayer,
+    keyLevelsLayer,
   ])
 
   // Latest header values for screenshots, read when the user exports (not per render).

@@ -394,3 +394,93 @@ the previous one; a revised bar starts the computation over. 100k bars compute i
 
 Not in this phase: a lab opening-range breakout hypothesis (it needs owner registry features
 under the lab lock, and its prior is weak).
+
+## Key levels overlay and ATR (Phase 21)
+
+**Visual only, no edge claim.** The Key Levels overlay (`KL` in the legend) draws the previous UTC
+day's high and low, optionally the previous week's, and shows how much of the daily ATR the day
+has used and which side of the 50-day SMA the last daily close sits on. It exists so the owner can
+look at whether prior-day levels tend to hold or break on BTC and ETH before any lab budget is
+spent. The idea comes from The Rumers' "3R Rule" video, which shows no record or backtest. Its rule
+of fading a move that has used 1–2× ATR into a prior-day level is contradicted by the
+intraday-momentum literature (Gao, Han, Li & Zhou 2018 on SPY; Shen et al. 2022 on Bitcoin):
+intraday moves tend to continue. Nothing here is a backtest or a signal, and the bias badge is
+deliberately neutral. The compute lives in `src/indicators/keyLevels.ts` (`computeKeyLevels`, and
+`KeyLevelsEngine` for one closed bar at a time), the drawing in `src/chart/keyLevelsLayer.ts`, and
+the daily candles in `src/state/useDailyCandles.ts`.
+
+Add it from the indicator menu (Indicators → Key Levels). Its settings dialog has the ATR and SMA
+lengths and the toggles.
+
+**Shown only on intervals below 1d** (on 1d and above nothing is drawn, no daily candles are
+loaded, and the legend row says "Not shown on 1D and above").
+
+### Inputs and defaults
+
+| Input                                   | Default | Range  | Meaning                                     |
+| --------------------------------------- | ------- | ------ | ------------------------------------------- |
+| ATR length (`atrPeriod`)                | 14      | 1–500  | Wilder ATR length over closed daily candles |
+| SMA length (`smaPeriod`)                | 50      | 1–500  | SMA length over closed daily closes         |
+| Previous day high / low (`showDaily`)   | on      | on/off | PDH / PDL lines; display only               |
+| Previous week high / low (`showWeekly`) | off     | on/off | PWH / PWL lines, dashed                     |
+| Range used (`showRange`)                | on      | on/off | legend text; display only                   |
+| Trend bias (`showBias`)                 | on      | on/off | legend badge; display only                  |
+
+### Definitions
+
+All times are UTC, and these were fixed in `PLAN.md` before building.
+
+- **Day** = UTC calendar day, matching Binance 1d klines. **Week** = Monday 00:00 UTC to Sunday.
+- **Daily inputs come from closed 1d candles only.** They are fetched through the provider (so in
+  server mode from the server's cache), not aggregated from the loaded bars, because 5m history
+  may not cover 50 days. The current UTC day's 1d candle is still forming and never feeds a level,
+  the ATR or the SMA. A row counts as closed 10 seconds after its day ends, once the same answer
+  holds a later row, and the candles refresh then. A late day is retried quickly, then every 30
+  minutes, and shows as a gap, never as an older level. A failed request, or a day still late after
+  the quick retries, adds a note to the legend.
+- **PDH / PDL** = high / low of the last closed 1d candle, as a step line: every bar of UTC day D
+  shows day D−1's levels, from D's first plotted bar to its last.
+- **PWH / PWL** = highest high / lowest low of the previous Monday-to-Sunday week. A week with any
+  missing day has no step.
+- **Daily ATR** = Wilder ATR(14) over closed 1d candles; the first value is the SMA of the first N
+  true ranges.
+- **Range used** = (the current UTC day's high − low, from closed intraday bars of that day) ÷ the
+  daily ATR as of the previous close, as a percentage. It resets at each UTC midnight and grows
+  during the day by design, which is why the legend labels it "live". A day with no closed bar yet,
+  or no ATR, shows a dash, never yesterday's value. So does a day whose start is not loaded: 500 1m
+  bars cover about 8 hours, so after that a 1m chart shows a dash for today until older bars are
+  scrolled in, rather than a number that understates the day.
+- **Trend bias** = the last closed daily close above or below the SMA(50) of closed daily closes.
+  Exactly equal, or still warming up, shows a dash. It is a label, not a direction signal.
+
+### Rules
+
+- **No forward fill.** A missing daily candle leaves that day without a level, ATR or SMA, and both
+  warm-ups restart after it. A day with no plotted bar draws nothing. Nothing bridges either gap.
+- **Closed bars only.** The layer pushes plotted (real, never Heikin-Ashi) bars at or before
+  `closedThrough`, one per new closed bar. A tick on the forming bar pushes nothing and moves
+  nothing. The levels are recomputed only when the daily array, the ATR length, the SMA length or
+  the weekly toggle changes, when a pushed bar is no longer the same object, or when `closedThrough`
+  moves back. The other toggles only change what is drawn.
+- **Replay.** The newest plotted bar sets the last day built, so in bar replay no day past the
+  cursor exists, and lines stop at the cursor bar. Daily candles after the cursor stay loaded but
+  are never read: day D reads only the candle that opened at D − 1 day and earlier ones.
+- **Drawing.** Lines sit under the candles and the drawings; the right-edge labels ("PDH 81,196.01",
+  in the chart's price format with thousands separators) sit over the candles and under the
+  drawings, for the latest visible step of each key, and move apart when two levels are close. A
+  label's height can push it off its line for that reason. Levels never stretch the price scale.
+- **A failed daily load** shows "Daily candles unavailable" in the legend and never affects the
+  chart. Good candles beside a failed refresh keep drawing. Nothing is shown while loading.
+
+Not in this phase: testing prior-day levels as a strategy. That needs owner registry features under
+the lab lock and one pre-registered run (see `PLAN.md` Phase 21).
+
+### ATR pane indicator
+
+`ATR` is a pane indicator on any interval (`src/indicators/atr.ts`, input Length, default 14). It
+is Wilder's average true range of the chart's own bars, in price units: true range =
+max(high − low, |high − previous close|, |low − previous close|), and high − low on the first bar.
+The first value is the SMA of the first N true ranges, then
+`ATR = (previous ATR × (N − 1) + TR) / N`. It is separate from the overlay's daily ATR, which reads
+closed 1d candles whatever the chart's interval. Like every indicator it recomputes the forming bar
+on each tick, and bars after `t` never change a value at or before `t`.
