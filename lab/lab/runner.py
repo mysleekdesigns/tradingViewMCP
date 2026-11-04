@@ -24,6 +24,13 @@ tuned out-of-sample result), trades, equity curves, warnings, and a disclaimer.
   :func:`check_gate_base` refuses a plan whose derivatives-free entry clauses alone are true on
   ``>= [derivatives] gate_base_max_true_frac`` of those bars. Plans without derivatives
   features are unaffected.
+* HMM plans (``hmm_state`` / ``hmm_bear_prob``, PLAN.md Phase 20 Part B), edge or overlay, are
+  SCORED from the first bar with a finite HMM output (:func:`lab.data.hmm_columns.hmm_scored_start`
+  reads it from the column, so one start per symbol and interval). The plan, every benchmark and
+  null, the ungated baseline and the base trial start there, so a flat warm-up head never enters
+  a Sharpe, a drawdown, or the family and PBO return correlations. An edge plan with an HMM
+  ``and`` gate is treated like a derivatives gate: :func:`check_gate_base` and
+  ``benchmarks.ungated`` run on it.
 * Signals are computed on the history through the window end (earlier bars = warm-up), then
   candles and signals are sliced to the window and the engine runs on the slice. The same
   history is the engine's ``cost_history`` so vol-scaled slippage is warmed up as well.
@@ -37,8 +44,8 @@ Ledger policy (every backtest is recorded; the ledger is append-only):
 * each adversarial variant (delays, sign flip, cost stress) -> ``"adversarial"``;
 * each benchmark / null (buy-and-hold, vol-target, random-entry, permutation null) -> ONE
   summary row per report with source ``"benchmark"``.
-* derivatives plans also get ``benchmarks.ungated`` (:func:`ungated_plan`: the same plan
-  without its derivatives entry clauses, same costs and scored window, plus the gate's binding
+* gated plans also get ``benchmarks.ungated`` (:func:`ungated_plan`: the same plan without its
+  derivatives or HMM entry clauses, same costs and scored window, plus the gate's binding
   share): informational only and NOT recorded in the ledger (not a trial, not a candidate).
 * every engine row stores ``costs_json`` (the cost model it ran with; cost-stress variants
   store the scaled model).
@@ -59,6 +66,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import logging
 import math
 import time
 from collections.abc import Callable, Mapping
@@ -81,6 +89,14 @@ from lab.data.derivatives_columns import (
     max_derivatives_period,
     plan_derivative_columns,
     require_plan_inputs,
+)
+from lab.data.hmm_columns import (
+    HMM_UNAVAILABLE_ATTR,
+    attach_hmm_columns,
+    hmm_scored_start,
+    plan_hmm_features,
+    require_frozen_hmm,
+    require_hmm_columns,
 )
 from lab.data.store import load_candles
 from lab.engine import run_signals, run_weights
@@ -108,6 +124,7 @@ from lab.plan import (
     tunable_params,
     with_params,
 )
+from lab.plan.schema import HMM_FEATURE_NAMES
 from lab.plan.validator import PlanValidationError, gate_base_expressions
 from lab.registry import REGISTRY
 from lab.registry.derivatives import DERIVATIVES_FEATURES
@@ -187,6 +204,11 @@ DEFAULT_SEED = 7  # explicit seed for bootstrap / random-entry / permutation dra
 
 DISCLAIMER_HEAD = "Historical simulation on Binance spot data; not forward-looking."
 
+_log = logging.getLogger(__name__)
+
+# Filters that may only gate an entry: the plan's clauses without them are its price signal.
+GATE_FEATURES: frozenset[str] = DERIVATIVES_FEATURES | frozenset(HMM_FEATURE_NAMES)
+
 
 # ``DataUnavailableError`` (no candles in the design window, or derivatives inputs a plan needs
 # are missing; ``str()`` names the CLI) lives in ``lab.data.derivatives_columns`` and is
@@ -224,10 +246,19 @@ def default_loader(cfg: LabConfig) -> CandleLoader:
 
     Archive rows stamped at or after ``end`` are dropped (``stamped_before=end``), so a
     design-window load (``end = holdout_start``) uses no derivatives row stamped in the holdout,
-    even one visible exactly at the last design bar's close."""
+    even one visible exactly at the last design bar's close.
+
+    When ``cfg.hmm`` lists (``symbol``, ``interval``), the ``hmm_series_*`` columns are attached
+    too, computed on exactly the frame this load returned, so a design load never sees a holdout
+    close. ``lab.data.hmm_columns`` caches them by content. A fit that fails logs a warning and
+    leaves the columns out, with the reason in ``attrs[HMM_UNAVAILABLE_ATTR]``: HMM plans are
+    refused quoting it (:func:`lab.data.hmm_columns.require_hmm_columns`), and every other plan
+    on the series, holdout checks included, is unaffected."""
     cache: dict[tuple[str, str, pd.Timestamp, str], DerivativeColumns] = {}
     data_dir = Path(cfg.derivatives_dir)
     stale = cfg.derivatives.stale_after_intervals
+    hmm = cfg.hmm
+    hmm_dir = Path(cfg.hmm_cache_dir)
 
     def load(symbol: str, interval: str, end: pd.Timestamp) -> pd.DataFrame:
         folder = Path(cfg.parquet_dir) / symbol / interval
@@ -253,15 +284,23 @@ def default_loader(cfg: LabConfig) -> CandleLoader:
             )
             if key is not None:
                 cache[key] = cols
-        return attach_columns(candles, cols)
+        out = attach_columns(candles, cols)
+        if hmm is not None and symbol in hmm.symbols and interval in hmm.intervals:
+            try:
+                out = attach_hmm_columns(out, hmm, interval=interval, cache_dir=hmm_dir)
+            except (RuntimeError, ValueError) as exc:
+                reason = f"the fit failed: {type(exc).__name__}: {exc}"
+                _log.warning("no HMM columns for %s %s: %s", symbol, interval, reason)
+                out.attrs[HMM_UNAVAILABLE_ATTR] = reason
+        return out
 
     return load
 
 
 class GateBaseRefusedError(PlanValidationError):
-    """A gated plan whose derivatives-free ``long_entry`` clauses are true on at least
+    """A gated plan whose gate-free ``long_entry`` clauses are true on at least
     ``[derivatives] gate_base_max_true_frac`` of the scored design bars: the price clause does
-    not select, so the derivatives filter would be the de-facto signal. Raised before any
+    not select, so the derivatives or HMM filter would be the de-facto signal. Raised before any
     ledger row; a :class:`PlanValidationError` (path ``long_entry``), so the MCP server and the
     API report it as a plan error the agent must fix, never as an error trial."""
 
@@ -274,7 +313,7 @@ class _Prepared:
     history: pd.DataFrame  # design view: every bar < holdout_start (and < window end)
     window: Window  # the SCORED window (a derivatives plan's effective start, see below)
     candles: pd.DataFrame  # history sliced to the window
-    scoring: dict[str, Any] | None = None  # derivatives plans: scoring_json(...)
+    scoring: dict[str, Any] | None = None  # gated plans: scoring_json(...)
 
 
 def _design_window(history: pd.DataFrame, cfg: LabConfig, interval: str) -> Window | None:
@@ -383,13 +422,27 @@ def derivatives_scored_start(
     return pd.Timestamp(idx[hits[0]])
 
 
+def _gate_kind(plan: Plan) -> str:
+    """What gates ``plan``, in words: ``derivatives``, ``HMM`` or ``derivatives or HMM``."""
+    used = {ref.feature for ref in plan.features}
+    kinds = [
+        word
+        for word, names in (
+            ("derivatives", DERIVATIVES_FEATURES),
+            ("HMM", frozenset(HMM_FEATURE_NAMES)),
+        )
+        if used & names
+    ]
+    return " or ".join(kinds) or "derivatives"
+
+
 def gate_base_share(plan: Plan, history: pd.DataFrame, window: Window) -> dict[str, Any] | None:
     """``{"price_clause", "price_clause_true_share", "bars"}``: the share of the bars of
-    ``window`` (where it is defined) on which the conjunction of ``long_entry``'s
-    derivatives-FREE top-level ``and`` clauses (:func:`lab.plan.validator.gate_base_expressions`)
-    is true, evaluated on ``history``; None for plans without derivatives gates, or whose price
+    ``window`` (where it is defined) on which the conjunction of ``long_entry``'s gate-FREE
+    top-level ``and`` clauses (:func:`lab.plan.validator.gate_base_expressions`) is true,
+    evaluated on ``history``; None for plans without derivatives or HMM gates, or whose price
     clause is never defined in the window, and for risk overlays (no gate: ``flat_when`` may use
-    derivatives features freely). Features only, no backtest."""
+    those features freely). Features only, no backtest."""
     if plan.kind == "overlay":
         return None
     exprs = gate_base_expressions(plan)
@@ -416,13 +469,13 @@ def check_gate_base(
 ) -> dict[str, Any] | None:
     """Refuse a gated plan whose price clause does not select (PLAN.md Phase 12).
 
-    Evaluates the conjunction of ``long_entry``'s derivatives-FREE top-level ``and`` clauses
+    Evaluates the conjunction of ``long_entry``'s gate-FREE top-level ``and`` clauses
     (:func:`lab.plan.validator.gate_base_expressions`) on ``history`` and, over the bars of
     ``window`` where it is defined, raises :class:`GateBaseRefusedError` when it is true on at
     least ``cfg.derivatives.gate_base_max_true_frac`` of them (``close > 0``, ``rsi < 101``,
     ``volume >= 0``: always true, so the gate alone would select). Returns ``{"price_clause",
-    "price_clause_true_share", "bars"}``, or None for plans without derivatives gates (or whose
-    price clause is never defined in the window); a no-op (None) for risk overlays."""
+    "price_clause_true_share", "bars"}``, or None for plans without derivatives or HMM gates (or
+    whose price clause is never defined in the window); a no-op (None) for risk overlays."""
     if plan.kind == "overlay":
         return None
     info = gate_base_share(plan, history, window)
@@ -431,17 +484,18 @@ def check_gate_base(
     share, bars = info["price_clause_true_share"], info["bars"]
     limit = cfg.derivatives.gate_base_max_true_frac
     if share >= limit:
-        gates = sorted(r.alias for r in plan.features if r.feature in DERIVATIVES_FEATURES)
+        gates = sorted(r.alias for r in plan.features if r.feature in GATE_FEATURES)
+        kind = _gate_kind(plan)
         raise GateBaseRefusedError(
             [
                 PlanError(
                     "long_entry",
                     f"the price clause `{info['price_clause']}` (the long_entry clauses without "
-                    f"derivatives features) is true on {share:.1%} of the {bars} scored design "
+                    f"{kind} features) is true on {share:.1%} of the {bars} scored design "
                     f"bars from {window.start.date()}, at or above lab.toml [derivatives] "
                     f"gate_base_max_true_frac {limit:g}: it does not select bars, so the "
-                    f"derivatives gate(s) {', '.join(f'`{g}`' for g in gates)} would be the "
-                    "de-facto entry signal, and a derivatives feature is an exposure or "
+                    f"{kind} gate(s) {', '.join(f'`{g}`' for g in gates)} would be the "
+                    f"de-facto entry signal, and a {kind} feature is an exposure or "
                     "crash-risk filter, not a direction signal. Replace it with a price signal "
                     "that selects bars on its own (e.g. `close > ema_slow`, true on roughly half "
                     "the bars, or a crossover) and keep the gate as an extra `and` clause. "
@@ -465,8 +519,8 @@ def gate_base_trial_check(
     (:func:`lab.search.optuna_search.optuna_search` ``trial_check``): the same rule as
     :func:`check_gate_base`, applied to each trial's concrete parameters on the plan's SCORED
     design ``window`` (``history`` = the design view), so tuning a price period cannot turn the
-    price clause into an always-true one and let the derivatives gate become the entry signal.
-    Raises :class:`GateBaseTrialError`; a no-op for plans without derivatives gates."""
+    price clause into an always-true one and let the gate become the entry signal.
+    Raises :class:`GateBaseTrialError`; a no-op for plans without derivatives or HMM gates."""
     limit = cfg.derivatives.gate_base_max_true_frac
 
     def check(plan: Plan) -> None:
@@ -481,8 +535,9 @@ def gate_base_trial_check(
                 f"gate-base check failed for these params: the price clause "
                 f"`{info['price_clause']}` is true on {share:.1%} of the {info['bars']} scored "
                 f"design bars from {window.start.date()}, at or above lab.toml [derivatives] "
-                f"gate_base_max_true_frac {limit:g}, so the derivatives gate would be the "
-                "de-facto entry signal; the trial is failed (never selectable), no backtest run"
+                f"gate_base_max_true_frac {limit:g}, so the {_gate_kind(plan)} gate would be "
+                "the de-facto entry signal; the trial is failed (never selectable), no backtest "
+                "run"
             )
 
     return check
@@ -492,22 +547,35 @@ def _iso(ts: pd.Timestamp) -> str:
     return pd.Timestamp(ts).tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+SCORING_NOTE_DERIVATIVES = (
+    "derivatives plan: scored from the one start shared by every derivatives plan on "
+    "this symbol/interval (latest derivatives series start + [derivatives] "
+    "warmup_days, frozen with the run's snapshot); the plan, buy-and-hold, vol-target, "
+    "the random-entry and permutation nulls, the neighbourhood (PBO), adversarial "
+    "variants, sweeps and walk-forward folds all start there"
+)
+SCORING_NOTE_HMM = (
+    "HMM plan: scored from the first bar with a finite HMM output, one start per symbol/interval "
+    "read from the column; the plan, buy-and-hold, vol-target, the random-entry and permutation "
+    "nulls, the ungated baseline, sweeps and walk-forward folds all start there, so warm-up bars "
+    "enter no metric"
+)
+
+
 def scoring_json(
-    design_start: pd.Timestamp, window: Window, gate: Mapping[str, Any] | None
+    design_start: pd.Timestamp,
+    window: Window,
+    gate: Mapping[str, Any] | None,
+    *,
+    note: str = SCORING_NOTE_DERIVATIVES,
 ) -> dict[str, Any]:
-    """The report's ``scoring`` block for a derivatives plan: where scoring starts and why."""
+    """The report's ``scoring`` block for a gated plan: where scoring starts and why."""
     out: dict[str, Any] = {
         "scored_from": seconds(window.start),
         "scored_from_utc": _iso(window.start),
         "design_start": seconds(design_start),
         "design_start_utc": _iso(design_start),
-        "note": (
-            "derivatives plan: scored from the one start shared by every derivatives plan on "
-            "this symbol/interval (latest derivatives series start + [derivatives] "
-            "warmup_days, frozen with the run's snapshot); the plan, buy-and-hold, vol-target, "
-            "the random-entry and permutation nulls, the neighbourhood (PBO), adversarial "
-            "variants, sweeps and walk-forward folds all start there"
-        ),
+        "note": note,
     }
     if gate is not None:
         out.update(gate)
@@ -523,16 +591,18 @@ def plan_design_window(
 ) -> tuple[Window, dict[str, Any] | None]:
     """The window ``plan`` is scored on, from its design view ``history`` (every bar before
     ``holdout_start``, warm-up included), and its ``scoring`` block (None for plans without
-    derivatives features).
+    derivatives features or an HMM gate).
 
     ``[max(design_start, first bar), min(holdout_start, last bar end))``; for a plan that reads a
     derivatives column the start is :func:`derivatives_scored_start` (one start per symbol and
     interval, from ``series``: pass :func:`derivatives_series` inside a research run; None reads
-    the current manifest), and :func:`check_gate_base` runs on that window. Raises
+    the current manifest), and :func:`check_gate_base` runs on that window. A plan with an HMM
+    feature, edge or overlay, starts no earlier than the first bar with a finite HMM output, and
+    an edge plan's HMM gate runs the same check. Raises
     :class:`DerivativesLookbackError` (a look-back longer than ``warmup_days``),
-    :class:`DataUnavailableError` (no bars, missing inputs or series) or
-    :class:`GateBaseRefusedError`, all before any ledger row. Plans without derivatives get
-    exactly the window they always had."""
+    :class:`DataUnavailableError` (no bars, missing inputs, series or HMM columns) or
+    :class:`GateBaseRefusedError`, all before any ledger row. Plans without derivatives or HMM
+    features get exactly the window they always had."""
     lookback = derivatives_lookback_errors(plan, cfg)
     if lookback:
         raise DerivativesLookbackError(lookback)
@@ -546,20 +616,30 @@ def plan_design_window(
         )
     # before any trial is recorded: a missing derivatives download must not spend a ledger row
     require_plan_inputs(plan, candles, symbol=plan.symbol, interval=plan.interval)
-    if not plan_derivative_columns(plan):
+    require_hmm_columns(plan, candles, symbol=plan.symbol, interval=plan.interval)
+    uses_derivatives = bool(plan_derivative_columns(plan))
+    hmm_start = hmm_scored_start(history) if plan_hmm_features(plan) else None
+    if not uses_derivatives and hmm_start is None:
         return window, None
-    if series is None:
-        series = manifest_series(cfg.derivatives_dir)
-    start = derivatives_scored_start(plan.symbol, plan.interval, candles, cfg, series)
+    start = window.start
+    if uses_derivatives:
+        if series is None:
+            series = manifest_series(cfg.derivatives_dir)
+        start = derivatives_scored_start(plan.symbol, plan.interval, candles, cfg, series)
+    if hmm_start is not None:
+        start = max(start, hmm_start)
     scored = Window(start=max(window.start, start), end=window.end, kind="design")
     if int(((history.index >= scored.start) & (history.index < scored.end)).sum()) < 2:
+        source = "derivatives" if hmm_start is None else "HMM"
         raise DataUnavailableError(
-            f"fewer than 2 {plan.symbol} {plan.interval} design bars from the derivatives "
+            f"fewer than 2 {plan.symbol} {plan.interval} design bars from the {source} "
             f"scored start {_iso(scored.start)} to {scored.end.date()}; nothing was recorded "
             "in the ledger"
         )
     gate = check_gate_base(plan, history, scored, cfg)
-    return scored, scoring_json(window.start, scored, gate)
+    if uses_derivatives and hmm_start is None:
+        return scored, scoring_json(window.start, scored, gate)
+    return scored, scoring_json(window.start, scored, gate, note=SCORING_NOTE_HMM)
 
 
 def _prepare(
@@ -570,6 +650,12 @@ def _prepare(
     run_id: str | None = None,
 ) -> _Prepared:
     plan = parse_plan(raw_plan)  # PlanValidationError lists every problem
+    run = ledger.research_run(run_id) if ledger is not None and run_id is not None else None
+    if run is not None and run_id is not None:
+        try:
+            require_frozen_hmm(plan, run["config"], run_id=run_id)
+        except ValueError as exc:
+            raise DataUnavailableError(f"{exc} (nothing was recorded in the ledger)") from None
     raw = loader(plan.symbol, plan.interval, cfg.splits.holdout_start)
     history = design_view(raw, cfg.splits)
     assert_no_holdout(history, cfg.splits)
@@ -959,9 +1045,9 @@ def _warnings(
 
 UNGATED_NOTE = (
     "informational only: the same plan with every long_entry `and` clause that reads a "
-    "derivatives feature removed (the price clause alone), run with the same costs on the same "
-    "scored window. It is not a ledger trial, not a candidate, never holdout-checkable, and does "
-    "not change DSR's N; it adds no pass/fail criterion. gate_binding_share = bars where the "
+    "derivatives or HMM feature removed (the price clause alone), run with the same costs on the "
+    "same scored window. It is not a ledger trial, not a candidate, never holdout-checkable, and "
+    "does not change DSR's N; it adds no pass/fail criterion. gate_binding_share = bars where the "
     "price clause wanted an entry but the gate blocked it (gate false or undefined) / bars "
     "where the price clause wanted an entry (entry signals, whether or not already in a "
     "position). plan_minus_ungated: max_drawdown is negative, so a positive difference means "
@@ -979,11 +1065,11 @@ def _expr_names(expr: str) -> set[str]:
 
 def ungated_plan(plan: Plan) -> Plan | None:
     """``plan`` with every top-level ``and`` clause of ``long_entry`` that reads a derivatives
-    feature removed (:func:`lab.plan.validator.gate_base_expressions`, the same price clause
-    :func:`check_gate_base` judges), features no rule uses any more dropped, ``long_exit`` and
-    risk unchanged. None when the plan has no derivatives feature or no derivatives-free entry
-    clause, and always None for a risk overlay (no gate to strip; its derivatives features ARE
-    the risk rule). Raises :class:`PlanValidationError` if the stripped plan does not validate."""
+    or HMM feature removed (:func:`lab.plan.validator.gate_base_expressions`, the same price
+    clause :func:`check_gate_base` judges), features no rule uses any more dropped, ``long_exit``
+    and risk unchanged. None when the plan has no such feature or no gate-free entry clause, and
+    always None for a risk overlay (no gate to strip; those features ARE the risk rule). Raises
+    :class:`PlanValidationError` if the stripped plan does not validate."""
     if plan.kind == "overlay":
         return None
     exprs = gate_base_expressions(plan)
@@ -999,20 +1085,19 @@ def ungated_plan(plan: Plan) -> Plan | None:
 
 def _ungated_benchmark(prep: _Prepared, cfg: LabConfig, net: Metrics) -> dict[str, Any] | None:
     """The report's ``benchmarks.ungated`` block (:data:`UNGATED_NOTE`) for a single-symbol
-    plan with derivatives features, or None for price-only plans and for risk overlays (their
-    derivatives features ARE the risk rule; there is no gate to strip). Never touches the
-    ledger."""
+    plan with derivatives or HMM features, or None for price-only plans and for risk overlays
+    (those features ARE the risk rule; there is no gate to strip). Never touches the ledger."""
     if prep.scoring is None or prep.plan.kind == "overlay":
         return None
-    gates = sorted(r.alias for r in prep.plan.features if r.feature in DERIVATIVES_FEATURES)
+    gates = sorted(r.alias for r in prep.plan.features if r.feature in GATE_FEATURES)
     try:
         stripped = ungated_plan(prep.plan)
     except PlanValidationError as exc:
         return {"error": f"the ungated plan does not validate: {exc}", "note": UNGATED_NOTE}
     if stripped is None:
         return {
-            "error": "long_entry has no derivatives-free clause, so there is no price-only "
-            "baseline to compare with",
+            "error": f"long_entry has no {_gate_kind(prep.plan)}-free clause, so there is no "
+            "price-only baseline to compare with",
             "gate_features": gates,
             "note": UNGATED_NOTE,
         }
@@ -1306,7 +1391,7 @@ def run_backtest_report(
         "disclaimer": _disclaimer(cfg),
         "elapsed_ms": 0,
     }
-    if prep.scoring is not None:  # derivatives plans only: other reports are unchanged
+    if prep.scoring is not None:  # gated plans only: other reports are unchanged
         report["scoring"] = prep.scoring
         ungated = _ungated_benchmark(prep, cfg, net)  # informational, no ledger row
         if ungated is not None:
@@ -1473,7 +1558,7 @@ def run_adversarial_report(
         "disclaimer": _disclaimer(cfg),
         "elapsed_ms": 0,
     }
-    if prep.scoring is not None:  # derivatives plans only: other reports are unchanged
+    if prep.scoring is not None:  # gated plans only: other reports are unchanged
         out["scoring"] = prep.scoring
     out = to_jsonable(out)
     out["elapsed_ms"] = round((time.perf_counter() - t0) * 1000)

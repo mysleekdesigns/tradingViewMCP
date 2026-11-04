@@ -21,6 +21,13 @@ adds the ``"overlay"`` block (:func:`lab.research.overlay.overlay_block`) that
 overlay entry point first applies :func:`lab.research.overlay_criteria.check_overlay_untuned`
 (one published parameter set per overlay logic, across every overlay run), before any trial.
 
+Edge and overlay backtest evidence also carries ``"episodes_table"``
+(:func:`lab.research.episodes.episodes_evidence`, PLAN.md Phase 20): strategy vs buy-and-hold per
+named ``[episodes]`` range, from the base trial's bars. It is information only, adds no ledger
+row and no criterion row, and a failure there is recorded as ``{"error": ...}`` without touching
+the rest of the evidence. Portfolio plans do not have it. A plan with an HMM feature adds
+``"hmm_diagnostics"`` (:func:`lab.research.episodes.hmm_label_diagnostics`) the same way.
+
 Only design-window bars are ever loaded (``loader(..., holdout_start)``); the holdout is
 reachable only through :mod:`lab.research.holdout`. Callers own budgets and locking.
 
@@ -37,15 +44,19 @@ import pandas as pd
 from lab.config import LabConfig
 from lab.crosscheck.nautilus import crosscheck
 from lab.data.derivatives_columns import require_plan_inputs
+from lab.data.hmm_columns import plan_hmm_features, require_frozen_hmm
 from lab.engine.splits import design_view, slice_window
+from lab.evaluate.benchmarks import buy_and_hold
 from lab.ledger import Ledger
 from lab.plan import parse_plan, plan_hash
+from lab.registry.hmm import HMM_BEAR_HIGH_VOL_COLUMN
 from lab.report import num
 from lab.research.contract import SuccessCriteria
 from lab.research.criteria import frozen_criteria, regime_breakdown
+from lab.research.episodes import episodes_evidence, hmm_label_diagnostics, invested_flags
 from lab.research.evidence import compact_report, record_report
 from lab.research.logic import logic_hash
-from lab.research.overlay import overlay_block
+from lab.research.overlay import OverlayPair, overlay_block_and_pair
 from lab.research.overlay_criteria import check_overlay_untuned
 from lab.research.runs import frozen_overlay_criteria, frozen_question
 from lab.runner import (
@@ -110,6 +121,104 @@ def _regimes(
         return {"error": f"regime breakdown unavailable: {exc}"}
 
 
+_EPISODE_ERRORS = (ValueError, KeyError, TypeError, DataUnavailableError)
+
+
+def _when(seconds_: int | None) -> pd.Timestamp | None:
+    return None if seconds_ is None else pd.Timestamp(seconds_, unit="s", tz="UTC")
+
+
+def _episodes_table(
+    ledger: Ledger,
+    plan: Plan,
+    report: Mapping[str, Any],
+    *,
+    cfg: LabConfig,
+    loader: CandleLoader,
+) -> dict[str, Any]:
+    """The per-episode table of the report's base trial, or ``{"error": ...}``. Strategy returns
+    are the ledgered trial's; buy-and-hold runs on the same bars and costs as the report's
+    benchmark (no ledger row). Only design-window bars are loaded."""
+    try:
+        rec = ledger.get(int(report["trial_id"]), include_returns=True)
+        if rec.returns is None:
+            raise ValueError("trial has no stored returns")
+        history = design_view(
+            loader(plan.symbol, plan.interval, cfg.splits.holdout_start), cfg.splits
+        )
+        window = Window(start=rec.window_start, end=rec.window_end, kind="design")
+        candles = slice_window(history, window)
+        if len(candles) != rec.returns.size:
+            raise ValueError(
+                f"trial has {rec.returns.size} returns on {len(candles)} bars of its window"
+            )
+        bh = buy_and_hold(
+            candles,
+            costs=cfg.costs,
+            init_cash=cfg.init_cash,
+            cost_history=history.loc[history.index < window.end],
+        )
+        spans = [(_when(t["entry_time"]), _when(t["exit_time"])) for t in report["trades"]]
+        return episodes_evidence(
+            cfg.episodes,
+            cfg.splits.holdout_start,
+            candles.index,
+            rec.returns,
+            bh.returns.to_numpy(dtype=float),
+            invested_flags(candles.index, spans),
+            [entry for entry, _ in spans],
+        )
+    except _EPISODE_ERRORS as exc:
+        return {"error": f"episode table unavailable: {exc}"}
+
+
+def _overlay_episodes_table(pair: OverlayPair, cfg: LabConfig) -> dict[str, Any]:
+    """The per-episode table on the overlay block's own 1x pair (the overlay and buy-and-hold on
+    the same scored bars, already checked against the ledgered trial), or ``{"error": ...}``."""
+    try:
+        return episodes_evidence(
+            cfg.episodes,
+            cfg.splits.holdout_start,
+            pair.index,
+            pair.overlay_returns,
+            pair.buy_hold_returns,
+            pair.invested,
+            [t.entry_time for t in pair.overlay.trades],
+        )
+    except _EPISODE_ERRORS as exc:
+        return {"error": f"episode table unavailable: {exc}"}
+
+
+def _require_frozen_hmm(ledger: Ledger, run_id: str, plan: Plan) -> None:
+    """An HMM plan is refused in a run that froze no HMM settings, before any trial."""
+    run = ledger.research_run(run_id)
+    require_frozen_hmm(plan, run["config"] if run else None, run_id=run_id)
+
+
+def _hmm_diagnostics(
+    ledger: Ledger,
+    plan: Plan,
+    report: Mapping[str, Any],
+    *,
+    cfg: LabConfig,
+    loader: CandleLoader,
+) -> dict[str, Any]:
+    """The label diagnostic over the report's base trial's window, the same bars for edge and
+    overlay plans, or ``{"error": ...}``. Only design-window bars are loaded."""
+    try:
+        rec = ledger.get(int(report["trial_id"]))
+        history = design_view(
+            loader(plan.symbol, plan.interval, cfg.splits.holdout_start), cfg.splits
+        )
+        window = Window(start=rec.window_start, end=rec.window_end, kind="design")
+        candles = slice_window(history, window)
+        if HMM_BEAR_HIGH_VOL_COLUMN not in candles.columns:
+            raise ValueError(f"candles have no {HMM_BEAR_HIGH_VOL_COLUMN!r} column")
+        return hmm_label_diagnostics(candles[HMM_BEAR_HIGH_VOL_COLUMN].to_numpy(dtype=float))
+    except _EPISODE_ERRORS as exc:
+        return {"error": f"HMM diagnostics unavailable: {exc}"}
+
+
 def backtest_evidence(
     raw_plan: Mapping[str, Any] | str,
     *,
@@ -119,8 +228,9 @@ def backtest_evidence(
     loader: CandleLoader,
 ) -> dict[str, Any]:
     """Run the design-window backtest report for ``raw_plan`` under research run ``run_id``,
-    strip it, add the ``regimes`` block (the run's frozen regime definition), record it as
-    ``"backtest"`` evidence, and return the recorded dict (it keeps ``trial_id``).
+    strip it, add the ``regimes`` block (the run's frozen regime definition) and the
+    ``episodes_table`` block (information only), record it as ``"backtest"`` evidence, and
+    return the recorded dict (it keeps ``trial_id``).
 
     Raises ``ValueError`` before any trial runs if ``run_id`` was never started (no frozen
     criteria), plus whatever ``run_backtest_report`` raises (``PlanValidationError``,
@@ -137,6 +247,9 @@ def backtest_evidence(
     )
     out = strip_report(report)
     out["regimes"] = _regimes(ledger, plan, report, cfg=cfg, loader=loader, criteria=criteria)
+    out["episodes_table"] = _episodes_table(ledger, plan, report, cfg=cfg, loader=loader)
+    if plan_hmm_features(plan):
+        out["hmm_diagnostics"] = _hmm_diagnostics(ledger, plan, report, cfg=cfg, loader=loader)
     out["logic_hash"] = logic_hash(plan)
     record_report(ledger, run_id, h, "backtest", out)
     return out
@@ -163,8 +276,10 @@ def _overlay_backtest_evidence(
     report (its base trial is the ledgered overlay trial), without the run-local DSR, plus the
     ``"overlay"`` block (:func:`lab.research.overlay.overlay_block`, with the run's FROZEN
     overlay rows' CDaR level, episode depth and bootstrap block) whose 1x rerun is checked
-    against that base trial. Refused before any trial when the run is not a risk-overlay run."""
+    against that base trial, plus the ``episodes_table`` block (information only). Refused
+    before any trial when the run is not a risk-overlay run."""
     criteria = frozen_overlay_criteria(ledger, run_id)  # no frozen rows, no trials
+    _require_frozen_hmm(ledger, run_id, plan)
     check_overlay_untuned(ledger, plan)  # one parameter set per logic
     report = run_backtest_report(
         raw_plan, cfg=cfg, ledger=ledger, run_id=run_id, loader=loader, run_id_assigned=True
@@ -173,7 +288,7 @@ def _overlay_backtest_evidence(
     stats = out.get("stats")
     if isinstance(stats, dict):
         out["stats"] = {k: v for k, v in stats.items() if k != "dsr"}
-    out["overlay"] = overlay_block(
+    out["overlay"], pair = overlay_block_and_pair(
         plan,
         cfg=cfg,
         ledger=ledger,
@@ -182,6 +297,9 @@ def _overlay_backtest_evidence(
         criteria=criteria,
         trial_id=int(report["trial_id"]),
     )
+    out["episodes_table"] = _overlay_episodes_table(pair, cfg)
+    if plan_hmm_features(plan):
+        out["hmm_diagnostics"] = _hmm_diagnostics(ledger, plan, report, cfg=cfg, loader=loader)
     out["overlay_note"] = OVERLAY_EVIDENCE_NOTE
     out["logic_hash"] = logic_hash(plan)
     record_report(ledger, run_id, h, "backtest", out)
@@ -239,6 +357,7 @@ def crosscheck_evidence(
             check_overlay_untuned(ledger, plan)  # one parameter set per logic
     else:
         frozen_criteria(ledger, run_id)
+    _require_frozen_hmm(ledger, run_id, plan)
     rows = ledger.evidence(run_id, plan_hash=h, kind="backtest")
     if not rows:
         raise ValueError(

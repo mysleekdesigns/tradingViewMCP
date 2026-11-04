@@ -4,9 +4,10 @@
 The pattern: change every candle strictly after bar t and assert that every output at or
 before t is bit-identical. It iterates ``REGISTRY``, so a feature added later is covered
 without editing this file. The candles carry the six aligned ``drv_*`` derivatives columns
-(with NaN gaps) so the derivatives features run the same test. Like hedgeFund's version it
-also checks that the perturbation has teeth (later outputs do change) and that computation
-is deterministic.
+(with NaN gaps) and the ``hmm_series_*`` columns so the derivatives and HMM features run
+the same test; ``tests/test_registry_hmm.py`` runs it on ``causal_hmm`` itself, because those two
+features only read their column. Like hedgeFund's version it also checks that the perturbation
+has teeth (later outputs do change) and that computation is deterministic.
 
 Statistics cannot catch look-ahead, so this test is mandatory (.claude/rules/no-lookahead.md).
 """
@@ -19,7 +20,7 @@ import pytest
 
 from lab.registry import REGISTRY, fill_params
 from lab.types import FeatureSpec
-from tests.synthetic import make_candles, perturb_after, with_derivatives
+from tests.synthetic import make_candles, perturb_after, with_derivatives, with_hmm
 
 N_BARS = 600
 SEED = 20261024
@@ -59,15 +60,19 @@ def cut_points(warmup: int) -> list[int]:
 
 @pytest.fixture(scope="module")
 def candles() -> pd.DataFrame:
-    """Prices plus derivatives columns with archive gaps (NaN rows) in every drv_* column."""
-    return with_derivatives(make_candles(N_BARS, seed=SEED, vol=0.02), seed=SEED)
+    """Prices plus derivatives and HMM columns with NaN rows in every drv_* and hmm_series_*
+    column."""
+    return with_hmm(
+        with_derivatives(make_candles(N_BARS, seed=SEED, vol=0.02), seed=SEED), seed=SEED
+    )
 
 
 @pytest.fixture(scope="module")
 def clean_candles() -> pd.DataFrame:
     """The same frame without derivatives gaps, for the warm-up contract (NaN only in the
     declared warm-up holds on gap-free data only)."""
-    return with_derivatives(make_candles(N_BARS, seed=SEED, vol=0.02), seed=SEED, gaps=False)
+    plain = with_derivatives(make_candles(N_BARS, seed=SEED, vol=0.02), seed=SEED, gaps=False)
+    return with_hmm(plain, seed=SEED, gaps=False)
 
 
 @pytest.mark.parametrize(("name", "params"), CASES)

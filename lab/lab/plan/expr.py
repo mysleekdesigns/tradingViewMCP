@@ -16,11 +16,15 @@ Grammar (everything else is rejected with an error naming the token):
 * rule functions:
   ``crosses_above(a, b)``: ``a[t] > b[t] and a[t-1] <= b[t-1]``;
   ``crosses_below(a, b)``: ``a[t] < b[t] and a[t-1] >= b[t-1]``;
-  ``prev(x, n)``: ``x`` as it was ``n`` bars ago (literal int, 1..500, strictly past data).
+  ``prev(x, n)``: ``x`` as it was ``n`` bars ago (literal int, 1..500, strictly past data);
+  ``persist(condition, k)``: ``condition`` held on each of rows ``t-k+1..t`` (literal int,
+  1..50; rows, not clock time, like every window in the lab). ``persist(c, 1)`` is ``c``.
 
 NaN semantics (conservative, no look-ahead): every value carries a validity mask. A NaN or
 non-finite operand anywhere in an expression makes the whole expression False at that bar,
-including through ``or`` and ``not``. The top-level result must be a condition.
+including through ``or`` and ``not``. The top-level result must be a condition. A ``persist``
+is valid only when all ``k`` of its rows are valid, so its first ``k-1`` rows are invalid and
+``not persist(c, 3)`` is False across a NaN, not True.
 
 Units (:mod:`lab.plan.units`): every number carries a dimension (price-scale, volume-scale,
 dimensionless). ``+``/``-`` and comparisons (including ``crosses_*``) need equal dimensions,
@@ -46,15 +50,17 @@ import numpy.typing as npt
 from lab.plan.units import DIMENSIONLESS, INPUT_SCALES, PRICE, VOLUME, Dim, describe
 from lab.types import PRICE_INPUTS, PlanError
 
-FUNCTIONS: tuple[str, ...] = ("crosses_above", "crosses_below", "prev")
+FUNCTIONS: tuple[str, ...] = ("crosses_above", "crosses_below", "prev", "persist")
 MAX_EXPR_CHARS = 500
 MAX_PREV_BARS = 500
+MAX_PERSIST_BARS = 50  # over 8 days of unbroken agreement on 4h bars; the source rule uses 3
 MAX_DEPTH = 60  # nesting limit; keeps the checker far from Python's recursion limit
 
+_FUNCTION_SIGNATURES = "crosses_above(a, b), crosses_below(a, b), prev(x, n), persist(condition, k)"
 ALLOWED_SUMMARY = (
     "Allowed: numbers; price inputs (open, high, low, close, volume); feature aliases "
     "defined under `features` (multi-output ones as `alias.output`); arithmetic + - * /; "
-    "comparisons > < >= <=; and, or, not; crosses_above(a, b), crosses_below(a, b), prev(x, n). "
+    f"comparisons > < >= <=; and, or, not; {_FUNCTION_SIGNATURES}. "
     "Compared or added values must share units (prices with prices, volume with volume, or "
     "ratios such as close / ema_slow)."
 )
@@ -89,6 +95,29 @@ def prev(x: npt.ArrayLike, n: int) -> FloatArray:
     if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= MAX_PREV_BARS:
         raise ValueError(f"prev n must be an int in [1, {MAX_PREV_BARS}], got {n!r}")
     return _shift_float(_as_float(x), n)
+
+
+def _held(x: BoolArray, k: int) -> BoolArray:
+    """True at row t when ``x`` is True on every row ``t-k+1..t``; the first ``k-1`` rows are
+    False. Reads no row after t."""
+    out = np.zeros(x.shape, dtype=np.bool_)
+    if k <= len(x):
+        hits = np.cumsum(x, dtype=np.int64)
+        in_window = hits[k - 1 :].copy()
+        in_window[1:] -= hits[: len(x) - k]
+        out[k - 1 :] = in_window == k
+    return out
+
+
+def persist(x: npt.ArrayLike, k: int) -> BoolArray:
+    """True at t when the boolean series ``x`` held on each of the last ``k`` rows, t included;
+    the first ``k-1`` are False. ``x`` must be boolean, since a NaN would cast to True."""
+    if isinstance(k, bool) or not isinstance(k, int) or not 1 <= k <= MAX_PERSIST_BARS:
+        raise ValueError(f"persist k must be an int in [1, {MAX_PERSIST_BARS}], got {k!r}")
+    flags = np.asarray(x)
+    if flags.dtype != np.bool_:
+        raise ValueError(f"persist needs a boolean array, got dtype {flags.dtype}")
+    return _held(flags, k)
 
 
 def _cross(a: FloatArray, b: FloatArray, va: BoolArray, vb: BoolArray, up: bool) -> BoolArray:
@@ -148,8 +177,9 @@ class CheckedExpr:
     """A whitelisted, type-checked expression ready for :func:`evaluate_expression`.
 
     ``lag``: bars of history the expression looks back beyond its inputs (sum of nested
-    ``prev`` n, +1 per ``crosses_*``). ``refs``: column names it reads ("close", "ema_fast",
-    "macd.hist").
+    ``prev`` n, +1 per ``crosses_*``, +k-1 per ``persist``). ``refs``: column names it reads
+    ("close", "ema_fast", "macd.hist"). ``persist_ks``: the ``k`` of each ``persist`` call, one
+    entry per call.
     """
 
     source: str
@@ -158,6 +188,7 @@ class CheckedExpr:
     max_prev: int
     uses_cross: bool
     refs: frozenset[str]
+    persist_ks: tuple[int, ...] = ()
 
 
 Kind = Literal["num", "bool", "bad"]
@@ -251,6 +282,7 @@ class _Checker:
         self.refs: set[str] = set()
         self.max_prev = 0
         self.uses_cross = False
+        self.persist_ks: list[int] = []
 
     def err(self, node: ast.AST, message: str) -> _T:
         col = getattr(node, "col_offset", None)
@@ -474,7 +506,7 @@ class _Checker:
             return self.err(
                 node,
                 f"`{label}` is not an allowed function. Allowed functions: "
-                f"crosses_above(a, b), crosses_below(a, b), prev(x, n).{hint}",
+                f"{_FUNCTION_SIGNATURES}.{hint}",
             )
         fname = func.id
         bad = False
@@ -499,6 +531,8 @@ class _Checker:
             )
         if fname == "prev":
             return self.prev_call(node, bad)
+        if fname == "persist":
+            return self.persist_call(node, bad)
         self.uses_cross = True
         ta, tb = self.check(node.args[0]), self.check(node.args[1])
         ok = self.need_num(node.args[0], ta, f"`{fname}`")
@@ -533,6 +567,34 @@ class _Checker:
             return self.err(node, "`prev` of a constant is the same constant; drop the `prev`")
         self.max_prev = max(self.max_prev, n.value)
         return _T(tx.kind, False, tx.lag + n.value, tx.dim, tx.zero, tx.lit)
+
+    def persist_call(self, node: ast.Call, bad: bool) -> _T:
+        cond, k = node.args
+        tc = self.check(cond)
+        ok = self.need_bool(cond, tc, "`persist`")
+        if (
+            not isinstance(k, ast.Constant)
+            or isinstance(k.value, bool)
+            or not isinstance(k.value, int)
+            or not 1 <= k.value <= MAX_PERSIST_BARS
+        ):
+            return self.err(
+                k,
+                f"`persist` needs a whole-number literal bar count from 1 to {MAX_PERSIST_BARS} "
+                f"as its second argument, got `{self.text(k)}`; e.g. "
+                f"`{_example_call('persist')}`",
+            )
+        if _contains_persist(cond):
+            return self.err(
+                node,
+                f"`persist` inside `persist` is not allowed: it would get past the limit of "
+                f"{MAX_PERSIST_BARS} bars; write one call with the total, e.g. "
+                f"`{_example_call('persist')}`",
+            )
+        if bad or not ok:
+            return _BAD
+        self.persist_ks.append(k.value)
+        return _T("bool", False, tc.lag + k.value - 1)
 
     # -- units
 
@@ -639,11 +701,26 @@ class _Checker:
         )
 
 
+def _contains_persist(node: ast.AST) -> bool:
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if (
+            isinstance(cur, ast.Call)
+            and isinstance(cur.func, ast.Name)
+            and cur.func.id == "persist"
+        ):
+            return True
+        stack.extend(ast.iter_child_nodes(cur))
+    return False
+
+
 def _example_call(fname: str) -> str:
     return {
         "crosses_above": "crosses_above(ema_fast, ema_slow)",
         "crosses_below": "crosses_below(rsi, 30)",
         "prev": "prev(close, 1)",
+        "persist": "persist(close > ema_slow, 3)",
     }[fname]
 
 
@@ -710,6 +787,7 @@ def check_expression(
             max_prev=checker.max_prev,
             uses_cross=checker.uses_cross,
             refs=frozenset(checker.refs),
+            persist_ks=tuple(checker.persist_ks),
         ),
         [],
     )
@@ -808,6 +886,12 @@ class _Evaluator:
                 if v.is_bool:
                     return _V(_shift_bool(_flag(v), shift) & valid, valid, True)
                 return _V(_shift_float(_num(v), shift), valid, False)
+            if node.func.id == "persist":
+                v = self.ev(node.args[0])
+                k = node.args[1]
+                assert isinstance(k, ast.Constant) and isinstance(k.value, int)
+                valid = _held(v.valid, k.value)
+                return _V(_held(_flag(v), k.value) & valid, valid, True)
             a, b = self.ev(node.args[0]), self.ev(node.args[1])
             up = node.func.id == "crosses_above"
             hit = _cross(_num(a), _num(b), a.valid, b.valid, up=up)

@@ -89,6 +89,54 @@ def validate_candles(candles: pd.DataFrame) -> None:
         raise ValueError("candles contain NaN prices/volume; missing bars must be absent rows")
 
 
+# --------------------------------------------------------------------------- regime and episodes
+
+
+@dataclass(frozen=True)
+class HmmSettings:
+    """``[regime.hmm]`` of ``lab.toml``: the causal HMM's fixed settings (PLAN.md Phase 20 Part B).
+
+    Windows count rows (bars). ``seeds`` are the Baum-Welch restarts, ``seed`` to
+    ``seed + restarts - 1``. ``symbols`` and ``intervals`` say which series the data layer fits;
+    they do not change a fit, so :meth:`fit_key` leaves them out.
+    """
+
+    n_states: int
+    vol_window_bars: int
+    train_bars: int
+    refit_every_bars: int
+    seed: int
+    restarts: int
+    n_iter: int
+    symbols: tuple[str, ...] = ()
+    intervals: tuple[str, ...] = ()
+
+    @property
+    def seeds(self) -> tuple[int, ...]:
+        return tuple(self.seed + k for k in range(self.restarts))
+
+    def fit_key(self) -> dict[str, int]:
+        """The settings that change a fit, as JSON-safe data (cache keys)."""
+        return {
+            "n_states": self.n_states,
+            "vol_window_bars": self.vol_window_bars,
+            "train_bars": self.train_bars,
+            "refit_every_bars": self.refit_every_bars,
+            "seed": self.seed,
+            "restarts": self.restarts,
+            "n_iter": self.n_iter,
+        }
+
+
+@dataclass(frozen=True)
+class Episode:
+    """A named crash episode ``[start, end)``, tz-aware UTC (``[episodes]`` of ``lab.toml``)."""
+
+    name: str
+    start: pd.Timestamp
+    end: pd.Timestamp
+
+
 # --------------------------------------------------------------------------- registry
 
 

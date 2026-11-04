@@ -10,6 +10,11 @@ data layer attaches to the candles; they are risk filters, accepted by the plan 
 as gating ``and`` clauses of a spot long-only entry in edge (signal) plans, and anywhere in the
 ``flat_when`` rule of a risk-overlay plan (PLAN.md Phase 15), since crash-risk filtering is
 their stated role.
+
+The causal HMM features (``lab.registry.hmm``) read ``hmm_series_*`` columns that the data layer
+attaches, because a fit is far too slow for a registry call. They are regime filters with the
+same role: overlay ``flat_when`` or an ``and`` gate beside a price signal, never alone and never
+in ``long_exit``.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from types import MappingProxyType
 
 from lab.registry.derivatives import DERIVATIVES_FEATURE_SPECS, DERIVATIVES_FEATURES
 from lab.registry.features import PRICE_FEATURES, fill_params
+from lab.registry.hmm import HMM_FEATURES
 from lab.registry.regime import REGIME_FEATURES
 from lab.types import FeatureSpec
 
@@ -34,7 +40,7 @@ def _build(specs: Iterable[FeatureSpec]) -> Mapping[str, FeatureSpec]:
 
 
 REGISTRY: Mapping[str, FeatureSpec] = _build(
-    (*PRICE_FEATURES, *REGIME_FEATURES, *DERIVATIVES_FEATURE_SPECS)
+    (*PRICE_FEATURES, *REGIME_FEATURES, *DERIVATIVES_FEATURE_SPECS, *HMM_FEATURES)
 )
 
 

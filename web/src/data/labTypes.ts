@@ -178,10 +178,15 @@ export interface LedgerQuery {
 /** hedgeFund regime of a bar: -1 Bear, 0 Sideways, +1 Bull. */
 export type RegimeState = -1 | 0 | 1
 
+/** Which model labels the ribbon: hedgeFund's trailing-return labels, or the lab's causal HMM. */
+export type RegimeModel = 'markov' | 'hmm'
+
 /** `state` is null during the warm-up (fewer than `window_bars` earlier bars sent). */
 export interface RegimePoint {
   time: number
   state: RegimeState | null
+  /** HMM only: filtered probability of `state`, null during the warm-up. */
+  prob?: number | null
 }
 
 /**
@@ -195,6 +200,23 @@ export interface RegimeRequest {
   window_bars?: number
   /** Trailing-return threshold as a fraction, 0.001..1 (lab default 0.05). */
   threshold?: number
+  /** Default 'markov'. 'hmm' needs `symbol` and `interval`, and ignores the two above. */
+  model?: RegimeModel
+  symbol?: string
+  /** The chart's timeframe; the lab refuses the HMM below 1h. */
+  interval?: string
+}
+
+/** What an HMM answer says about the fit behind it. */
+export interface RegimeHmmInfo {
+  n_states: number
+  warmup_bars: number
+  /** Rows a first decision takes: training window + volatility window + 1. */
+  bars_needed: number
+  /** Rows the lab had: its archive before the first sent bar, plus the sent bars. */
+  bars_have: number
+  /** Why nothing was fitted (e.g. the archive stops before the chart starts), or null. */
+  unavailable: string | null
 }
 
 export interface RegimeResponse {
@@ -204,6 +226,8 @@ export interface RegimeResponse {
   threshold: number
   /** The hedgeFund function that labels the bars. */
   engine: string
+  /** Present only on an HMM answer. */
+  hmm?: RegimeHmmInfo
 }
 
 /**

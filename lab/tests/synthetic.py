@@ -24,6 +24,13 @@ from lab.registry.derivatives import (
     DRV_OI,
     DRV_PREMIUM_CLOSE,
 )
+from lab.registry.hmm import (
+    HMM_BEAR_HIGH_VOL_COLUMN,
+    HMM_BEAR_PROB_COLUMN,
+    HMM_COLUMNS,
+    HMM_STATE_COLUMN,
+    HMM_STATE_PROB_COLUMN,
+)
 from lab.types import interval_seconds
 
 
@@ -133,13 +140,63 @@ def with_derivatives(candles: pd.DataFrame, *, seed: int, gaps: bool = True) -> 
     return out
 
 
+def with_hmm(candles: pd.DataFrame, *, seed: int, gaps: bool = True) -> pd.DataFrame:
+    """Copy of ``candles`` with the ``hmm_series_*`` columns added, for tests of what reads them:
+    a seeded two-state bear probability, its argmax state, that state's probability, and a
+    diagnostic saying state 0 is the high-volatility state.
+
+    With ``gaps`` (default) the first 10% of rows are NaN (the warm-up) and so is one later row.
+    The real columns come from :func:`lab.registry.hmm.causal_hmm`, which has its own tests.
+    """
+    rng = np.random.default_rng(seed)
+    out = candles.copy()
+    n = len(out)
+    bear = rng.uniform(0.0, 1.0, n)
+    out[HMM_STATE_COLUMN] = np.where(bear >= 0.5, 0.0, 1.0)
+    out[HMM_BEAR_PROB_COLUMN] = bear
+    out[HMM_STATE_PROB_COLUMN] = np.maximum(bear, 1.0 - bear)
+    out[HMM_BEAR_HIGH_VOL_COLUMN] = np.ones(n)
+    if gaps and n:
+        rows = [*range(n // 10), n // 2 - 7]
+        for col in HMM_COLUMNS:
+            out.iloc[rows, out.columns.get_loc(col)] = np.nan
+    return out
+
+
+def two_regime_close(
+    n: int, *, seed: int, block_bars: int = 400, interval: str = "4h", start: str = "2022-01-01"
+) -> tuple[pd.Series, np.ndarray]:
+    """A close series alternating ``block_bars``-long regimes, and the true regime of each row
+    (0 falling and volatile, 1 rising and calm), starting in regime 1."""
+    rng = np.random.default_rng(seed)
+    regime = 1 - (np.arange(n) // block_bars) % 2
+    log_ret = rng.normal(np.where(regime == 1, 0.003, -0.003), np.where(regime == 1, 0.006, 0.02))
+    step = pd.Timedelta(seconds=interval_seconds(interval))
+    index = pd.date_range(pd.Timestamp(start, tz="UTC"), periods=n, freq=step, name="time")
+    return pd.Series(100.0 * np.exp(np.cumsum(log_ret)), index=index, name="close"), regime
+
+
+def equal_mean_close(
+    n: int, *, seed: int, block_bars: int = 300, interval: str = "4h", start: str = "2022-01-01"
+) -> tuple[pd.Series, np.ndarray]:
+    """A close series whose regimes share a zero mean and differ only in volatility, and the true
+    regime of each row (0 calm, 1 volatile), starting calm."""
+    rng = np.random.default_rng(seed)
+    regime = (np.arange(n) // block_bars) % 2
+    log_ret = rng.normal(0.0, np.where(regime == 1, 0.02, 0.005))
+    step = pd.Timedelta(seconds=interval_seconds(interval))
+    index = pd.date_range(pd.Timestamp(start, tz="UTC"), periods=n, freq=step, name="time")
+    return pd.Series(100.0 * np.exp(np.cumsum(log_ret)), index=index, name="close"), regime
+
+
 def perturb_after(candles: pd.DataFrame, t: int, *, seed: int = 99) -> pd.DataFrame:
     """Copy of ``candles`` with every row after position ``t`` replaced by different prices.
 
     The perturbation test: outputs at rows ``<= t`` must be bit-identical on the original and
     the perturbed frame. When the frame carries ``drv_*`` derivatives columns, their values
     after ``t`` are rescaled too and about 5% of them become NaN (new future gaps), so a
-    feature that peeks ahead, or back-fills a gap, fails.
+    feature that peeks ahead, or back-fills a gap, fails. ``hmm_series_*`` columns are mirrored
+    (``1 - value``) after ``t`` with about 5% new NaN rows, for the same reason.
     """
     rng = np.random.default_rng(seed)
     out = candles.copy()
@@ -165,6 +222,12 @@ def perturb_after(candles: pd.DataFrame, t: int, *, seed: int = 99) -> pd.DataFr
         future = out[col].to_numpy(dtype=np.float64)[t + 1 :] * np.exp(rng.normal(0.0, 0.3, k))
         future[rng.random(k) < 0.05] = np.nan
         out.iloc[t + 1 :, out.columns.get_loc(col)] = future
+    if HMM_BEAR_PROB_COLUMN in out.columns:  # drawn last, so other frames perturb as before
+        holes = rng.random(k) < 0.05
+        for col in HMM_COLUMNS:
+            future = 1.0 - out[col].to_numpy(dtype=np.float64)[t + 1 :]
+            future[holes] = np.nan
+            out.iloc[t + 1 :, out.columns.get_loc(col)] = future
     return out
 
 

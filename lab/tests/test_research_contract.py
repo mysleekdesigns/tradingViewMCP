@@ -290,7 +290,7 @@ def test_start_research_run_snapshots_the_lab_config(ledger: Ledger, tmp_path: P
     assert lab["fingerprint"] == hashlib.sha256(text.encode()).hexdigest()
     # criteria + budget are still frozen alongside, and the file hash is unchanged; the software
     # record (Phase 11) is frozen BESIDE the fingerprint, never inside lab_values
-    assert set(run["config"]) == {"criteria", "budget", "lab", "software"}
+    assert set(run["config"]) - {"hmm", "episodes"} == {"criteria", "budget", "lab", "software"}
     assert run["config"]["software"] == software_values()
 
 

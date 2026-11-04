@@ -5,12 +5,14 @@ Results are historical and not forward-looking.
 
 from lab.plan.compile import compile_plan, compute_features
 from lab.plan.expr import (
+    MAX_PERSIST_BARS,
     CheckedExpr,
     ExprScope,
     check_expression,
     crosses_above,
     crosses_below,
     evaluate_expression,
+    persist,
     prev,
 )
 from lab.plan.schema import (
@@ -36,6 +38,7 @@ from lab.plan.validator import (
 __all__ = [
     "MAX_OVERLAY_FEATURES",
     "MAX_OVERLAY_PARAMS",
+    "MAX_PERSIST_BARS",
     "OVERLAY_KIND",
     "CheckedExpr",
     "ExprScope",
@@ -51,6 +54,7 @@ __all__ = [
     "is_overlay_plan",
     "overlay_plan_json_schema",
     "parse_plan",
+    "persist",
     "plan_hash",
     "plan_json_schema",
     "plan_to_dict",

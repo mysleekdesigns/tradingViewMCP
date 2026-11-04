@@ -1,6 +1,6 @@
 ---
 date: 2026-11-04
-status: proposal for the owner; section 3 applied 2026-11-04, sections 1 and 2 not yet
+status: sections 1, 2 and 3 applied 2026-11-04 for Parts B, C, G; Part D is the pre-registered run after the owner re-creates the lock
 ---
 
 # Phase 20 lab lock proposal

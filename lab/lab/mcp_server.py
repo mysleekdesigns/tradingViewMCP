@@ -90,12 +90,13 @@ from mcp.types import ToolAnnotations
 from lab import portfolio_runner as pr
 from lab.config import LabConfig, load_config
 from lab.data.derivatives_columns import plan_derivative_columns, require_plan_inputs
+from lab.data.hmm_columns import require_frozen_hmm
 from lab.engine.splits import design_view, design_window, walk_forward_folds
 from lab.ledger import SELECTION_SOURCES, Ledger
 from lab.plan import parse_plan, plan_hash, plan_to_dict, tunable_params
 from lab.plan import portfolio as pf
 from lab.plan import validate_plan as _validate_plan
-from lab.plan.schema import overlay_plan_json_schema
+from lab.plan.schema import HMM_FEATURE_NAMES, overlay_plan_json_schema
 from lab.plan.validator import PlanValidationError, format_errors
 from lab.registry import REGISTRY
 from lab.registry.derivatives import DERIVATIVES_FEATURES
@@ -123,6 +124,7 @@ from lab.research.family import (
 from lab.research.holdout import HoldoutRefusedError, run_holdout_check
 from lab.research.logic import canonical_space, logic_hash
 from lab.research.overlay_criteria import (
+    MAX_HMM_OVERLAY_LOGICS,
     N_OVERLAY_BASIS,
     check_overlay_untuned,
     evaluate_overlay_plan,
@@ -189,6 +191,13 @@ DERIVATIVES_GATE_NOTE = (
     "in long_exit"
 )
 
+HMM_GATE_NOTE = (
+    "causal regime filter (filtered probabilities only), not a direction signal: may only gate "
+    "long_entry as an `and` conjunct beside a price signal (e.g. close > ema_slow and "
+    "hmm_bear_prob < 0.5) or appear in an overlay's flat_when, never alone and never in "
+    "long_exit; lab.toml [regime.hmm] fixes its settings"
+)
+
 OVERLAY_NOTE = (
     'An overlay plan has "kind": "overlay" and answers the risk-overlay question only (start_run '
     'with question="risk_overlay"): buy-and-hold of one symbol, flat for the next bar whenever '
@@ -200,7 +209,8 @@ OVERLAY_NOTE = (
     "one published parameter set only, across every overlay run: another parameter set or a "
     "renamed copy of a submitted overlay logic, the same features with other parameters as an "
     "earlier overlay, and a logic already tuned in an edge run are refused before anything is "
-    "recorded; alike copies on other features make get_report's pbo_max fail."
+    "recorded; alike copies on other features make get_report's pbo_max fail. At most "
+    f"{MAX_HMM_OVERLAY_LOGICS} overlay logics across every overlay run may read an HMM feature."
 )
 OVERLAY_VALIDATE_NOTE = (
     'overlay plans run only in a risk-overlay run (start_run with question="risk_overlay") and '
@@ -242,6 +252,18 @@ its derivatives archive series + [derivatives] warmup_days, frozen with the run;
 length must fit in warmup_days (e.g. funding_zscore period <= 180 on 4h with 30 days).
 start_run freezes the derivatives archive per series; re-downloading or editing a series the
 plan reads, or a changed [derivatives] setting, needs a new run for such plans.
+HMM features (hmm_state, hmm_bear_prob; list_features role "gate") are causal regime filters,
+never direction signals: an `and` conjunct of long_entry beside a price signal
+(close > ema_slow and hmm_bear_prob < 0.5) or inside an overlay's flat_when, never alone and
+never in long_exit. Their settings are fixed in lab.toml [regime.hmm], never tuned, at most 2
+overlay logics across every overlay run may read one, and get_report's hmm_diagnostics shows how
+stable the bear label was, as information only.
+persist(<condition>, k) is true at a bar only when the condition held on each of the last k
+closed bars (persist(rsi < 30, 3)); k counts as a tunable parameter, and get_report's turnover
+block shows it beside trades and traded value per year, so its effect on cost drag can be read.
+get_report's episodes block (edge and overlay plans; lab.toml [episodes], never a holdout bar)
+compares the strategy with buy-and-hold in each named crash, as information only: not a
+criterion, not a trial.
 Portfolio plans ({"kind": "portfolio", ...}; list_features shows the schema): long-only top
 quantile of the lab.toml [universe] (point-in-time top-N coins by trailing dollar volume), same
 tools and budgets; min_trades counts filled rebalances; benchmarks are the equal-weight
@@ -294,6 +316,15 @@ class SpaceRange(TypedDict):
 
 
 # --------------------------------------------------------------------------- helpers
+
+
+def _gate_fields(feature: str) -> dict[str, str]:
+    """``list_features``' ``role`` and ``note`` for a filter-only feature, else nothing."""
+    if feature in DERIVATIVES_FEATURES:
+        return {"role": "gate", "note": DERIVATIVES_GATE_NOTE}
+    if feature in HMM_FEATURE_NAMES:
+        return {"role": "gate", "note": HMM_GATE_NOTE}
+    return {}
 
 
 def _portfolio_or_error(raw: Mapping[str, Any], cfg: LabConfig) -> tuple[pf.PortfolioPlan, str]:
@@ -588,11 +619,13 @@ def build_server(
         """Plans that read a derivatives column: the run's frozen derivatives snapshot of the
         series this plan reads (manifest entries, content on disk, staleness rule) must match
         the archive (:func:`lab.research.runs.check_derivatives_snapshot`). Checked before any
-        trial is recorded; plans without derivatives features skip it."""
-        if not plan_derivative_columns(plan):
-            return
+        trial is recorded; plans without derivatives features skip it. An HMM plan is refused
+        here too in a run that froze no HMM settings, so no plan tool can reach it."""
         try:
-            check_derivatives_snapshot(led, run_id, config, plan)
+            run = led.research_run(run_id)
+            require_frozen_hmm(plan, run["config"] if run else None, run_id=run_id)
+            if plan_derivative_columns(plan):
+                check_derivatives_snapshot(led, run_id, config, plan)
         except ValueError as exc:
             raise ToolError(str(exc)) from None
 
@@ -761,19 +794,15 @@ def build_server(
         Params: none.
         Example: list_features()
         Limits: free (no ledger trial, no budget). Features with "role": "gate" (funding,
-        premium, basis, open interest, long/short ratio) are exposure filters, not signals:
-        only an `and` conjunct of long_entry beside a price signal, never in long_exit
-        (overlay plans, for risk-overlay runs: anywhere in flat_when)."""
+        premium, basis, open interest, long/short ratio, hmm_state, hmm_bear_prob) are exposure
+        filters, not signals: only an `and` conjunct of long_entry beside a price signal, never
+        in long_exit (overlay plans, for risk-overlay runs: anywhere in flat_when)."""
         out: dict[str, Any] = {
             "features": [
                 {
                     "name": spec.name,
                     "description": spec.description,
-                    **(
-                        {"role": "gate", "note": DERIVATIVES_GATE_NOTE}
-                        if spec.name in DERIVATIVES_FEATURES
-                        else {}
-                    ),
+                    **_gate_fields(spec.name),
                     "outputs": list(spec.outputs),
                     "params": [
                         {
@@ -827,8 +856,10 @@ def build_server(
         "long_entry": "f > s", "long_exit": "f < s"})
         Limits: free (no ledger trial, no budget). No prices or levels: comparing a price- or
         volume-scale value with a fixed number (close > 50000) is rejected; use ratios or like
-        with like. A derivatives look-back must fit [derivatives] warmup_days. Portfolio plans
-        are validated on the universe interval; rebalance.offset is fixed at 0."""
+        with like. Rules may use persist(<condition>, k): true only when the condition held on
+        each of the last k closed bars; k counts as a tunable. A derivatives look-back must fit
+        [derivatives] warmup_days. Portfolio plans are validated on the universe interval;
+        rebalance.offset is fixed at 0."""
         if pf.is_portfolio_plan(plan):
             res = pf.validate_portfolio_plan(plan, interval=config.universe.interval)
             if res.plan is None:
@@ -1402,7 +1433,8 @@ def build_server(
         all trials, an upper bound, and random start-up trials) is information only, never
         pass/fail; dsr_min deflates with the nominal N. Derivatives plans add the ungated
         baseline as information only (not a criterion); portfolio plans add beat_equal_weight
-        and alpha-to-BTC rows."""
+        and alpha-to-BTC rows. Edge and overlay plans add episodes and turnover, information
+        only."""
         with open_ledger() as led:
             check_run(led, run_id)
             try:

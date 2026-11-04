@@ -102,6 +102,7 @@ __all__ = [
     "cost_multiples",
     "episode_comparison",
     "overlay_block",
+    "overlay_block_and_pair",
     "overlay_holdout_view",
 ]
 
@@ -584,6 +585,32 @@ def overlay_block(
     given, the 1x rerun must reproduce its returns (``ValueError`` otherwise). Raw numbers only;
     :func:`lab.research.overlay_criteria.evaluate_overlay_plan` judges them. Only design-window
     bars are loaded."""
+    block, _ = overlay_block_and_pair(
+        plan,
+        cfg=cfg,
+        ledger=ledger,
+        run_id=run_id,
+        loader=loader,
+        criteria=criteria,
+        seed=seed,
+        trial_id=trial_id,
+    )
+    return block
+
+
+def overlay_block_and_pair(
+    plan: Plan | Mapping[str, Any] | str,
+    *,
+    cfg: LabConfig,
+    ledger: Ledger,
+    run_id: str,
+    loader: CandleLoader,
+    criteria: OverlayCriteria,
+    seed: int = DEFAULT_SEED,
+    trial_id: int | None = None,
+) -> tuple[dict[str, Any], OverlayPair]:
+    """:func:`overlay_block` plus its 1x :class:`OverlayPair`, the same scored bars the
+    per-episode table reads (:mod:`lab.research.episodes`)."""
     p = plan if isinstance(plan, Plan) else parse_plan(plan)
     if p.kind != "overlay":
         raise ValueError(f"plan {p.name!r} is not an overlay plan (kind {p.kind!r})")
@@ -600,7 +627,7 @@ def overlay_block(
     if trial_id is not None:
         _check_ledgered(ledger, trial_id, base.overlay_returns)
     core, rows = _measure(pairs, p.interval, criteria, boot)
-    return {
+    block = {
         "version": OVERLAY_BLOCK_VERSION,
         "window": _window_json(scored, len(base.index)),
         "interval": p.interval,
@@ -625,6 +652,7 @@ def overlay_block(
         "wf_fixed": _wf_fixed(p, sig, history, scored, cfg, criteria, boot, multiples),
         "notes": list(NOTES),
     }
+    return block, base
 
 
 def overlay_holdout_view(

@@ -181,7 +181,7 @@ def write_candles(cfg: LabConfig, candles: pd.DataFrame) -> None:
 @pytest.fixture
 def disk_cfg(tmp_path: Path) -> LabConfig:
     base = small_cfg(tmp_path)
-    cfg = replace(base, derivatives=replace(base.derivatives, stale_after_intervals=2.0))
+    cfg = replace(base, derivatives=replace(base.derivatives, stale_after_intervals=2.0), hmm=None)
     write_candles(cfg, make_candles(120, seed=4, start="2024-02-01", price=40_000.0))
     write_all(cfg.derivatives_dir)
     return cfg

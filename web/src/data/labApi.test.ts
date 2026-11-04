@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   DEFAULT_DISCLAIMER,
+  LAB_HMM_TIMEOUT_MS,
   LAB_OFFLINE_MESSAGE,
+  LAB_TOO_OLD_FOR_HMM_MESSAGE,
   LabError,
   createLabClient,
   parseBacktestReport,
@@ -11,6 +13,7 @@ import {
   parseMetrics,
   parseRegimeResponse,
 } from './labApi'
+import type { RegimeRequest } from './labTypes'
 import type { FetchLike } from './persistence'
 
 interface Call {
@@ -402,6 +405,155 @@ describe('regime', () => {
     const { fetchImpl, calls } = fakeFetch(() => jsonResponse(200, answer))
     await createLabClient({ fetchImpl }).regime({ times: [1], closes: [1] })
     expect(calls[0].body).toEqual({ times: [1], closes: [1] })
+  })
+
+  describe('HMM source', () => {
+    const hmmAnswer = {
+      points: [
+        { time: 100, state: null, prob: null },
+        { time: 200, state: 1, prob: 0.8 },
+        { time: 300, state: -1, prob: 0.6 },
+      ],
+      model: 'hmm',
+      engine: 'lab.registry.hmm.causal_hmm',
+      n_states: 2,
+      warmup_bars: 3043,
+      bars_needed: 3043,
+      bars_have: 5000,
+    }
+    const request: RegimeRequest = {
+      times: [100, 200, 300],
+      closes: [1, 2, 3],
+      model: 'hmm',
+      symbol: 'BTCUSDT',
+      interval: '4h',
+    }
+
+    it('posts model, symbol and interval and parses probabilities and fit info', async () => {
+      const { fetchImpl, calls } = fakeFetch(() => jsonResponse(200, hmmAnswer))
+      const res = await createLabClient({ fetchImpl }).regime(request)
+      expect(calls[0]).toMatchObject({ url: '/lab/regime', method: 'POST' })
+      expect(calls[0].body).toEqual(request)
+      expect(res.points).toEqual(hmmAnswer.points)
+      expect(res.hmm).toEqual({
+        n_states: 2,
+        warmup_bars: 3043,
+        bars_needed: 3043,
+        bars_have: 5000,
+        unavailable: null,
+      })
+    })
+
+    it('carries the reason when the lab fitted nothing', async () => {
+      const reason = 'the BTCUSDT 4h archive ends 2026-03-31 20:00 UTC'
+      const { fetchImpl } = fakeFetch(() =>
+        jsonResponse(200, { ...hmmAnswer, unavailable: reason }),
+      )
+      const res = await createLabClient({ fetchImpl }).regime(request)
+      expect(res.hmm?.unavailable).toBe(reason)
+    })
+
+    it('fails when a lab running old code answers an HMM request with Markov labels', async () => {
+      const { fetchImpl } = fakeFetch(() => jsonResponse(200, answer))
+      const err = await createLabClient({ fetchImpl })
+        .regime(request)
+        .catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(LabError)
+      expect((err as LabError).message).toBe(LAB_TOO_OLD_FOR_HMM_MESSAGE)
+      expect((err as LabError).message).toMatch(/too old/)
+      expect((err as LabError).message).toMatch(/restart/)
+    })
+
+    it('marks a busy lab as busy, not as missing data', async () => {
+      const { fetchImpl } = fakeFetch(() =>
+        jsonResponse(503, { detail: 'another HMM fit is running', busy: true }),
+      )
+      await expect(createLabClient({ fetchImpl }).regime(request)).rejects.toMatchObject({
+        kind: 'busy',
+        status: 503,
+        message: 'another HMM fit is running',
+      })
+    })
+
+    it('a Markov answer carries no HMM fields', () => {
+      const res = parseRegimeResponse(answer)
+      expect(res).toEqual(answer)
+      expect('hmm' in res).toBe(false)
+      expect(res.points.every((p) => !('prob' in p))).toBe(true)
+    })
+
+    it('reads a state without a usable probability as no decision', () => {
+      const res = parseRegimeResponse({
+        ...hmmAnswer,
+        points: [
+          { time: 1, state: 1, prob: null },
+          { time: 2, state: 1 },
+          { time: 3, state: 1, prob: 1.5 },
+          { time: 4, state: 1, prob: 'x' },
+          { time: 5, state: 1, prob: 0 },
+        ],
+      })
+      expect(res.points.map((p) => p.state)).toEqual([null, null, null, null, 1])
+      expect(res.points.map((p) => p.prob)).toEqual([null, null, null, null, 0])
+    })
+
+    it('refuses an HMM answer without a usable state count', () => {
+      expect(() => parseRegimeResponse({ ...hmmAnswer, n_states: 1 })).toThrow(LabError)
+      expect(() => parseRegimeResponse({ ...hmmAnswer, n_states: undefined })).toThrow(LabError)
+    })
+
+    it('gets the long timeout; a Markov request keeps the short one', async () => {
+      expect(LAB_HMM_TIMEOUT_MS).toBe(180_000)
+      vi.useFakeTimers()
+      try {
+        const hang: FetchLike = (_url, init) =>
+          new Promise((_, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            )
+          })
+        const client = createLabClient({ fetchImpl: hang, timeoutMs: 10, hmmTimeoutMs: 100 })
+        const settled = (p: Promise<unknown>) => {
+          const state = { done: false }
+          p.catch(() => {
+            state.done = true
+          })
+          return state
+        }
+        const markov = settled(client.regime({ times: [1], closes: [1] }))
+        const hmm = settled(client.regime(request))
+        await vi.advanceTimersByTimeAsync(11)
+        expect(markov.done).toBe(true)
+        expect(hmm.done).toBe(false)
+        await vi.advanceTimersByTimeAsync(90)
+        expect(hmm.done).toBe(true)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('surfaces the lab refusal as the error message', async () => {
+      const { fetchImpl } = fakeFetch(() =>
+        jsonResponse(503, {
+          detail: 'the HMM ribbon is off: lab.toml has no [regime.hmm] settings',
+        }),
+      )
+      await expect(createLabClient({ fetchImpl }).regime(request)).rejects.toMatchObject({
+        kind: 'no-data',
+        message: 'the HMM ribbon is off: lab.toml has no [regime.hmm] settings',
+      })
+    })
+
+    it('surfaces a 422 with its field and reason', async () => {
+      const { fetchImpl } = fakeFetch(() =>
+        jsonResponse(422, {
+          errors: [{ path: 'interval', message: 'the HMM needs 1h bars or longer, got 5m' }],
+        }),
+      )
+      await expect(createLabClient({ fetchImpl }).regime(request)).rejects.toMatchObject({
+        message: 'interval: the HMM needs 1h bars or longer, got 5m',
+      })
+    })
   })
 
   it('reads unknown states as null, drops points without a time, and sorts by time', () => {

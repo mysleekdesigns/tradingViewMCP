@@ -18,7 +18,10 @@ run cannot interleave their trial counts.
 ``POST /lab/regime`` labels chart bars with hedgeFund's regime engine for the chart's regime
 ribbon. It is a display feature, not a trial: nothing is written to the ledger. Each label uses
 only closes at or before its bar (``lab.registry.regime.regime_labels``), so appending bars never
-changes an earlier label.
+changes an earlier label. With ``model = "hmm"`` the ribbon comes from the causal HMM instead
+(``hmm_regime``): the archive before the first posted bar is prepended for the training window,
+and only the posted bars are answered, each with the filtered probability of its state. Without
+an archive that reaches the chart nothing is fitted and ``unavailable`` says why.
 
 ``POST /lab/derivatives`` serves the chart's optional funding and open-interest panes from the
 lab's USD-M futures archive Parquet (``lab.data.derivatives``; historical only, no live futures
@@ -34,6 +37,8 @@ Results are historical and not forward-looking.
 
 from __future__ import annotations
 
+import logging
+import math
 import re
 import threading
 from collections.abc import AsyncIterator, Iterator
@@ -42,7 +47,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from itertools import pairwise
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -55,9 +60,11 @@ from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from lab.config import LabConfig, load_config
 from lab.data import derivatives as derivatives_data
 from lab.data.derivatives_align import METRICS_INTERVAL, METRICS_PUBLICATION_LAG, align_dataset
+from lab.data.store import load_candles
 from lab.engine import run_signals, run_weights
 from lab.ledger import Ledger
 from lab.plan import validate_plan
+from lab.plan.schema import MIN_HMM_INTERVAL_SECONDS
 from lab.plan.validator import PlanValidationError
 from lab.registry import REGISTRY
 from lab.registry.regime import REGIME_STATE, regime_labels
@@ -77,7 +84,7 @@ from lab.runner import (
     run_adversarial_report,
     run_backtest_report,
 )
-from lab.types import ZERO_COSTS
+from lab.types import INTERVAL_SECONDS, ZERO_COSTS
 
 __all__ = [
     "ALLOWED_HOSTS",
@@ -86,6 +93,7 @@ __all__ = [
     "app",
     "create_app",
     "derivatives_series",
+    "hmm_regime",
     "host_allowed",
     "main",
     "regime_points",
@@ -132,8 +140,12 @@ class RunBody(PlanBody):
     run_id: str = Field(default="ui", pattern=RUN_ID_PATTERN)
 
 
+_log = logging.getLogger(__name__)
+
 MAX_REGIME_BARS = 20_000
 REGIME_ENGINE = "hedgefund.regime.labels.label_regimes"
+HMM_ENGINE = "lab.registry.hmm.causal_hmm"
+HMM_WAIT_SECONDS = 2.0  # how long a request waits for a running fit before answering busy
 # Same bounds and defaults as the registry's regime_state feature.
 _REGIME_PARAMS = {p.name: p for p in REGIME_STATE.params}
 _REGIME_WINDOW = _REGIME_PARAMS["window_bars"]
@@ -149,6 +161,10 @@ class RegimeBody(BaseModel):
 
     times: list[Annotated[int, Field(strict=True)]] = Field(max_length=MAX_REGIME_BARS)
     closes: list[PositiveClose] = Field(max_length=MAX_REGIME_BARS)
+    model: Literal["markov", "hmm"] = "markov"
+    # Required for model "hmm" only (hmm_regime); Markov never reads them.
+    symbol: str | None = None
+    interval: str | None = None
     window_bars: int = Field(
         default=int(_REGIME_WINDOW.default),
         ge=int(_REGIME_WINDOW.low),
@@ -198,6 +214,183 @@ def regime_points(
 MAX_DERIVATIVES_BARS = MAX_REGIME_BARS
 SYMBOL_PATTERN = r"^[A-Z0-9]{2,30}$"
 MAX_UNIX_SECONDS = 4_102_444_800  # 2100-01-01; keeps bar times inside pandas' datetime range
+# Chart symbols, hyphen included (Coinbase's BTC-USD): the symbol becomes an archive folder name.
+HMM_SYMBOL_PATTERN = re.compile(r"[A-Z0-9-]{2,30}")
+
+
+def _hmm_request_errors(body: RegimeBody) -> list[dict[str, str]]:
+    """Why a ``model = "hmm"`` request cannot run, as field errors; empty when it can."""
+    errors: list[dict[str, str]] = []
+    if body.symbol is None:
+        errors.append({"path": "symbol", "message": "model hmm requires symbol"})
+    elif HMM_SYMBOL_PATTERN.fullmatch(body.symbol) is None:
+        errors.append({"path": "symbol", "message": f"invalid symbol {body.symbol!r}"})
+    if body.interval is None:
+        errors.append({"path": "interval", "message": "model hmm requires interval"})
+    else:
+        seconds = INTERVAL_SECONDS.get(body.interval)
+        minimum = f"{MIN_HMM_INTERVAL_SECONDS // 3600}h"
+        if seconds is None:
+            errors.append(
+                {
+                    "path": "interval",
+                    "message": (
+                        f"unknown interval {body.interval!r}; "
+                        f"expected one of {sorted(INTERVAL_SECONDS)}"
+                    ),
+                }
+            )
+        elif seconds < MIN_HMM_INTERVAL_SECONDS:
+            errors.append(
+                {
+                    "path": "interval",
+                    "message": f"the HMM needs {minimum} bars or longer, got {body.interval}",
+                }
+            )
+    if body.times and not 0 <= body.times[0] <= body.times[-1] <= MAX_UNIX_SECONDS:
+        errors.append({"path": "times", "message": "times must be UNIX seconds"})
+    return errors
+
+
+def _archive_prefix(
+    config: LabConfig, symbol: str, interval: str, first_time: int, last_time: int
+) -> tuple[pd.DataFrame | None, str | None]:
+    """Archive rows through the chart's last bar, or None and why they cannot be used.
+
+    The fit counts its refits from the first row it is given, so that row must not depend on how
+    far the chart has paged: the archive has to reach the chart's first bar, with no hole at the
+    join. Overlap is fine: rows from the first bar on only say which posted bars had no trades.
+    Rows after the last posted bar are not even read, so replay's cursor stays the end of the data.
+    """
+    first = pd.Timestamp(first_time, unit="s", tz="UTC")
+    missing = f"no {symbol} {interval} archive, which the HMM needs for its first bars"
+    if not (config.parquet_dir / symbol / interval).is_dir():
+        return None, missing
+    try:
+        candles = load_candles(
+            symbol,
+            interval,
+            parquet_dir=config.parquet_dir,
+            end=pd.Timestamp(last_time, unit="s", tz="UTC") + pd.Timedelta(seconds=1),
+        )
+    except ValueError as exc:
+        _log.warning("HMM ribbon: archive of %s %s not used: %s", symbol, interval, exc)
+        return None, missing
+    if candles.empty or candles.index[0] > first:
+        return None, f"the {symbol} {interval} archive starts after the chart's first bar"
+    # An archive row at or after the first bar means the chart overlaps it: any hole just before
+    # that row is the market's own, the same however far the chart has paged.
+    if (
+        candles.index[-1] < first
+        and (first - candles.index[-1]).total_seconds() > (INTERVAL_SECONDS[interval])
+    ):
+        return None, (
+            f"the {symbol} {interval} archive ends {candles.index[-1]:%Y-%m-%d %H:%M} UTC, "
+            f"the chart starts {first:%Y-%m-%d %H:%M} UTC"
+        )
+    return candles, None
+
+
+def hmm_regime(config: LabConfig, body: RegimeBody) -> Any:
+    """``POST /lab/regime`` with ``model = "hmm"``: the causal HMM's ribbon for the posted bars.
+
+    The chart loads far fewer bars than the training window, so the archive's rows strictly
+    before the first posted bar go in front of the posted closes; only posted bars are returned.
+    The chart sends closed bars and each output uses closes at or before its bar, so nothing is
+    back-dated. Fewer rows than ``bars_needed`` means every point is null. Without an archive
+    that reaches the chart (``_archive_prefix``) nothing is fitted: every point is null and
+    ``unavailable`` says why, because labels fitted on a series that starts wherever the chart
+    happens to start would change when the chart pages left. A bar the archive holds without
+    trades is not an observation (as in the lab's own load), posted or not, so a bar does not
+    change meaning when paging moves it from the posted rows to the prefix. Display only: no
+    ledger write.
+    """
+    errors = _hmm_request_errors(body)
+    if errors or body.symbol is None or body.interval is None:
+        return JSONResponse(status_code=422, content={"errors": errors})
+    settings = config.hmm
+    if settings is None:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "the HMM ribbon is off: lab.toml has no [regime.hmm] settings"},
+        )
+
+    def answer(points: list[dict[str, Any]], warmup_bars: int, bars_have: int) -> dict[str, Any]:
+        return {
+            "points": points,
+            "model": "hmm",
+            "engine": HMM_ENGINE,
+            "n_states": settings.n_states,
+            "warmup_bars": warmup_bars,
+            "bars_needed": settings.train_bars + settings.vol_window_bars + 1,
+            "bars_have": bars_have,
+        }
+
+    if not body.times:
+        return answer([], 0, 0)
+    archive, unavailable = _archive_prefix(
+        config, body.symbol, body.interval, body.times[0], body.times[-1]
+    )
+    if archive is None:
+        n = len(body.times)
+        points = [{"time": t, "state": None, "prob": None} for t in body.times]
+        return {**answer(points, n, n), "unavailable": unavailable}
+
+    posted = pd.Series(
+        np.asarray(body.closes, dtype=np.float64),
+        index=pd.to_datetime(np.asarray(body.times, dtype=np.int64), unit="s", utc=True),
+    )
+    prefix = archive[archive.index < posted.index[0]]
+    close = pd.concat([prefix["close"].astype(np.float64), posted]) if len(prefix) else posted
+    no_trades = archive.index[archive["volume"].to_numpy() <= 0]
+    observed = ~close.index.isin(no_trades)
+    # Lazy: only this path pulls in the HMM fit (hmmlearn), never a Markov request.
+    from lab.data.hmm_columns import HmmBusyError, hmm_series
+
+    try:
+        series = hmm_series(
+            close,
+            settings,
+            bar_seconds=INTERVAL_SECONDS[body.interval],
+            cache_dir=config.hmm_cache_dir,
+            wait_seconds=HMM_WAIT_SECONDS,
+            observed=observed,
+        )
+    except HmmBusyError:
+        # ``busy`` tells the chart to ask again instead of showing a failure.
+        return JSONResponse(
+            status_code=503, content={"detail": "another HMM fit is running", "busy": True}
+        )
+    except (ValueError, RuntimeError) as exc:  # RuntimeError: every Baum-Welch restart failed
+        return JSONResponse(status_code=503, content={"detail": f"HMM fit failed: {exc}"})
+    first = len(close) - len(posted)
+    return answer(
+        [
+            hmm_point(t, state, prob, settings.n_states)
+            for t, state, prob in zip(
+                body.times,
+                series.state[first:].tolist(),
+                series.state_prob[first:].tolist(),
+                strict=True,
+            )
+        ],
+        int(series.warmup_bars),
+        len(close),
+    )
+
+
+def hmm_point(time: int, state: float, prob: float, n_states: int) -> dict[str, Any]:
+    """One ribbon point: lowest state id -1, highest +1, any middle id 0; null without a decision.
+
+    ``prob`` is the filtered probability of ``state``. Non-finite values become null, so they
+    never reach the JSON answer.
+    """
+    if not (math.isfinite(state) and math.isfinite(prob)):
+        return {"time": time, "state": None, "prob": None}
+    ribbon = -1 if state == 0 else 1 if state == n_states - 1 else 0
+    return {"time": time, "state": ribbon, "prob": prob}
+
+
 DERIVATIVES_SOURCE = "data.binance.vision futures/um archive (historical; no live stream)"
 FUNDING_DATASET, FUNDING_VALUE = "fundingRate", "funding_rate"
 OI_DATASET, OI_VALUE = "metrics", "sum_open_interest_value"
@@ -419,7 +612,9 @@ def create_app(
         return {"ok": not errors, "errors": _errors_json(errors)}
 
     @app.post("/lab/regime")
-    def regime(body: RegimeBody) -> dict[str, Any]:
+    def regime(body: RegimeBody) -> Any:
+        if body.model == "hmm":
+            return hmm_regime(config, body)
         # Display only: no ledger write, no candle loading; labels only the bars the chart sent.
         return {
             "points": regime_points(body.times, body.closes, body.window_bars, body.threshold),

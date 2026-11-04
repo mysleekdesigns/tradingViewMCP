@@ -27,6 +27,27 @@ A gate fails CLOSED on a missing value: :mod:`lab.plan.expr` makes the whole ``l
 False at any bar where an operand is NaN, through ``not`` and ``or`` too, so
 ``close > ema_slow and not (fz > 2)`` cannot enter on a bar without funding data.
 
+Regime-model features (:data:`lab.plan.schema.HMM_FEATURE_NAMES`, PLAN.md Phase 20) follow the
+same rules 1-4 for a different reason: a regime model is a filter, never a direction signal
+(idea 13 killed the regime-as-signal family). A clause mixing them with derivatives features is
+still a gate clause, and :func:`gate_base_expressions` strips both kinds. They are refused at
+``features.<alias>`` on an interval below :data:`lab.plan.schema.MIN_HMM_INTERVAL_SECONDS`, in
+edge and overlay plans alike.
+
+An edge plan's regime gate must also be a level, so the entry cannot fire on a regime change:
+``long_entry`` may not read a regime-model alias across bars through ``crosses_above``,
+``crosses_below`` or ``prev``, nor through ``persist`` with k >= 2 under ``not``
+(``b < 0.5 and not persist(b < 0.5, 2)`` is the same series as ``b < 0.5 and prev(b, 1) >= 0.5``).
+A plain ``persist(gate, k)`` is a level: its windows nest, so it cannot mark a change without a
+negation. Overlays keep their freedom in ``flat_when``, and this rule is not applied to
+derivatives features.
+
+Each ``persist(condition, k)`` call counts as one tunable parameter toward the plan's limit
+(``MAX_FEATURE_PARAMS``, or ``MAX_OVERLAY_PARAMS`` for an overlay), beside the feature params.
+``k`` is a rule literal, not an Optuna tunable: :func:`tunable_params` does not list it and
+:func:`with_params` cannot set it. Its lineage goes through
+:func:`lab.research.logic.literal_vector`, like a threshold.
+
 Risk-overlay plans (``{"kind": "overlay", ...}``, PLAN.md Phase 15) are validated by the same
 entry points (:func:`validate_plan`, :func:`parse_plan`, :func:`checked_expressions`,
 :func:`with_params`), dispatched on ``kind``. An overlay is buy-and-hold of ONE symbol with one
@@ -35,10 +56,10 @@ invested (exposure 0 or 1 only, so there is no ``risk`` key and no ``long_entry`
 ``long_exit``). Registry features only, 1 to ``MAX_OVERLAY_FEATURES`` (3) features with at most
 ``MAX_OVERLAY_PARAMS`` (3) params in total, defaults included; the unit (no price or volume
 level) rules apply as for edge plans. The derivatives gating rules 1-4 above do NOT apply:
-derivatives features may appear anywhere in ``flat_when``, since crash-risk filtering is their
-stated role. Here a missing value fails OPEN to the base: a bar where ``flat_when`` is NaN is
-not flat (:func:`lab.plan.compile.compile_plan`), so a derivatives gap means buy-and-hold, never
-a hidden exit. The parsed :class:`lab.types.Plan` has ``kind="overlay"``,
+derivatives and regime-model features may appear anywhere in ``flat_when``, since gating
+exposure is their stated role. Here a missing value fails OPEN to the base: a bar where
+``flat_when`` is NaN is not flat (:func:`lab.plan.compile.compile_plan`), so a derivatives gap
+means buy-and-hold, never a hidden exit. The parsed :class:`lab.types.Plan` has ``kind="overlay"``,
 ``long_exit = flat_when``, ``long_entry = "not (flat_when)"`` and the default risk; edge plans
 and their canonical form (hence ``plan_hash``) are unchanged.
 """
@@ -53,13 +74,14 @@ import json
 import keyword
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
 from lab.plan.expr import FUNCTIONS, MAX_EXPR_CHARS, CheckedExpr, ExprScope, check_expression
 from lab.plan.schema import (
     ALIAS_PATTERN,
+    HMM_FEATURE_NAMES,
     MAX_DESCRIPTION_CHARS,
     MAX_FEATURE_PARAMS,
     MAX_FEATURES,
@@ -67,6 +89,7 @@ from lab.plan.schema import (
     MAX_OVERLAY_FEATURES,
     MAX_OVERLAY_PARAMS,
     MIN_FEATURES,
+    MIN_HMM_INTERVAL_SECONDS,
     OVERLAY_KIND,
     OVERLAY_REQUIRED_KEYS,
     OVERLAY_TOP_LEVEL_KEYS,
@@ -366,9 +389,10 @@ def _check_features(
     max_features: int = MAX_FEATURES,
     max_params: int = MAX_FEATURE_PARAMS,
     limit_note: str = "",
-) -> tuple[list[FeatureRef], ExprScope]:
-    """Feature refs and the expression scope. ``max_features`` / ``max_params`` default to the
-    edge-plan limits; overlays pass their own and a ``limit_note`` saying why."""
+) -> tuple[list[FeatureRef], ExprScope, dict[str, int]]:
+    """Feature refs, the expression scope, and alias -> param count. ``max_features`` /
+    ``max_params`` default to the edge-plan limits; overlays pass their own and a ``limit_note``
+    saying why."""
     refs: list[FeatureRef] = []
     single: set[str] = set(PRICE_INPUTS)
     multi: dict[str, tuple[str, ...]] = {}
@@ -377,7 +401,7 @@ def _check_features(
     names = sorted(registry)
     scope_reg = frozenset(names)
     if "features" not in raw:
-        return refs, ExprScope(frozenset(single), multi, frozenset(), scope_reg)
+        return refs, ExprScope(frozenset(single), multi, frozenset(), scope_reg), {}
     feats = raw["features"]
     example = '{"ema_fast": {"ema": {"period": 20}}}'
     if not isinstance(feats, Mapping):
@@ -388,7 +412,7 @@ def _check_features(
                 f"got {_type_name(feats)}",
             )
         )
-        return refs, ExprScope(frozenset(single), multi, frozenset(), scope_reg)
+        return refs, ExprScope(frozenset(single), multi, frozenset(), scope_reg), {}
     if not MIN_FEATURES <= len(feats) <= max_features:
         errors.append(
             PlanError(
@@ -505,7 +529,8 @@ def _check_features(
                 "with fewer params",
             )
         )
-    return refs, ExprScope(frozenset(single), multi, frozenset(lenient), scope_reg, scales)
+    scope = ExprScope(frozenset(single), multi, frozenset(lenient), scope_reg, scales)
+    return refs, scope, param_counts
 
 
 def _check_risk(raw: Mapping[str, Any], errors: list[PlanError]) -> RiskSpec:
@@ -580,7 +605,67 @@ def _check_risk(raw: Mapping[str, Any], errors: list[PlanError]) -> RiskSpec:
     )
 
 
-# --------------------------------------------------------------------------- derivatives gates
+def _is_persist(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "persist"
+    )
+
+
+def is_unit_persist(node: ast.AST) -> bool:
+    """``persist(c, 1)``: the same rule as ``c``."""
+    return (
+        isinstance(node, ast.Call)
+        and _is_persist(node)
+        and len(node.args) == 2
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == 1
+    )
+
+
+def _persist_calls(node: ast.AST) -> list[ast.Call]:
+    """Every ``persist(...)`` call inside ``node``, nested ones included. Walks by hand: this runs
+    on every plan and ``ast.walk`` imports at call time, which validation must never do."""
+    found: list[ast.Call] = []
+    stack: list[ast.AST] = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, ast.Call) and _is_persist(cur):
+            found.append(cur)
+        stack.extend(ast.iter_child_nodes(cur))
+    return found
+
+
+def _check_persist_budget(
+    rules: Mapping[str, tuple[str, ast.expr] | None],
+    param_counts: Mapping[str, int],
+    max_params: int,
+    limit_note: str,
+    errors: list[PlanError],
+) -> None:
+    """Feature params plus ``persist`` calls must fit the plan's tunable limit. ``rules`` maps a
+    rule key to its :func:`_parsed` result, so an invalid rule's calls still count. Plans with no
+    ``persist`` add nothing here: :func:`_check_features` has already judged their params."""
+    calls = {key: len(_persist_calls(rule[1])) for key, rule in rules.items() if rule is not None}
+    n_calls = sum(calls.values())
+    params = sum(param_counts.values())
+    if n_calls == 0 or params + n_calls <= max_params:
+        return
+    detail = ", ".join(f"{a}: {n}" for a, n in param_counts.items()) or "none"
+    where = ", ".join(f"{key}: {n}" for key, n in calls.items() if n)
+    errors.append(
+        PlanError(
+            "features",
+            f"this plan has {params + n_calls} tunable parameters: {params} feature params "
+            f"({detail}), defaults included, plus {n_calls} `persist` call(s) ({where}), each "
+            f"of which counts as one; the limit is {max_params}{limit_note}. Remove a `persist` "
+            "or drop a feature",
+        )
+    )
+
+
+# --------------------------------------------------------------------------- gate features
+
+REGIME_RULE = "a regime model is a filter, never a direction signal"
 
 # Example thresholds for error messages only (each feature's natural scale), not suggestions.
 _GATE_EXAMPLES: Mapping[str, str] = {
@@ -590,13 +675,15 @@ _GATE_EXAMPLES: Mapping[str, str] = {
     "basis_pct": "< 0.1",
     "oi_change": "< 10",
     "long_short_ratio": "< 2",
+    "hmm_state": "> 0",
+    "hmm_bear_prob": "< 0.5",
 }
 
 
-def _derivative_aliases(
-    raw: Mapping[str, Any], registry: Mapping[str, FeatureSpec]
+def _aliases_of(
+    raw: Mapping[str, Any], registry: Mapping[str, FeatureSpec], features: Collection[str]
 ) -> dict[str, str]:
-    """alias -> derivatives feature name for every derivatives feature the plan defines."""
+    """alias -> feature name for every plan feature named in ``features``."""
     feats = raw.get("features")
     if not isinstance(feats, Mapping):
         return {}
@@ -605,9 +692,26 @@ def _derivative_aliases(
         if not isinstance(alias, str) or not isinstance(value, Mapping) or len(value) != 1:
             continue
         ((fname, _params),) = value.items()
-        if isinstance(fname, str) and fname in DERIVATIVES_FEATURES and fname in registry:
+        if isinstance(fname, str) and fname in features and fname in registry:
             out[alias] = fname
     return out
+
+
+def _check_hmm_interval(interval: str, hmm: Mapping[str, str], errors: list[PlanError]) -> None:
+    """Refuse regime-model features on bars shorter than the model's minimum."""
+    seconds = INTERVAL_SECONDS.get(interval)
+    if seconds is None or seconds >= MIN_HMM_INTERVAL_SECONDS:
+        return
+    minimum = f"{MIN_HMM_INTERVAL_SECONDS // 3_600}h"
+    for alias, fname in hmm.items():
+        errors.append(
+            PlanError(
+                f"features.{alias}",
+                f"`{fname}` needs bars of {minimum} or longer, got interval {interval!r}: the "
+                f"regime model is not run below {minimum}. Use an interval of at least "
+                f"{minimum}, e.g. 4h, or remove this feature",
+            )
+        )
 
 
 def _conjuncts(node: ast.expr) -> list[ast.expr]:
@@ -618,6 +722,28 @@ def _conjuncts(node: ast.expr) -> list[ast.expr]:
             out.extend(_conjuncts(value))
         return out
     return [node]
+
+
+# Each of these compares a value with its own past, which turns a level into a change detector.
+_CHANGE_CALLS: tuple[str, ...] = ("crosses_above", "crosses_below", "prev")
+
+
+def _regime_change_reads(
+    node: ast.AST, hmm: Mapping[str, str], negated: bool = False
+) -> list[ast.Call]:
+    """Outermost calls under ``node`` that read a regime-model alias across bars, source order:
+    a :data:`_CHANGE_CALLS` call, or a ``persist`` with k >= 2 under an odd number of ``not``."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        negated = not negated
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and _names(node) & hmm.keys():
+        held_negated = negated and _is_persist(node) and not is_unit_persist(node)
+        if node.func.id in _CHANGE_CALLS or held_negated:
+            return [node]
+    return [
+        call
+        for child in ast.iter_child_nodes(node)
+        for call in _regime_change_reads(child, hmm, negated)
+    ]
 
 
 def _names(node: ast.AST) -> set[str]:
@@ -652,30 +778,45 @@ def _parsed(checked: CheckedExpr | None, source: object) -> tuple[str, ast.expr]
         return None
 
 
-def _check_derivative_gates(
+def _check_gates(
     entry: tuple[str, ast.expr] | None,
     exit_: tuple[str, ast.expr] | None,
     drv: Mapping[str, str],
+    hmm: Mapping[str, str],
     errors: list[PlanError],
 ) -> None:
-    """Rules 1-3 of the module docstring: derivatives features only gate a long entry.
+    """Rules 1-3 of the module docstring: gate features (derivatives, regime model) only gate a
+    long entry. Each family's errors state that family's own rule.
 
     ``entry`` / ``exit_`` are ``(source text, parsed body)`` from :func:`_parsed`."""
-    if not drv:
+    gates = {**drv, **hmm}
+    if not gates:
         return
     if exit_ is not None:
-        used = _names(exit_[1]) & drv.keys()
-        if used:
+        used = _names(exit_[1]) & gates.keys()
+        used_drv, used_hmm = used & drv.keys(), used & hmm.keys()
+        if used_drv:
             errors.append(
                 PlanError(
                     "long_exit",
-                    f"uses derivatives feature(s) {_listing(used, drv)}; each is an "
+                    f"uses derivatives feature(s) {_listing(used_drv, gates)}; each is an "
                     f"{FILTER_NOTE}, allowed only as a gating `and` clause of long_entry. In "
                     "long_exit a missing derivatives value (an archive gap or a bar before its "
                     "first record) makes the whole expression False at that bar, which would "
                     "suppress the price exit and keep the position open. Write long_exit with "
                     "price inputs and non-derivatives features only, and gate the entry instead, "
-                    f"e.g. {_gate_example(min(used), drv)}",
+                    f"e.g. {_gate_example(min(used_drv), gates)}",
+                )
+            )
+        if used_hmm:
+            errors.append(
+                PlanError(
+                    "long_exit",
+                    f"uses regime-model feature(s) {_listing(used_hmm, gates)}; {REGIME_RULE}, "
+                    "so it may gate exposure only: an overlay's `flat_when`, or a gating `and` "
+                    "clause of long_entry, never long_exit. Write long_exit with price inputs and "
+                    f"non-gate features only, and gate the entry instead, e.g. "
+                    f"{_gate_example(min(used_hmm), gates)}",
                 )
             )
     if entry is None:
@@ -685,49 +826,102 @@ def _check_derivative_gates(
     source, body = entry
     for clause in _conjuncts(body):
         names = _names(clause)
-        used = names & drv.keys()
+        used = names & gates.keys()
         if not used:
             signal_clause = True
             continue
-        others = names - drv.keys()
+        others = names - gates.keys()
         if not others:
-            continue  # a pure derivatives gate: allowed
+            continue  # a pure gate clause: allowed, whichever gate families it mixes
         mixed = True
         text = ast.get_source_segment(source, clause) or source
-        errors.append(
-            PlanError(
-                "long_entry",
-                f"`{text}` combines derivatives feature(s) {_listing(used, drv)} with "
-                f"{_listing(others, drv)} in one clause; a derivatives feature is an "
-                f"{FILTER_NOTE}, so it may appear only in its own top-level `and` clause, "
-                "compared with numbers or other derivatives features (not inside an `or`, and "
-                "not compared with or computed from prices or other features). Split it, e.g. "
-                f"{_gate_example(min(used), drv)}",
-            )
-        )
-    if signal_clause and not mixed:
-        trivial = _constant_true_clauses(source, body, drv)
-        if trivial is not None:
-            used = _names(body) & drv.keys()
+        used_drv, used_hmm = used & drv.keys(), used & hmm.keys()
+        if used_drv:
             errors.append(
                 PlanError(
                     "long_entry",
-                    f"its price clause(s) {', '.join(f'`{t}`' for t in trivial)} are true on "
-                    "every bar, so the derivatives gate(s) "
-                    f"{_listing(used, drv)} would be the de-facto entry signal; each is an "
-                    f"{FILTER_NOTE}. Replace the always-true clause with a real price signal "
-                    f"that selects bars on its own, e.g. {_gate_example(min(used), drv)}",
+                    f"`{text}` combines derivatives feature(s) {_listing(used_drv, gates)} with "
+                    f"{_listing(others, gates)} in one clause; a derivatives feature is an "
+                    f"{FILTER_NOTE}, so it may appear only in its own top-level `and` clause, "
+                    "compared with numbers or other derivatives features (not inside an `or`, "
+                    "and not compared with or computed from prices or other features). Split "
+                    f"it, e.g. {_gate_example(min(used_drv), gates)}",
                 )
             )
+        if used_hmm:
+            errors.append(
+                PlanError(
+                    "long_entry",
+                    f"`{text}` combines regime-model feature(s) {_listing(used_hmm, gates)} with "
+                    f"{_listing(others, gates)} in one clause; {REGIME_RULE}, so it may appear "
+                    "only in its own top-level `and` clause, compared with numbers or other gate "
+                    "features (not inside an `or`, and not compared with or computed from prices "
+                    f"or other features). Split it, e.g. {_gate_example(min(used_hmm), gates)}",
+                )
+            )
+    if signal_clause and not mixed:
+        trivial = _constant_true_clauses(source, body, gates)
+        if trivial is not None:
+            used = _names(body) & gates.keys()
+            clauses = ", ".join(f"`{t}`" for t in trivial)
+            used_drv, used_hmm = used & drv.keys(), used & hmm.keys()
+            if used_drv:
+                errors.append(
+                    PlanError(
+                        "long_entry",
+                        f"its price clause(s) {clauses} are true on "
+                        "every bar, so the derivatives gate(s) "
+                        f"{_listing(used_drv, gates)} would be the de-facto entry signal; each "
+                        f"is an {FILTER_NOTE}. Replace the always-true clause with a real price "
+                        f"signal that selects bars on its own, e.g. "
+                        f"{_gate_example(min(used_drv), gates)}",
+                    )
+                )
+            if used_hmm:
+                errors.append(
+                    PlanError(
+                        "long_entry",
+                        f"its price clause(s) {clauses} are true on every bar, so the "
+                        f"regime-model gate(s) {_listing(used_hmm, gates)} would be the de-facto "
+                        f"entry signal; {REGIME_RULE}. Replace the always-true clause with a "
+                        "real price signal that selects bars on its own, e.g. "
+                        f"{_gate_example(min(used_hmm), gates)}",
+                    )
+                )
     if not signal_clause and not mixed:
-        used = _names(body) & drv.keys()
+        used = _names(body) & gates.keys()
+        used_drv, used_hmm = used & drv.keys(), used & hmm.keys()
+        if used_drv:
+            errors.append(
+                PlanError(
+                    "long_entry",
+                    f"uses only derivatives feature(s) {_listing(used_drv, gates)}; each is an "
+                    f"{FILTER_NOTE}, so it cannot be the entry signal on its own. Add a "
+                    "top-level `and` clause built from price inputs or non-derivatives features, "
+                    f"e.g. {_gate_example(min(used_drv), gates)}",
+                )
+            )
+        if used_hmm:
+            errors.append(
+                PlanError(
+                    "long_entry",
+                    f"uses only regime-model feature(s) {_listing(used_hmm, gates)}; "
+                    f"{REGIME_RULE}, so it cannot be the entry signal on its own. Add a "
+                    "top-level `and` clause built from price inputs or non-gate features, e.g. "
+                    f"{_gate_example(min(used_hmm), gates)}",
+                )
+            )
+    for call in _regime_change_reads(body, hmm):
+        text = ast.get_source_segment(source, call) or ast.unparse(call)
+        where = " under `not`" if _is_persist(call) else ""
+        read = _names(call) & hmm.keys()
         errors.append(
             PlanError(
                 "long_entry",
-                f"uses only derivatives feature(s) {_listing(used, drv)}; each is an "
-                f"{FILTER_NOTE}, so it cannot be the entry signal on its own. Add a top-level "
-                "`and` clause built from price inputs or non-derivatives features, e.g. "
-                f"{_gate_example(min(used), drv)}",
+                f"`{text}`{where} reads regime-model feature(s) {_listing(read, gates)} across "
+                f"bars, so the entry would fire on a regime change; {REGIME_RULE}, so a gate must "
+                "be a level. Compare the current value, or require that it held with a plain "
+                f"`persist(condition, k)`, e.g. {_gate_example(min(read), gates)}",
             )
         )
 
@@ -740,8 +934,11 @@ _CANDLE_PRICES = frozenset({"open", "high", "low", "close"})
 def _always_true_compare(node: ast.expr) -> bool:
     """A single ``a >= b`` / ``a <= b`` that is true on every bar where it is defined: the same
     operand on both sides (``close >= close``), or a candle identity (``high >= low``,
-    ``close <= high``, ``low <= open``). Static and cheap; the runner's data check
+    ``close <= high``, ``low <= open``), also when wrapped in ``persist``, which only asks that
+    the condition keep holding. Static and cheap; the runner's data check
     (``lab.runner.check_gate_base``) is the real guard."""
+    if isinstance(node, ast.Call) and _is_persist(node) and node.args:
+        return all(_always_true_compare(c) for c in _conjuncts(node.args[0]))
     if not isinstance(node, ast.Compare) or len(node.ops) != 1:
         return False
     op, left, right = node.ops[0], node.left, node.comparators[0]
@@ -757,10 +954,12 @@ def _always_true_compare(node: ast.expr) -> bool:
     return False
 
 
-def _constant_true_clauses(source: str, body: ast.expr, drv: Mapping[str, str]) -> list[str] | None:
-    """The text of every derivatives-free top-level ``and`` clause of ``long_entry`` when ALL of
-    them are statically always true (so the gate is the only selector); None otherwise."""
-    free = [c for c in _conjuncts(body) if not (_names(c) & drv.keys())]
+def _constant_true_clauses(
+    source: str, body: ast.expr, gates: Mapping[str, str]
+) -> list[str] | None:
+    """The text of every gate-free top-level ``and`` clause of ``long_entry`` when ALL of them
+    are statically always true (so the gate is the only selector); None otherwise."""
+    free = [c for c in _conjuncts(body) if not (_names(c) & gates.keys())]
     if not free or not all(_always_true_compare(c) for c in free):
         return None
     return [ast.get_source_segment(source, c) or ast.unparse(c) for c in free]
@@ -807,7 +1006,9 @@ def _validate(raw: Mapping[str, Any] | str, registry: Mapping[str, FeatureSpec])
     description = _check_description(obj, errors)
     symbol = _check_symbol(obj, errors)
     interval = _check_interval(obj, errors)
-    refs, scope = _check_features(obj, registry, errors)
+    refs, scope, param_counts = _check_features(obj, registry, errors)
+    hmm = _aliases_of(obj, registry, HMM_FEATURE_NAMES)
+    _check_hmm_interval(interval, hmm, errors)
     entry: CheckedExpr | None = None
     exit_: CheckedExpr | None = None
     if "long_entry" in obj:
@@ -816,10 +1017,20 @@ def _validate(raw: Mapping[str, Any] | str, registry: Mapping[str, FeatureSpec])
     if "long_exit" in obj:
         exit_, errs = check_expression(obj["long_exit"], scope, "long_exit")
         errors.extend(errs)
-    _check_derivative_gates(
-        _parsed(entry, obj.get("long_entry")),
-        _parsed(exit_, obj.get("long_exit")),
-        _derivative_aliases(obj, registry),
+    parsed_entry = _parsed(entry, obj.get("long_entry"))
+    parsed_exit = _parsed(exit_, obj.get("long_exit"))
+    _check_persist_budget(
+        {"long_entry": parsed_entry, "long_exit": parsed_exit},
+        param_counts,
+        MAX_FEATURE_PARAMS,
+        "",
+        errors,
+    )
+    _check_gates(
+        parsed_entry,
+        parsed_exit,
+        _aliases_of(obj, registry, DERIVATIVES_FEATURES),
+        hmm,
         errors,
     )
     risk = _check_risk(obj, errors)
@@ -931,6 +1142,7 @@ def _negated(expr: CheckedExpr) -> CheckedExpr:
         max_prev=expr.max_prev,
         uses_cross=expr.uses_cross,
         refs=expr.refs,
+        persist_ks=expr.persist_ks,
     )
 
 
@@ -951,7 +1163,7 @@ def _validate_overlay(raw: Mapping[str, Any], registry: Mapping[str, FeatureSpec
     else:
         symbol = _check_symbol(raw, errors)
     interval = _check_interval(raw, errors)
-    refs, scope = _check_features(
+    refs, scope, param_counts = _check_features(
         raw,
         registry,
         errors,
@@ -959,10 +1171,18 @@ def _validate_overlay(raw: Mapping[str, Any], registry: Mapping[str, FeatureSpec
         max_params=MAX_OVERLAY_PARAMS,
         limit_note=_OVERLAY_LIMIT_NOTE,
     )
+    _check_hmm_interval(interval, _aliases_of(raw, registry, HMM_FEATURE_NAMES), errors)
     flat: CheckedExpr | None = None
     if "flat_when" in raw:
         flat, errs = check_expression(raw["flat_when"], scope, "flat_when")
         errors.extend(errs)
+    _check_persist_budget(
+        {"flat_when": _parsed(flat, raw.get("flat_when"))},
+        param_counts,
+        MAX_OVERLAY_PARAMS,
+        _OVERLAY_LIMIT_NOTE,
+        errors,
+    )
     if flat is not None:
         used = {r.split(".", 1)[0] for r in flat.refs}
         for ref in refs:
@@ -1075,25 +1295,26 @@ def checked_expressions(
 def gate_base_expressions(
     plan: Plan, registry: Mapping[str, FeatureSpec] | None = None
 ) -> tuple[CheckedExpr, CheckedExpr] | None:
-    """``(base, not base)`` for a plan with derivatives gates: ``base`` is the conjunction of the
-    top-level ``and`` clauses of ``long_entry`` that read NO derivatives feature (the price
-    signal on its own), built from the already-checked entry tree (no new parse, no length
-    limit). Evaluate both with :func:`lab.plan.expr.evaluate_expression`: a bar where ``base``
-    is defined is True in exactly one of them (NaN makes both False). None when the plan uses no
-    derivatives feature or has no derivatives-free clause, and always None for a risk overlay
-    (its ``flat_when`` may use derivatives features freely; there is no gate to strip)."""
+    """``(base, not base)`` for a plan with gate features: ``base`` is the conjunction of the
+    top-level ``and`` clauses of ``long_entry`` that read NO derivatives or regime-model feature
+    (the price signal on its own), built from the already-checked entry tree (no new parse, no
+    length limit). Evaluate both with :func:`lab.plan.expr.evaluate_expression`: a bar where
+    ``base`` is defined is True in exactly one of them (NaN makes both False). None when the plan
+    uses no gate feature or has no gate-free clause, and always None for a risk overlay (its
+    ``flat_when`` may use gate features freely; there is no gate to strip)."""
     if plan.kind == OVERLAY_KIND:
         return None
     reg = resolve_registry(registry)
-    drv = {
+    gates = {
         ref.alias: ref.feature
         for ref in plan.features
-        if ref.feature in DERIVATIVES_FEATURES and ref.feature in reg
+        if (ref.feature in DERIVATIVES_FEATURES or ref.feature in HMM_FEATURE_NAMES)
+        and ref.feature in reg
     }
-    if not drv:
+    if not gates:
         return None
     entry, _ = checked_expressions(plan, reg)
-    clauses = [c for c in _conjuncts(entry.tree.body) if not (_names(c) & drv.keys())]
+    clauses = [c for c in _conjuncts(entry.tree.body) if not (_names(c) & gates.keys())]
     if not clauses:
         return None
     texts = [ast.get_source_segment(entry.source, c) or ast.unparse(c) for c in clauses]
@@ -1108,6 +1329,9 @@ def gate_base_expressions(
         "max_prev": entry.max_prev,
         "uses_cross": entry.uses_cross,
         "refs": entry.refs,
+        "persist_ks": tuple(
+            ast.literal_eval(call.args[1]) for clause in clauses for call in _persist_calls(clause)
+        ),
     }
     base = CheckedExpr(source=source, tree=ast.Expression(body=body), **common)
     negated = CheckedExpr(

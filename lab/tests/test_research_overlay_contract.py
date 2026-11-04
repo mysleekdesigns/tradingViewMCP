@@ -315,7 +315,7 @@ def test_overlay_run_freezes_question_rows_budget_and_file_sha(
     assert run["config_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
     assert config["lab"] == lab_fingerprint(small_cfg(tmp_path))
     assert config["software"] == software_values()
-    assert set(config) - {"derivatives", "universe_manifest"} == {
+    assert set(config) - {"derivatives", "universe_manifest", "hmm", "episodes"} == {
         "question",
         "overlay_criteria",
         "budget",
@@ -339,7 +339,11 @@ def test_edge_run_config_is_exactly_the_pre_phase_15_shape(ledger: Ledger, tmp_p
     expected = json.loads(research.to_json())
     expected["lab"] = lab_fingerprint(cfg)
     expected["software"] = software_values()
-    got = {k: v for k, v in run["config"].items() if k not in ("derivatives", "universe_manifest")}
+    got = {
+        k: v
+        for k, v in run["config"].items()
+        if k not in ("derivatives", "universe_manifest", "hmm", "episodes")
+    }
     assert got == expected
     assert set(json.loads(research.to_json())) == {"criteria", "budget"}
     assert "question" not in run["config"] and "overlay_criteria" not in run["config"]

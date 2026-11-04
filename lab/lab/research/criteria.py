@@ -91,6 +91,12 @@ CPCV test bar included) and ``cpcv_startup`` over only the sampler's random star
 When ``dsr_min`` does not pass and the design window is below MinTRL or MinBTL, its note
 states "design window too short".
 
+Episodes and turnover (information only, never a row, never pass/fail): the report's ``episodes``
+and ``turnover`` blocks (:func:`lab.research.episodes.report_blocks`) read the recorded backtest
+evidence, so nothing re-runs here. When the table has no row and the plan has no ``persist``, the
+report keeps its earlier shape. Portfolio plans carry one ``episodes_note`` line instead. A plan
+with an HMM feature also shows ``hmm_diagnostics``, the same way and with the same standing.
+
 Risk-overlay runs (PLAN.md Phase 15) are judged by :mod:`lab.research.overlay_criteria`, which
 reuses the holdout and cross-check rows here (:func:`holdout_row`, :func:`crosscheck_row`) and
 adds the ``"not_testable"`` status (never a pass). Their trials COUNT in this module's N like any
@@ -120,6 +126,7 @@ from lab.plan.validator import PlanValidationError
 from lab.registry.regime import BEAR, BULL, regime_labels
 from lab.report import num, seconds
 from lab.research.contract import DSR_EFFECTIVE_REFUSED, DSR_TRIAL_COUNTS, SuccessCriteria
+from lab.research.episodes import nothing_to_read, portfolio_blocks, report_blocks
 from lab.research.family import (
     FamilyInfo,
     behaviour_family,
@@ -209,6 +216,11 @@ class CriteriaReport(TypedDict):
     # information only, never pass/fail (:func:`plan_statistics`): nominal N, the effective-N
     # diagnostic and its null, MinBTL, MinTRL and the CPCV path distributions
     statistics: NotRequired[dict[str, Any]]
+    # information only, never pass/fail (lab.research.episodes.report_blocks)
+    episodes: NotRequired[dict[str, Any] | None]
+    episodes_note: NotRequired[str]  # beside a null ``episodes``: why there is no table
+    turnover: NotRequired[dict[str, Any]]
+    hmm_diagnostics: NotRequired[dict[str, Any]]  # plans with an HMM feature only
 
 
 # --------------------------------------------------------------------------- regimes
@@ -1590,7 +1602,8 @@ def evaluate_plan(
     from lab.research import portfolio_criteria as pc  # lazy: it imports this module
 
     if pc.is_portfolio_evidence(ledger, run_id, plan_hash, bt):
-        return pc.evaluate_portfolio_plan(ledger, run_id, plan_hash, cfg, c, loader=loader)
+        report = pc.evaluate_portfolio_plan(ledger, run_id, plan_hash, cfg, c, loader=loader)
+        return CriteriaReport(**{**report, **portfolio_blocks()})
     drv_plan = _derivatives_plan(ledger, run_id, plan_hash, bt)
     if drv_plan is not None:
         # the run's frozen snapshot of the series this plan reads must still be the data on
@@ -1643,7 +1656,8 @@ def evaluate_plan(
     ungated = ungated_baseline(bt)
     if ungated is not None:  # derivatives plans only; never a row, never pass/fail
         out["informational"] = {"ungated_baseline": ungated}
-    return out
+    blocks = report_blocks(bt)
+    return out if nothing_to_read(blocks) else CriteriaReport(**{**out, **blocks})
 
 
 _BASELINE_KEYS = ("sharpe", "total_return", "max_drawdown", "n_trades", "exposure")

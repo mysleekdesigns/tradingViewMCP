@@ -14,8 +14,10 @@ It is the sha256 of canonical JSON of:
   of the parsed expression), then the unreferenced features by feature name;
 * ``long_entry`` / ``long_exit`` as parsed ASTs (``lab.plan``'s whitelisted parser) with the
   aliases renamed and every numeric literal replaced by a placeholder, so whitespace, alias
-  names, thresholds (``rsi < 30`` vs ``rsi < 25``) and ``prev`` lags are irrelevant: a literal
-  in a rule is a tuned number just like a feature param, and re-tuning it is not a new idea;
+  names, thresholds (``rsi < 30`` vs ``rsi < 25``), ``prev`` lags and ``persist`` bar counts are
+  irrelevant: a literal in a rule is a tuned number just like a feature param, and re-tuning it
+  is not a new idea. ``persist(c, 1)`` is the same rule as ``c``, so it is first replaced by ``c``
+  (:func:`lab.plan.validator.is_unit_persist`) and its ``k`` is not a literal of the plan;
 * which risk keys are set (``stop_loss_pct`` / ``take_profit_pct``), not their values.
 
 Excluded: name, description, interval, feature param values, risk values. Changing an operator,
@@ -43,7 +45,7 @@ from typing import Any
 
 from lab.plan import checked_expressions, parse_plan
 from lab.plan import portfolio as pf
-from lab.plan.validator import PlanValidationError
+from lab.plan.validator import PlanValidationError, is_unit_persist
 from lab.types import Plan, PlanError
 
 __all__ = [
@@ -80,9 +82,17 @@ def _source_order(node: ast.AST) -> Iterator[ast.AST]:
         yield from _source_order(child)
 
 
+class _UnwrapUnitPersist(ast.NodeTransformer):
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        return node.args[0] if is_unit_persist(node) else node
+
+
 def _trees(plan: Plan) -> tuple[ast.Expression, ast.Expression]:
+    """The plan's rules in logic form; copies, so the checked trees stay intact."""
     entry, exit_ = checked_expressions(plan)
-    return entry.tree, exit_.tree
+    unwrap = _UnwrapUnitPersist()
+    return unwrap.visit(copy.deepcopy(entry.tree)), unwrap.visit(copy.deepcopy(exit_.tree))
 
 
 def alias_map(plan: Plan | Mapping[str, Any] | str) -> dict[str, str]:
@@ -230,8 +240,8 @@ def _literals(tree: ast.AST) -> list[float]:
 def literal_vector(plan: Plan | Mapping[str, Any] | str) -> tuple[float, ...]:
     """Every numeric literal of ``long_entry`` then ``long_exit`` in source order (the
     positions :func:`logic_hash` replaces with a placeholder, so two plans of one logic have
-    vectors of the same length): thresholds and ``prev`` lags, i.e. the rule numbers a
-    walk-forward cannot search."""
+    vectors of the same length): thresholds, ``prev`` lags and ``persist`` bar counts, i.e. the
+    rule numbers a walk-forward cannot search."""
     p = _as_plan(plan)
     entry, exit_ = _trees(p)
     return (*_literals(entry), *_literals(exit_))

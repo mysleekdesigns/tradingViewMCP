@@ -1258,16 +1258,16 @@ Part A — Research record
 - [x] Confirm the HMM overlay's literature source and published parameters through the `researcher` agent, e.g. Kritzman, Page & Turkington (2012) "Regime Shifts" or Nystrup, Madsen & Lindström (2015/2017) on HMM regime allocation; record the states, inputs and cadence they used; no parameter is picked by looking at our data
 
 Part B — Causal HMM regime features (owner, lab lock)
-- [ ] `[regime.hmm]` in `lab.toml`, fixed before any backtest: number of states (2, owner decision 2026-11-04: every decision-driving source read in Part A uses 2, and 3 is the video's framing), inputs (bar log return and realised volatility over a fixed window), training window in bars (3,000 on 4h, the same 500-calendar-day span as Nystrup 2014; the translation to 4h bars is an assumption and is stated as one), refit cadence (every 42 bars = weekly on 4h), random seed, restarts; each with a one-line justification
-- [ ] Fast causal fit: refit on rows at or before the refit bar, forward-filter bar by bar until the next refit; states ordered by mean return inside each fit's training window so labels do not switch between refits; hedgeFund checked for 252-day or daily-bar assumptions and wrapped where needed
-- [ ] Registry features `hmm_state` (ordered state id) and `hmm_bear_prob` (filtered probability of the lowest-mean-return state); usable in overlay `flat_when` and as an `and` gate only, never alone or in `long_exit` (validator error names the rule)
-- [ ] Per-run cache keyed on the frozen archive sha256 + `[regime.hmm]` settings, so agents read the series instead of refitting; a 15k-bar 4h series costs ≤ 75 s once per run and milliseconds after
-- [ ] Tests: perturbation test (change prices after bar t, every output up to t bit-identical); matches hedgeFund's `hmm_walk_forward_from_close` at each refit bar on a fixture; no smoothed-probability import anywhere in the module (static check); label order stable across refits on a synthetic two-regime series; NaN during warm-up, never forward-filled across gaps
+- [x] `[regime.hmm]` in `lab.toml`, fixed before any backtest: number of states (2, owner decision 2026-11-04: every decision-driving source read in Part A uses 2, and 3 is the video's framing), inputs (bar log return and realised volatility over a fixed window), training window in bars (3,000 on 4h, the same 500-calendar-day span as Nystrup 2014; the translation to 4h bars is an assumption and is stated as one), refit cadence (every 42 bars = weekly on 4h), random seed, restarts; each with a one-line justification Fixed 2026-11-04 with no data looked at: also 42-bar volatility window, 2 restarts, seed 7, `symbols = ["BTCUSDT"]`, `intervals = ["4h"]`. Frozen beside the run fingerprint, not inside it, so older runs still open.
+- [x] Fast causal fit: refit on rows at or before the refit bar, forward-filter bar by bar until the next refit; states ordered by mean return inside each fit's training window so labels do not switch between refits; hedgeFund checked for 252-day or daily-bar assumptions and wrapped where needed hedgeFund has no 252-day logic in these functions, only default windows, and every window is passed explicitly. Mean ordering can leave `hmm_bear_prob` on the calm state when state means are close: `get_report` shows `hmm_diagnostics`, and the owner decides whether ordering stays before Part D.
+- [x] Registry features `hmm_state` (ordered state id) and `hmm_bear_prob` (filtered probability of the lowest-mean-return state); usable in overlay `flat_when` and as an `and` gate only, never alone or in `long_exit` (validator error names the rule)
+- [ ] Per-run cache keyed on the frozen archive sha256 + `[regime.hmm]` settings, so agents read the series instead of refitting; a 15k-bar 4h series costs ≤ 75 s once per run and milliseconds after Built, not ticked: the two-level cache keys on the loaded closes' content plus settings, algorithm version and fit software, and persists across runs. Measured on a synthetic 15k-bar series: 0.3 ms in process and about 1.2 s in a new process, but a first fit is 160-170 s serially. The 4-worker pool that should bring it near 45 s (estimate) cannot start in the sandbox, so ≤ 75 s is unverified until `cd lab && uv run pytest -q -m slow tests/test_data_hmm_columns.py` passes and a first fit is timed in the owner's terminal.
+- [x] Tests: perturbation test (change prices after bar t, every output up to t bit-identical); matches hedgeFund's `hmm_walk_forward_from_close` at each refit bar on a fixture; no smoothed-probability import anywhere in the module (static check); label order stable across refits on a synthetic two-regime series; NaN during warm-up, never forward-filled across gaps The cross-check runs `run_hmm_walk_forward` at 3 states, exactly, because it hard-wires 3 states and the `hmm_walk_forward_from_close` wrapper forces two volatility columns; the 2-state path is checked against hedgeFund's fit and filter directly.
 
 Part C — Persistence filter (owner, lab lock)
-- [ ] Plan construct `persist(<condition>, k)`: true at bar t only when the condition held on each of the last k closed bars (the video's 3-bar stability rule, generalised); `k` counts as a tunable parameter toward the ≤6 limit and the literal-lineage rules
-- [ ] Tests: perturbation test; `persist(c, 1)` equals `c`; known values on a hand-built series; validator rejects k < 1 and k above a configured maximum
-- [ ] `get_report` shows turnover (trades per year and traded value per year) next to the persistence setting, so its effect on cost drag can be read directly
+- [x] Plan construct `persist(<condition>, k)`: true at bar t only when the condition held on each of the last k closed bars (the video's 3-bar stability rule, generalised); `k` counts as a tunable parameter toward the ≤6 limit and the literal-lineage rules `persist` cannot nest, and `persist(c, 1)` has the same logic hash as `c`.
+- [x] Tests: perturbation test; `persist(c, 1)` equals `c`; known values on a hand-built series; validator rejects k < 1 and k above a configured maximum The maximum is `MAX_PERSIST_BARS = 50` in `lab/lab/plan/expr.py`, beside `MAX_PREV_BARS`.
+- [x] `get_report` shows turnover (trades per year and traded value per year) next to the persistence setting, so its effect on cost drag can be read directly
 
 Part D — One pre-registered HMM overlay run (owner criteria unchanged)
 - [ ] Overlay journal written before the first backtest: question `risk_overlay`, the frozen `overlay_criteria.toml` sha256, a slate of at most 2 overlays with the Part A source and parameters (flat while `hmm_bear_prob > 0.92`, Nystrup 2014's author-chosen confidence filter; flat while `persist(hmm_bear_prob > 0.5, 3)`, the video's stability rule, labelled as video-sourced), family links to idea 13 and the Phase 15 `vol_rank` overlay, and the expected outcome ("no overlay benefit")
@@ -1296,13 +1296,13 @@ Part F — Correlation-aware paper evaluation
 - [ ] Rule added to `.claude/rules/research-agents.md` and the `honest-backtesting` checklist: confirmations across correlated coins are one piece of evidence, not N; the 2026-12-25 HC write-up reports N_eff next to the per-coin verdicts without changing any frozen verdict
 
 Part G — Named crash-episode table (owner, lab lock)
-- [ ] `[episodes]` in `lab.toml`: named UTC date ranges fixed before use (e.g. 2020-03 COVID crash, 2021-05 deleveraging, 2022-05 LUNA, 2022-11 FTX, 2024-08 carry unwind); any episode overlapping the locked holdout is dropped automatically, never read
-- [ ] `get_report` (edge and overlay runs) adds a per-episode table: strategy vs buy-and-hold return and max drawdown, exposure, trades; information only, not a criterion, not a trial
-- [ ] `strategy-critic` prompt reads the table ("does it only survive by being flat in one episode?"); tests: episode clipping at the holdout boundary, a golden report fixture
+- [x] `[episodes]` in `lab.toml`: named UTC date ranges fixed before use (e.g. 2020-03 COVID crash, 2021-05 deleveraging, 2022-05 LUNA, 2022-11 FTX, 2024-08 carry unwind); any episode overlapping the locked holdout is dropped automatically, never read Whole calendar months exactly as named here, so no peak or trough was picked from a result.
+- [x] `get_report` (edge and overlay runs) adds a per-episode table: strategy vs buy-and-hold return and max drawdown, exposure, trades; information only, not a criterion, not a trial Portfolio plans say in one line that the table does not apply to them.
+- [x] `strategy-critic` prompt reads the table ("does it only survive by being flat in one episode?"); tests: episode clipping at the holdout boundary, a golden report fixture
 
 Part H — Chart and paper monitor (web/, server/)
 - [x] Regime legend shows the state and "bars in regime"; closed bars only, never back-dated (perturbation test on the ribbon data); visual only
-- [ ] (after Part B) Ribbon source picker Markov / HMM: `POST /lab/regime` gains `model = "hmm"` using the Part B code and cache; the chart shows a loading state until the slow first fit finishes; no change to how the Markov ribbon is labelled. On the HMM source only, ribbon opacity comes from the filtered probability of the current state, closed bars only (moved here 2026-11-04 by owner decision: the Markov ribbon's labels are a threshold on trailing return and have no probability)
+- [ ] (after Part B) Ribbon source picker Markov / HMM: `POST /lab/regime` gains `model = "hmm"` using the Part B code and cache; the chart shows a loading state until the slow first fit finishes; no change to how the Markov ribbon is labelled. On the HMM source only, ribbon opacity comes from the filtered probability of the current state, closed bars only (moved here 2026-11-04 by owner decision: the Markov ribbon's labels are a threshold on trailing return and have no probability) Built and reviewed, not ticked: the real fit and the browser check wait for Part D, so nothing is read from BTC before the pre-registered run. Main chunk is now 157.34 KB gzip (+1.55 KB, no new dependency), above the ~155.7 KB accepted in Phase 21; needs the owner's acceptance. HMM needs the archive to reach the chart's first bar, otherwise the chip says why and draws nothing.
 - [x] Paper monitor in `PaperTradingPanel`: per paper test, net P&L, drawdown from peak, protection and circuit-breaker state, `halt.lock` status, and the backtest-expected range from `compare`; read-only server endpoint over the dry-run DBs and protocol files
 - [x] Code review (`code-reviewer`; `quant-reviewer` for the ribbon data), `npx tsc -b`, `npx vitest run`, `npm run lint` in `web/`; `npx tsc --noEmit`, `npx vitest run` in `server/`; browser checks run by Claude (owner preference) and recorded under `agents/research/research_notes/`
 
@@ -1392,6 +1392,81 @@ newest visible bar.
 
 ---
 
+## Phase 22 — Trailing Stop Exit (lab + chart)
+
+Why: the 2026-11-04 review of Samin Yasar's "Claude Just Changed the Stock Market Forever!"
+([youtube.com/watch?v=lH5wrfNwL3k](https://www.youtube.com/watch?v=lH5wrfNwL3k), report
+`agents/research/reports/Claude stock trading bot video research.md`, full transcript read) shows three
+stock and options recipes. Only the trailing stop fits this project. The lab has none: `RiskSpec` holds
+fixed percentages only, the 2026-10-25 seed calibration had to drop trailing stops for that reason, idea-11
+(ATR trailing stop) has been untested since its run stopped, and the generated paper strategy hard-codes
+`trailing_stop = False`. Kaminski & Lo show that a stop lowers expected return under a random walk and can
+add value only with momentum, so a trailing stop cannot create an edge from an entry that has none. Trend
+is an exhausted family here (ledger N 5885). The expected and acceptable outcome of both runs is **"no
+edge"**, and this phase is worth doing to close a known gap, not because a win is likely.
+
+The parts are ordered by cost. Part A needs no code. Part B changes the lab, and starts only if the owner
+says so after reading Part A's result. Part C is visual only and makes no edge claim.
+
+Definitions (fixed before any run; none has been looked at against our data):
+- **Base plan** = the HC entry, the only logic with paper evidence in progress:
+  `crosses_above(m.hist, 0) and r > 50`, MACD 12/26/9, RSI 14, 8% `stop_loss_pct`, on BTCUSDT and ETHUSDT 4h.
+  Only the exit changes, so one variable moves. It replaces HC's `crosses_below(m.hist, 0)`; the 8% stop stays
+  as the backstop.
+- **Chandelier exit (Part A)** = `close < dc.upper - 3 * a`, with `dc` = `donchian(22)` and `a` = `atr(22)`.
+  Checked at bar t's close, filled at bar t+1's open. It passed `validate_plan` offline on 2026-11-04 with no
+  trial spent. 22 and 3 are the usual Chandelier settings and were set for daily bars; using 22 bars on 4h is
+  an assumption and is stated as one. The channel is a rolling window, not anchored to the entry, so unlike a
+  true floor it can drift down.
+- **Ratchet trailing stop (Part B)** = two new nullable `RiskSpec` fields, `trail_activate_pct` and
+  `trail_stop_pct`. For a long entered with fill price F, HWM is the highest of F and the bar highs from the
+  entry bar through bar t−1. The stop in force during bar t is the hard stop `F × (1 − stop_loss_pct)`, raised
+  to `HWM × (1 − trail_stop_pct)` once `HWM ≥ F × (1 + trail_activate_pct)`, and it never falls. Using highs
+  through t−1 only is the rule: a bar's high never raises a stop that the same bar's low then hits, because the
+  order inside a bar is unknown. Fills match existing stops: at the level, or at the open on a gap through it,
+  with slippage and fees.
+- **Video values** = stop 10, activate 10, trail 5. They are stock settings from an unverified source, used
+  as written and labelled video-sourced.
+- **Precondition for any run:** the in-progress Phase 20 lab work is committed and `lab/` tests are green, because
+  a `lab.toml` change invalidates a running research run.
+
+### Part A — Chandelier exit run (no code)
+- [x] Research record: video notes at `agents/research/research_notes/Claude stock trading bot video research/video_notes.md` (transcript read in the owner's Chrome, untrusted-source callout) and report at `agents/research/reports/Claude stock trading bot video research.md` (evidence check with graded sources, fit with this project, what is rejected and why)
+- [ ] Pre-registration: journal entry `agents/journal/<date>-btcusdt-ethusdt-chandelier-exit.md` written before the first backtest, with the definitions above, the frozen criteria and budget, the Kaminski & Lo prior, idea-11 as `idea_ids`, and "no edge" named as the expected result. The filename must not contain `-paper-`
+- [ ] Run through `/research-strategy`: base plan with the Chandelier exit on BTCUSDT and ETHUSDT 4h at the fixed settings, compared with HC's existing ledger results on the same window and costs. Screen first, as in run r-20261101-093620-283543: a plan goes to `run_sweep`, `walk_forward`, `run_adversarial` and `run_crosscheck` only if it clears the benchmarks net of costs. The literal 3 is never hand-tuned across plans; only a sweep may change settings
+- [ ] `strategy-critic` review (fresh context) and the `honest-backtesting` report in the journal. State whether the plan joins the HC or trend family (`family_return_corr` 0.8), and update idea-11's status in the idea library. A holdout check happens only if `get_report` says `pre_holdout_passed` and the owner approves it at the hook
+- [ ] **(owner)** Decision recorded under this checklist: go on to Part B, or close it with the reason
+
+### Part B — Ratchet trailing stop in the lab (owner decision, lab lock)
+- [ ] Plan schema: `trail_activate_pct` and `trail_stop_pct` in `RISK_KEYS`, `lab/lab/plan/schema.py` bounds and `RiskSpec`; both set or both null; a trail needs a `stop_loss_pct`; refused on overlay and portfolio plans. Plans without them keep the same `plan_hash` and the same report (existing golden tests pass unchanged, fixtures untouched)
+- [ ] **(owner)** Engine in `lab/lab/engine/backtest.py`: the ratchet as defined above, long only. vectorbt 1.2 has `sl_trail` but no activation threshold, so build it on the existing `adjust_sl_func_nb` path, or say why that cannot work. Stops stay disabled on `tradable=False` bars; no-trail plans give byte-identical results
+- [ ] Engine tests with hand-worked values: activation exactly at the threshold; the stop only rises; a gap through the stop fills at the open; a bar whose high and low would trigger in the same bar does **not** raise-then-hit (the look-ahead case); hard stop before activation; exit signal at the open before an intrabar stop; a perturbation test (changing bars after t leaves every stop level at or before t identical)
+- [ ] `trailing_stop` exit reason: `reason_of` in the engine and `ExitReason` in `web/src/data/labTypes.ts`, told apart from `stop_loss` with a test, and shown in the Strategy Tester trade list
+- [ ] **(owner)** NautilusTrader cross-check in `lab/lab/crosscheck/nautilus.py` matches trailing fills within the existing tolerances, which do not move
+- [ ] Ledger and research identity: both fields are in `plan_hash`, sweepable as risk parameters and counted in the tunable limit. Holdout death and the DSR N treat a trailing plan by the existing logic and return-correlation rules, failing closed; a stop that never triggers does not make a new hypothesis (test)
+- [ ] One pre-registered run: base plan with the video values, BTCUSDT and ETHUSDT 4h, journal entry first, same screen-then-sweep rule as Part A, critic review, and a report
+- [ ] Paper mapping, only if a plan is ever registered: `prepare` renders `stoploss`, `trailing_stop`, `trailing_stop_positive`, `trailing_stop_positive_offset` and `trailing_only_offset_is_reached = True` from the plan. Plans without a trail render a byte-identical strategy (test), so the frozen HC strategies and protocols do not change. The protocol states that live trailing reacts sooner than the lab's one-bar delay
+
+### Part C — Trailing line on the chart (visual only)
+- [ ] Chandelier indicator via `/add-indicator`: pure compute `web/src/indicators/chandelier.ts` reusing `atr.ts` (inputs period 22, multiplier 3), drawn as a price overlay in the settings dialog and themed for light and dark. Known-value test on a hand-built fixture, no-look-ahead perturbation test, a forming bar never changes a closed bar's value, and incremental tail recompute matches a full recompute
+- [ ] After Part B only: a per-trade stop line in the Strategy Tester from the backtest result, stepping up from entry to exit, never drawn past the exit bar. Skipped if Part B is closed
+- [ ] Browser checks run by Claude (headless Chrome harness): on BTCUSDT 4h and 1h the line matches a hand calculation for two bars, and it does not move on closed bars while a candle is forming; if built, the trade stop line matches the trade's listed exit
+- [ ] Definitions written in `web/README.md` and `lab/README.md` ("visual only, no edge claim" for the chart); code review and quant review (look-ahead focus); `npx tsc -b`, `npx vitest run`, `npm run lint`, `uv run pytest -q`, `uv run ruff check .`, then `/run-gate 22`
+
+Not in this phase: ladder buys (averaging down; Phase 20's rule and `prepare` refuse them, and the −10% stop
+fires first anyway); copying Congress (stocks, and the evidence is negative); the wheel and any options work
+(needs a volatility surface, a new engine and a change to the written constraints); Alpaca; changing the
+running HC bots before their 2026-12-25 decision; an entry-anchored ATR trail in `RiskSpec` (only if Part B
+shows a reason). The report's scenario replay (P4) and implied volatility pane (P5) are separate ideas and
+are not scheduled here.
+
+**Done when:** Part A has a written verdict in the journal with no criterion moved after the run, "no edge"
+being a full result; the owner's Part B decision is recorded and, if taken, the ratchet passes its look-ahead
+and cross-check tests with one reported run; the Chandelier line works on the chart with its known-value,
+no-look-ahead and forming-bar tests passing; and no-trail plans and the frozen HC strategies are unchanged.
+
+---
+
 ## Testing Strategy
 
 - **Unit (Vitest):** indicator math, data mappers (Binance kline → Candle).
@@ -1424,6 +1499,7 @@ newest visible bar.
 | Regime model fitted with future data (smoothed HMM, full-sample fit, label switching) | Forward-filtered probabilities only, refit on past rows, labels ordered inside each fit window, perturbation test (Phase 20) |
 | Paper results counted as N confirmations across correlated coins | Report N_eff from the return correlation matrix beside per-coin verdicts (Phase 20) |
 | Higher-timeframe levels read from a forming daily candle (repainting PDH/PDL, ATR, SMA bias) | Closed 1d candles only, step lines from the next UTC day, perturbation and forming-candle tests (Phase 21) |
+| Trailing stop raised and hit inside the same bar (look-ahead, since the order inside a bar is unknown) | High-water mark uses highs through bar t−1 only, with a dedicated engine test, a perturbation test and the NautilusTrader cross-check (Phase 22) |
 
 ---
 
@@ -1453,5 +1529,6 @@ newest visible bar.
 | 19 | Web performance & DRY (per-tick scans and root re-renders removed, primitive frame path cleaned, forming bar from the hub + compression, code splitting + React Compiler, ~1.7–2k duplicate lines consolidated; no visual change) | Large |
 | 20 | Regime model, persistence & paper risk controls (causal HMM features, `persist(c, k)`, one pre-registered HMM overlay run, paper protections + circuit breaker, pre-registered paper position sizing, N_eff, crash-episode table, ribbon confidence + paper monitor; owner parts under the lab lock) | Large |
 | 21 | Key levels & range overlay (previous-UTC-day/week high-low from closed 1d candles, daily-ATR range used, 50-day SMA bias badge, ATR pane indicator; visual only, no lab changes) | Small–Medium |
+| 22 | Trailing stop exit (Chandelier exit run with no code, owner-gated ratchet stop in the lab with look-ahead tests, Chandelier line on the chart) | Small–Medium |
 
 **First usable version = end of Phase 3.**

@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from lab.plan.expr import evaluate_expression
+from lab.plan.schema import HMM_FEATURE_NAMES
 from lab.plan.validator import checked_expressions, resolve_registry
 from lab.types import PRICE_INPUTS, CompiledSignals, FeatureSpec, Plan, validate_candles
 
@@ -49,6 +50,12 @@ def compute_features(
     return pd.DataFrame(columns, index=candles.index)
 
 
+def _first_finite_row(values: pd.Series) -> int:
+    """Position of the first finite value of ``values``, ``len(values)`` when there is none."""
+    finite = np.flatnonzero(np.isfinite(values.to_numpy(dtype=np.float64)))
+    return int(finite[0]) if finite.size else len(values)
+
+
 def compile_plan(
     plan: Plan, candles: pd.DataFrame, registry: Mapping[str, FeatureSpec] | None = None
 ) -> CompiledSignals:
@@ -65,6 +72,11 @@ def compile_plan(
     True at bar t's close, and a NaN (a derivatives gap, an expanding rank before its minimum
     history) keeps it invested: the overlay falls back to buy-and-hold, never to a hidden exit.
     During warm-up it never enters, so it is flat until the first post-warm-up bar decides.
+
+    An HMM feature's warm-up is the row of its first finite output: its settings live in
+    ``[regime.hmm]``, not in plan params, so ``spec.warmup`` cannot know them. Without this an
+    overlay's decision window would start during warm-up, where a NaN keeps it invested, and
+    dilute the scored window with buy-and-hold bars. Other features keep their declared warm-up.
     """
     reg = resolve_registry(registry)
     validate_candles(candles)
@@ -79,6 +91,8 @@ def compile_plan(
         spec = reg[ref.feature]
         params = {p.name: ref.params.get(p.name, p.default) for p in spec.params}
         feature_warmup = max(feature_warmup, int(spec.warmup(params)))
+        if ref.feature in HMM_FEATURE_NAMES:
+            feature_warmup = max(feature_warmup, _first_finite_row(features[ref.alias]))
     warmup = feature_warmup + max(entry_expr.lag, exit_expr.lag)
 
     exits = evaluate_expression(exit_expr, cols, n)

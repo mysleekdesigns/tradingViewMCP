@@ -5,6 +5,8 @@
 // the lab labels bar t from closes at or before t, so a new bar never changes an earlier colour.
 // Warm-up bars (no label yet) are whitespace. The strip is a constant-height histogram on its
 // own overlay price scale pinned to the bottom few percent, so it never moves the price scale.
+// On the HMM source each bar's opacity also follows the filtered probability of its state; the
+// Markov labels have no probability, so their colours are constant.
 
 import {
   HistogramSeries,
@@ -16,7 +18,7 @@ import {
   type UTCTimestamp,
   type WhitespaceData,
 } from 'lightweight-charts'
-import type { RegimePoint, RegimeState } from '../data/labTypes'
+import type { RegimeModel, RegimePoint, RegimeState } from '../data/labTypes'
 import type { Candle } from '../types'
 import { toTime } from './points'
 import { withHexAlpha, type ChartPalette } from './theme'
@@ -40,6 +42,27 @@ export function regimeColorsFor(
     bear: withHexAlpha(palette.down, REGIME_ALPHA),
     sideways: withHexAlpha(palette.mutedText, REGIME_SIDEWAYS_ALPHA),
   }
+}
+
+/** HMM source: the opacity share of a coin-flip bar, faint but still visible. */
+export const REGIME_PROB_FLOOR = 0.25
+
+/**
+ * HMM source: the share of a state's full opacity for a filtered probability. The linear share
+ * runs from 0 at chance (`1 / nStates`) to 1 at certainty and is held at REGIME_PROB_FLOOR where
+ * it would fall below that, so the floor covers a band above chance too. A certain bar matches
+ * the Markov ribbon's strength.
+ */
+export function regimeProbStrength(prob: number, nStates: number): number {
+  const chance = 1 / nStates
+  return Math.min(1, Math.max(REGIME_PROB_FLOOR, (prob - chance) / (1 - chance)))
+}
+
+/** '#rrggbbaa' with its alpha scaled by `strength`; any other colour string is returned as is. */
+function fadedColor(color: string, strength: number): string {
+  if (strength === 1 || !/^#[0-9a-f]{8}$/i.test(color)) return color
+  const alpha = Math.round(parseInt(color.slice(7), 16) * strength)
+  return `${color.slice(0, 7)}${alpha.toString(16).padStart(2, '0')}`
 }
 
 export const REGIME_LABELS: Record<RegimeState, string> = {
@@ -72,18 +95,31 @@ function colorOf(state: RegimeState, colors: RegimeColors): string {
 /**
  * Histogram points for the ribbon: value 1 coloured by state, whitespace for warm-up bars.
  * With `plotted`, points on bars the chart does not plot are dropped (a point at a time the
- * main series lacks would add a bar to the time scale).
+ * main series lacks would add a bar to the time scale). With `hmmStates` (the HMM source's state
+ * count) each bar's opacity follows its `prob`, and a bar without one is whitespace too. Every
+ * point depends on its own label alone, so a later point never changes an earlier one.
  */
 export function regimeRibbonData(
   points: readonly RegimePoint[],
   colors: RegimeColors,
   plotted?: ReadonlySet<number>,
+  hmmStates?: number | null,
 ): (HistogramData<UTCTimestamp> | WhitespaceData<UTCTimestamp>)[] {
   const out: (HistogramData<UTCTimestamp> | WhitespaceData<UTCTimestamp>)[] = []
+  const hmm = hmmStates !== undefined && hmmStates !== null
   for (const p of points) {
     if (plotted !== undefined && !plotted.has(p.time)) continue
     const time = toTime(p.time)
-    out.push(p.state === null ? { time } : { time, value: 1, color: colorOf(p.state, colors) })
+    if (p.state === null) {
+      out.push({ time })
+    } else if (!hmm) {
+      out.push({ time, value: 1, color: colorOf(p.state, colors) })
+    } else if (p.prob === null || p.prob === undefined) {
+      out.push({ time })
+    } else {
+      const strength = regimeProbStrength(p.prob, hmmStates)
+      out.push({ time, value: 1, color: fadedColor(colorOf(p.state, colors), strength) })
+    }
   }
   return out
 }
@@ -177,6 +213,8 @@ export interface RegimeQueryInput {
   formingLast?: boolean
   windowBars?: number
   threshold?: number
+  /** Default 'markov'. */
+  model?: RegimeModel
 }
 
 /**
@@ -194,6 +232,7 @@ export function regimeQueryKey(q: RegimeQueryInput): string | null {
     q.timeframe,
     q.windowBars ?? '',
     q.threshold ?? '',
+    q.model ?? 'markov',
     n,
     first.time,
     last.time,
@@ -286,6 +325,7 @@ export class RegimeRibbon {
   private colors: RegimeColors
   private points: readonly RegimePoint[] = []
   private plotted: ReadonlySet<number> | undefined
+  private hmmStates: number | null = null
   /** What the series shows (null before the first setData). */
   private shown: readonly RibbonPoint[] | null = null
 
@@ -300,10 +340,16 @@ export class RegimeRibbon {
    * Null clears the strip (e.g. the lab is offline or the overlay is loading). `plotted` = the
    * chart's bar times (the chart's shared `BarTimes.set`). When only the newest point changed or
    * was added (a bar close), the series gets `update()`; unchanged points cost no call.
+   * `hmmStates` = the HMM source's state count (opacity follows `prob`), null on Markov.
    */
-  setPoints(points: readonly RegimePoint[] | null, plotted?: ReadonlySet<number>): void {
+  setPoints(
+    points: readonly RegimePoint[] | null,
+    plotted?: ReadonlySet<number>,
+    hmmStates: number | null = null,
+  ): void {
     this.points = points ?? []
     this.plotted = plotted
+    this.hmmStates = hmmStates
     this.render()
   }
 
@@ -332,7 +378,7 @@ export class RegimeRibbon {
   private render(full = false): void {
     const series = this.series
     if (series === null) return
-    const next = regimeRibbonData(this.points, this.colors, this.plotted)
+    const next = regimeRibbonData(this.points, this.colors, this.plotted, this.hmmStates)
     this.shown = syncPoints<RibbonPoint>(series, full ? null : this.shown, next)
   }
 }

@@ -14,7 +14,7 @@ import {
   type LabDerivativesClient,
   type LabRegimeClient,
 } from '../data/labApi'
-import type { RegimeState } from '../data/labTypes'
+import type { RegimeModel, RegimeState } from '../data/labTypes'
 import { MarketDataError } from '../data/provider'
 import type { CandleSource } from '../data/timeframeProvider'
 import { timeframeSeconds } from '../data/timeframes'
@@ -24,10 +24,25 @@ import type { IndicatorConfig } from '../state/indicators'
 import type { PanelState } from '../state/layout'
 import { atHistoryLimit } from '../state/liveCandles'
 import type { PanelMarket } from '../state/liveStore'
-import { REGIME_THRESHOLD, REGIME_WINDOW_BARS, regimeParamsLabel } from '../state/regimePref'
+import {
+  REGIME_HMM_FITTING_TEXT,
+  REGIME_THRESHOLD,
+  REGIME_WINDOW_BARS,
+  regimeHmmHistoryLabel,
+  regimeHmmLabel,
+  regimeParamsLabel,
+} from '../state/regimePref'
 import { useDailyCandles } from '../state/useDailyCandles'
 import { useLiveCandles, type UseLiveCandles } from '../state/useLiveCandles'
-import { regimeSupported, useRegime, type RegimeOverlay } from '../state/useRegime'
+import {
+  hmmHistoryShort,
+  hmmRibbonOff,
+  hmmUnavailableReason,
+  regimeModelFor,
+  regimeSupported,
+  useRegime,
+  type RegimeOverlay,
+} from '../state/useRegime'
 import {
   derivativesArchiveEnd,
   derivativesUnsupportedReason,
@@ -130,6 +145,11 @@ export interface ChartPanelProps {
   /** Draws hedgeFund regime labels under the candles (from the lab, closed bars only). */
   regimeEnabled: boolean
   regimeClient: LabRegimeClient
+  /** The ribbon source the owner picked (one choice for every panel, remembered). */
+  regimeModel: RegimeModel
+  onRegimeModel: (model: RegimeModel) => void
+  /** Why no chart of this venue can use the HMM (no requests), or null. */
+  regimeHmmBlocked?: string | null
   /**
    * Draws historical funding and open-interest panes from the lab's futures archive (closed bars
    * only; no live stream).
@@ -197,6 +217,9 @@ export const ChartPanel = memo(function ChartPanel({
   onTimeClick,
   regimeEnabled,
   regimeClient,
+  regimeModel,
+  onRegimeModel,
+  regimeHmmBlocked = null,
   derivativesEnabled = false,
   derivativesClient = NO_DERIVATIVES_CLIENT,
   derivativesBlocked = null,
@@ -254,6 +277,7 @@ export const ChartPanel = memo(function ChartPanel({
   // replay the bars up to the cursor, live all but the forming last one. The chart draws them
   // on plotted bars only. Seconds charts get none (a bar closes every second).
   const regimeAllowed = regimeSupported(interval)
+  const regimeModelNow = regimeModelFor(regimeModel, interval, regimeHmmBlocked)
   const regimeSource = useMemo(
     () => regimeSourceBars(candles ?? NO_BARS, candlesOverride),
     [candles, candlesOverride],
@@ -262,12 +286,15 @@ export const ChartPanel = memo(function ChartPanel({
     enabled: regimeEnabled && regimeAllowed && hasBars,
     symbol,
     timeframe: interval,
+    source: regimeModel,
+    hmmBlocked: regimeHmmBlocked,
     candles: regimeSource.candles,
     formingLast: regimeSource.formingLast,
     windowBars: REGIME_WINDOW_BARS,
     threshold: REGIME_THRESHOLD,
     barSeconds: timeframeSeconds(interval),
   })
+  const regimeDrawn = regimeEnabled && regimeAllowed && !hmmRibbonOff(regime.hmm)
 
   // Funding / OI for the same closed bars as the ribbon (live: all but the forming bar; replay:
   // up to the cursor). Off on seconds charts, bars over a week, non-Binance symbols and venues.
@@ -349,7 +376,8 @@ export const ChartPanel = memo(function ChartPanel({
             keyboardBlocked={keyboardBlocked || !active}
             crosshairSync={crosshairSync}
             crosshairSyncId={id}
-            regime={regimeEnabled && regimeAllowed ? regime.points : null}
+            regime={regimeDrawn ? regime.points : null}
+            regimeHmmStates={regime.hmm?.n_states ?? null}
             derivatives={derivativesEnabled && derivativesOff === null ? derivatives.overlay : null}
             onTimeClick={timeClick}
             replayActive={replaying}
@@ -379,6 +407,9 @@ export const ChartPanel = memo(function ChartPanel({
             overlay={regime}
             unavailable={regimeAllowed ? null : REGIME_SECONDS_TEXT}
             source={regimeSource}
+            model={regimeModelNow}
+            hmmUnavailable={hmmUnavailableReason(interval, regimeHmmBlocked)}
+            onModel={onRegimeModel}
           />
         )}
         {hasBars && derivativesEnabled && (
@@ -435,21 +466,81 @@ const REGIME_SWATCH: Readonly<Record<RegimeState, string>> = {
   [1]: 'bull',
 }
 
+const REGIME_MODEL_OPTIONS: readonly { model: RegimeModel; label: string; hint: string }[] = [
+  {
+    model: 'markov',
+    label: 'Markov',
+    hint: 'hedgeFund labels from the trailing return',
+  },
+  {
+    model: 'hmm',
+    label: 'HMM',
+    hint: 'Causal hidden Markov model, refit on closed bars. The first fit can take a minute or two',
+  },
+]
+
+/** The Markov / HMM switch at the chip's right end. The HMM option says why when it is off. */
+function RegimeSourcePicker({
+  model,
+  hmmUnavailable,
+  onModel,
+}: {
+  model: RegimeModel
+  hmmUnavailable: string | null
+  onModel: (model: RegimeModel) => void
+}) {
+  return (
+    <span className="regime-seg" role="group" aria-label="Regime ribbon source">
+      {REGIME_MODEL_OPTIONS.map((o) => {
+        const off = o.model === 'hmm' ? hmmUnavailable : null
+        return (
+          // aria-disabled, not disabled: the button stays focusable, so keyboard users reach its
+          // reason.
+          <button
+            key={o.model}
+            type="button"
+            className="regime-seg__option"
+            title={off ?? o.hint}
+            aria-label={off ?? o.label}
+            aria-pressed={model === o.model}
+            aria-disabled={off !== null}
+            onClick={() => {
+              if (off === null) onModel(o.model)
+            }}
+          >
+            {o.label}
+          </button>
+        )
+      })}
+    </span>
+  )
+}
+
 /**
- * Top-right chip naming the ribbon's parameters, with a legend in its tooltip, and the newest
- * closed bar's regime with its bars in regime. If the lab is unreachable it says how to start
- * it (no state: a held label may be old); the chart keeps working either way.
+ * Top-right chip naming the ribbon's source and parameters, with a legend in its tooltip, the
+ * newest closed bar's regime with its bars in regime, and the source picker. If the lab is
+ * unreachable it says how to start it (no state: a held label may be old); the chart keeps
+ * working either way. On the HMM source it says when the first fit is running, when the lab has
+ * too few bars for one, and why nothing was fitted.
  */
-function RegimeChip({
+export function RegimeChip({
   overlay,
   unavailable,
   source,
+  model,
+  hmmUnavailable,
+  onModel,
 }: {
   overlay: RegimeOverlay
   /** Why the ribbon is off on this chart (no requests are made), or null. */
   unavailable: string | null
   /** The bars the ribbon covers (`regimeSourceBars`); the legend reads closed bars only. */
   source: { candles: readonly Candle[]; formingLast: boolean }
+  /** The model running on this chart. */
+  model: RegimeModel
+  /** Why this chart cannot use the HMM, or null. */
+  hmmUnavailable: string | null
+  onModel: (model: RegimeModel) => void
 }) {
   if (unavailable !== null) {
     return (
@@ -461,24 +552,48 @@ function RegimeChip({
       </div>
     )
   }
-  const label = regimeParamsLabel(REGIME_WINDOW_BARS, REGIME_THRESHOLD)
-  const { error, loading, points } = overlay
+  const { error, loading, points, hmm } = overlay
+  const isHmm = model === 'hmm'
+  const label = isHmm
+    ? regimeHmmLabel(hmm?.n_states ?? null)
+    : regimeParamsLabel(REGIME_WINDOW_BARS, REGIME_THRESHOLD)
   const offline = error === LAB_OFFLINE_MESSAGE
+  const hmmOff = error === null ? (hmm?.unavailable ?? null) : null
   const title =
     error !== null
       ? offline
         ? `Regime needs the lab: run \`${REGIME_LAB_COMMAND}\` in lab/ (or \`npm run dev\` at the repo root).`
         : `Regime labels failed: ${error}`
-      : `hedgeFund regime of each closed bar from its trailing ${REGIME_WINDOW_BARS}-bar return ` +
-        `(±${REGIME_THRESHOLD * 100}% bands): bull, sideways, bear. Each label uses only that ` +
-        'bar and earlier ones, so it never changes later. The forming bar has none. ' +
-        'Bars in regime counts the labelled closed bars since the state last changed.'
+      : hmmOff !== null
+        ? `No HMM ribbon: ${hmmOff}`
+        : isHmm
+          ? 'Causal hidden Markov model on returns and volatility, state of each closed bar. Each ' +
+            'state uses only that bar and earlier ones, so it never changes later. The forming ' +
+            'bar has none. Opacity follows the filtered probability of the state: faint near a ' +
+            'coin flip, solid when certain. Bars in regime counts the labelled closed bars since ' +
+            'the state last changed.'
+          : `hedgeFund regime of each closed bar from its trailing ${REGIME_WINDOW_BARS}-bar return ` +
+            `(±${REGIME_THRESHOLD * 100}% bands): bull, sideways, bear. Each label uses only that ` +
+            'bar and earlier ones, so it never changes later. The forming bar has none. ' +
+            'Bars in regime counts the labelled closed bars since the state last changed.'
+  const note =
+    !isHmm || error !== null
+      ? null
+      : hmmOff !== null
+        ? hmmOff
+        : hmm !== null && hmmHistoryShort(hmm)
+          ? regimeHmmHistoryLabel(hmm.bars_needed, hmm.bars_have)
+          : loading && points === null
+            ? REGIME_HMM_FITTING_TEXT
+            : null
   const run =
     points !== null && error === null
       ? regimeRunThrough(points, source.candles, source.formingLast)
       : null
   // The key gives way to the live state, or to an error, in small multi-chart cells.
-  const compact = run !== null || error !== null
+  const compact = run !== null || error !== null || note !== null
+  // Two states are Bear and Bull: no Sideways swatch in the key.
+  const sideways = !isHmm || (hmm !== null && hmm.n_states > 2)
   return (
     <div
       className={`regime-chip${error !== null ? ' regime-chip--error' : ''}`}
@@ -499,7 +614,7 @@ function RegimeChip({
         aria-hidden="true"
       >
         <span className="regime-chip__swatch regime-chip__swatch--bull" />
-        <span className="regime-chip__swatch regime-chip__swatch--side" />
+        {sideways && <span className="regime-chip__swatch regime-chip__swatch--side" />}
         <span className="regime-chip__swatch regime-chip__swatch--bear" />
       </span>
       <span className={`regime-chip__label${compact ? ' regime-chip__key' : ''}`}>{label}</span>
@@ -519,6 +634,11 @@ function RegimeChip({
           <span className="history-hint__spinner regime-chip__spinner" aria-hidden="true" />
         )
       )}
+      {/* Always mounted: screen readers announce text added to a live region they already know. */}
+      <span className="regime-chip__note" role="status">
+        {note}
+      </span>
+      <RegimeSourcePicker model={model} hmmUnavailable={hmmUnavailable} onModel={onModel} />
     </div>
   )
 }

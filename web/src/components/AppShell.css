@@ -148,6 +148,65 @@
   flex: none;
 }
 
+/* HMM progress and history notes: plain information, not a warning. */
+.regime-chip__note {
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+}
+
+/* Empty it stays mounted as a live region, and takes back the chip's gap. */
+.regime-chip__note:empty {
+  margin-left: -6px;
+}
+
+/* Source picker: a small segmented control at the chip's right end, where it stays put while
+   the text before it changes. */
+.regime-seg {
+  display: inline-flex;
+  flex: none;
+  height: 16px;
+  margin-right: -5px;
+  margin-left: 2px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.regime-seg__option {
+  padding: 0 5px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.regime-seg__option + .regime-seg__option {
+  border-left: 1px solid var(--border);
+}
+
+.regime-seg__option:not([aria-disabled='true']):hover {
+  background: var(--panel-hover);
+  color: var(--text);
+}
+
+.regime-seg__option[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent-text);
+}
+
+.regime-seg__option[aria-disabled='true'] {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.regime-seg__option:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
 /* ---------- Paper trading in the sidebar ---------- */
 
 .sidebar > .paper {

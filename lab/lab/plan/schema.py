@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from lab.plan.expr import FUNCTIONS, MAX_EXPR_CHARS, MAX_PREV_BARS
+from lab.plan.expr import FUNCTIONS, MAX_EXPR_CHARS, MAX_PERSIST_BARS, MAX_PREV_BARS
 from lab.types import INTERVAL_SECONDS, PRICE_INPUTS, FeatureSpec
 
 TOP_LEVEL_KEYS: tuple[str, ...] = (
@@ -78,6 +78,9 @@ OVERLAY_REQUIRED_KEYS: tuple[str, ...] = (
 )
 MAX_OVERLAY_FEATURES = 3
 MAX_OVERLAY_PARAMS = 3  # every param of every used feature, defaults included
+# The causal HMM's features (PLAN.md Phase 20 Part B): filters only, like derivatives features.
+HMM_FEATURE_NAMES: tuple[str, ...] = ("hmm_state", "hmm_bear_prob")
+MIN_HMM_INTERVAL_SECONDS = 3_600  # PLAN.md Phase 20: no HMM on intraday bars below 1h
 
 
 def _param_schema(spec: FeatureSpec) -> dict[str, Any]:
@@ -117,7 +120,9 @@ def _feature_branches(registry: Mapping[str, FeatureSpec]) -> list[dict[str, Any
 _EXPR_GRAMMAR = (
     "Condition over feature aliases (`alias` or `alias.output`), price inputs "
     f"({', '.join(PRICE_INPUTS)}), numbers, + - * /, > < >= <=, and/or/not, "
-    f"crosses_above(a, b), crosses_below(a, b), prev(x, n) with 1 <= n <= {MAX_PREV_BARS}. "
+    f"crosses_above(a, b), crosses_below(a, b), prev(x, n) with 1 <= n <= {MAX_PREV_BARS}, "
+    f"persist(condition, k) with 1 <= k <= {MAX_PERSIST_BARS} (the condition held on each of the "
+    "last k bars; k is a whole-number literal and counts as a tunable parameter). "
     "Units must match: compare prices with prices (close > ema_slow), volume with volume "
     "(volume > 2 * vol_avg), or use a ratio (close / ema_slow > 1.02); a price or volume "
     "compared with a fixed number (close > 50000) is a hidden level and is rejected. "
@@ -206,7 +211,8 @@ OVERLAY_FLAT_WHEN_NOTE = (
     "'or' with a true clause), so the overlay falls back to buy-and-hold there. Derivatives "
     "features (funding, premium, basis, open interest, long/short ratio) may appear anywhere "
     "in it: they are exposure or crash-risk filters, not direction signals, which is exactly "
-    "this rule's role. "
+    "this rule's role. The regime model's features (hmm_state, hmm_bear_prob) may too, for the "
+    "same reason. "
 )
 
 

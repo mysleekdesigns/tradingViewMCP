@@ -305,6 +305,8 @@ interface ChartProps {
   crosshairSyncId?: string
   /** Regime labels for the plotted (closed) bars; null/undefined removes the ribbon. Colours follow `appearance`. */
   regime?: readonly RegimePoint[] | null
+  /** The HMM source's state count: ribbon opacity follows each point's `prob`. Null on Markov. */
+  regimeHmmStates?: number | null
   /** Left click on the main pane with tool 'cursor' and no drawing hit: the open time (UNIX s) of the plotted bar under the cursor, or null when there is none. Used for picking the bar-replay start. */
   onTimeClick?: (time: number | null) => void
   /** True while bar replay drives `candles`: the chart must not auto-request older history (`onNearLeftEdge`/auto-older), and should keep the right edge in view as bars step forward. */
@@ -396,6 +398,7 @@ export function Chart({
   crosshairSync = null,
   crosshairSyncId,
   regime = null,
+  regimeHmmStates = null,
   onTimeClick,
   replayActive = false,
   derivatives = null,
@@ -1267,8 +1270,8 @@ export function Chart({
   useEffect(() => {
     const ribbon = ribbonRef.current
     if (!ribbon || regime === null) return
-    ribbon.setPoints(regime, barTimes.get(appliedRef.current ?? []).set)
-  }, [regime, hasRegime, barsKey, barTimes])
+    ribbon.setPoints(regime, barTimes.get(appliedRef.current ?? []).set, regimeHmmStates)
+  }, [regime, regimeHmmStates, hasRegime, barsKey, barTimes])
 
   // Funding / open-interest panes, on plotted bars only. Re-applied when the values or the bar
   // set change (live ticks keep `barsKey`). New panes go after the indicator panes: the equity

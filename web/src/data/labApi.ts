@@ -28,6 +28,7 @@ import type {
   LedgerPage,
   LedgerQuery,
   PlanError,
+  RegimeHmmInfo,
   RegimePoint,
   RegimeRequest,
   RegimeResponse,
@@ -50,18 +51,21 @@ export const LAB_BASE_PATH = '/lab'
 export const LAB_TIMEOUT_MS = 10_000
 /** A backtest runs the engine, benchmarks, random-entry paths and PBO neighbours. */
 export const LAB_BACKTEST_TIMEOUT_MS = 180_000
+/** The first HMM fit of a series can take over a minute. */
+export const LAB_HMM_TIMEOUT_MS = 180_000
 export const LEDGER_PAGE_SIZE = 25
 
 /**
  * - `offline`: the lab service cannot be reached (fetch failed, or the proxy answered 502/504).
  * - `invalid`: 422, the plan has errors (`errors`).
  * - `no-data`: 503 with a `detail` message (e.g. no candles downloaded yet; says which CLI to run).
+ * - `busy`: 503, the lab is running another HMM fit; asking again later is the answer.
  * - `http`: any other non-2xx status.
  * - `parse`: the body is not what the contract says.
  * - `timeout` / `aborted`: our timer, or the caller's signal, cancelled the request.
  */
 export type LabErrorKind =
-  'offline' | 'invalid' | 'no-data' | 'http' | 'parse' | 'timeout' | 'aborted'
+  'offline' | 'invalid' | 'no-data' | 'busy' | 'http' | 'parse' | 'timeout' | 'aborted'
 
 export class LabError extends Error {
   readonly kind: LabErrorKind
@@ -77,6 +81,8 @@ export class LabError extends Error {
 }
 
 export const LAB_OFFLINE_MESSAGE = 'Lab service not running — start it with `npm run dev`'
+export const LAB_TOO_OLD_FOR_HMM_MESSAGE =
+  'The lab service is too old for the HMM ribbon: restart it to load the new code'
 
 export interface LabClientOptions {
   /** Defaults to the global `fetch`, looked up at call time. */
@@ -85,11 +91,15 @@ export interface LabClientOptions {
   basePath?: string
   timeoutMs?: number
   backtestTimeoutMs?: number
+  hmmTimeoutMs?: number
 }
 
 /** The chart's regime ribbon needs only this call (`useRegime` takes just this). */
 export interface LabRegimeClient {
-  /** hedgeFund regime labels for closed bars (display only; nothing is written to the ledger). */
+  /**
+   * Regime labels for closed bars, hedgeFund's or the HMM's (`req.model`); display only, nothing
+   * is written to the ledger. An HMM request gets the long timeout (LAB_HMM_TIMEOUT_MS).
+   */
   regime(req: RegimeRequest, signal?: AbortSignal): Promise<RegimeResponse>
 }
 
@@ -351,16 +361,39 @@ function parseRegimePoint(v: unknown): RegimePoint | null {
   return { time, state }
 }
 
+/** An HMM point: a state without a usable probability has no decision, so it reads as null. */
+function parseHmmPoint(v: unknown): RegimePoint | null {
+  const point = parseRegimePoint(v)
+  if (point === null || !isRecord(v)) return null
+  const raw = num(v.prob)
+  const prob = raw !== null && raw >= 0 && raw <= 1 ? raw : null
+  return prob === null ? { ...point, state: null, prob } : { ...point, prob }
+}
+
+function parseHmmInfo(r: Record<string, unknown>): RegimeHmmInfo {
+  const n = num(r.n_states)
+  if (n === null || n < 2) fail('regime answer (no HMM state count)')
+  return {
+    n_states: n,
+    warmup_bars: numOr(r.warmup_bars, 0),
+    bars_needed: numOr(r.bars_needed, 0),
+    bars_have: numOr(r.bars_have, 0),
+    unavailable: typeof r.unavailable === 'string' && r.unavailable !== '' ? r.unavailable : null,
+  }
+}
+
 /** Points with a finite time, ascending with duplicates dropped; an unknown state reads as null. */
 export function parseRegimeResponse(v: unknown): RegimeResponse {
   const r = record(v, 'regime answer')
-  const points = compact(list(r.points, 'regime points'), parseRegimePoint)
+  const hmm = r.model === 'hmm'
+  const points = compact(list(r.points, 'regime points'), hmm ? parseHmmPoint : parseRegimePoint)
   points.sort((a, b) => a.time - b.time)
   return {
     points: points.filter((p, i) => i === 0 || p.time !== points[i - 1].time),
     window_bars: numOr(r.window_bars, 0),
     threshold: numOr(r.threshold, 0),
     engine: str(r.engine),
+    ...(hmm ? { hmm: parseHmmInfo(r) } : {}),
   }
 }
 
@@ -458,6 +491,7 @@ export async function labErrorFor(
     )
   }
   if (res.status === 503) {
+    if (isRecord(body) && body.busy === true) throw new LabError('busy', detail, 503)
     if (detail !== '') throw new LabError('no-data', detail, 503)
     throw new LabError('offline', offlineMessage, 503)
   }
@@ -522,6 +556,7 @@ export function createLabClient(opts: LabClientOptions = {}): LabClient & LabDer
   const base = (opts.basePath ?? LAB_BASE_PATH).replace(/\/+$/, '')
   const timeoutMs = opts.timeoutMs ?? LAB_TIMEOUT_MS
   const backtestTimeoutMs = opts.backtestTimeoutMs ?? LAB_BACKTEST_TIMEOUT_MS
+  const hmmTimeoutMs = opts.hmmTimeoutMs ?? LAB_HMM_TIMEOUT_MS
   const request = createLabRequest({
     fetchImpl: opts.fetchImpl,
     base,
@@ -595,6 +630,21 @@ export function createLabClient(opts: LabClientOptions = {}): LabClient & LabDer
       const payload: RegimeRequest = { times: req.times, closes: req.closes }
       if (req.window_bars !== undefined) payload.window_bars = req.window_bars
       if (req.threshold !== undefined) payload.threshold = req.threshold
+      if (req.model === 'hmm') {
+        payload.model = 'hmm'
+        payload.symbol = req.symbol
+        payload.interval = req.interval
+        const body = await request('/regime', {
+          method: 'POST',
+          body: payload,
+          signal,
+          timeoutMs: hmmTimeoutMs,
+        })
+        const res = parseRegimeResponse(body)
+        // A lab process older than this code ignores `model` and answers Markov labels.
+        if (res.hmm === undefined) throw new LabError('parse', LAB_TOO_OLD_FOR_HMM_MESSAGE)
+        return res
+      }
       const body = await request('/regime', { method: 'POST', body: payload, signal })
       return parseRegimeResponse(body)
     },

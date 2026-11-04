@@ -15,10 +15,11 @@ whatever interval the plan runs on. ``label_regimes`` itself only does ``pct_cha
 over rows, and ``ew_transition_counts`` only decays per label step, so neither assumes a
 calendar. Gaps are not filled: a window of N bars spans N rows.
 
-``hmm_bear_prob`` is deliberately absent: hedgeFund's causal HMM
-(``hmm_walk_forward_from_close``: refits on past rows plus a forward filter) takes about 75 s
-on a 15k-bar 4h series with a single restart, far too slow for a registry feature that
-agents recompute hundreds of times. A smoothed or full-sample fit would be look-ahead.
+``hmm_state`` and ``hmm_bear_prob`` are not here: the causal HMM (refits on past rows plus a
+forward filter) takes over a minute on a 15k-bar 4h series, far too slow to run inside a registry
+call that agents repeat hundreds of times. ``lab.registry.hmm`` computes it once per series,
+``lab.data.hmm_columns`` caches it, and the two features read the attached columns. A smoothed or
+full-sample fit would be look-ahead.
 
 Pure module: DataFrames in, DataFrames out, no I/O, no globals mutated.
 """

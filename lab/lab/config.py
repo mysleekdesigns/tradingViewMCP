@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from lab.types import CostModel
+from lab.types import CostModel, Episode, HmmSettings
 
 LAB_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = LAB_ROOT / "config" / "lab.toml"
@@ -133,6 +133,8 @@ class LabConfig:
     universe: UniverseConfig
     portfolio: PortfolioConfig
     derivatives: DerivativesConfig = DerivativesConfig()
+    hmm: HmmSettings | None = None  # None: no [regime.hmm], the loader attaches no HMM columns
+    episodes: tuple[Episode, ...] = ()
 
     @property
     def ledger_path(self) -> Path:
@@ -149,6 +151,10 @@ class LabConfig:
     @property
     def derivatives_dir(self) -> Path:
         return self.data_dir / "derivatives"
+
+    @property
+    def hmm_cache_dir(self) -> Path:
+        return self.data_dir / "hmm"
 
 
 def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> LabConfig:
@@ -218,6 +224,8 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> LabConfig:
         universe=_universe(raw["universe"]),
         portfolio=_portfolio(raw["portfolio"]),
         derivatives=_derivatives(raw.get("derivatives", {})),
+        hmm=_hmm(raw["regime"]["hmm"]) if "hmm" in raw.get("regime", {}) else None,
+        episodes=_episodes(raw.get("episodes", {})),
     )
     _check_sell_price_positive(cfg)
     return cfg
@@ -276,6 +284,35 @@ def _derivatives(d: dict) -> DerivativesConfig:
             d.get("warmup_days", default.warmup_days), "derivatives.warmup_days"
         ),
     )
+
+
+def _hmm(h: dict) -> HmmSettings:
+    """``[regime.hmm]``: every key is required, so nothing falls back to a silent default."""
+    n = "regime.hmm"
+    return HmmSettings(
+        n_states=_min_int(h["n_states"], f"{n}.n_states", 2),
+        vol_window_bars=_min_int(h["vol_window_bars"], f"{n}.vol_window_bars", 2),
+        train_bars=_min_int(h["train_bars"], f"{n}.train_bars", 2),
+        refit_every_bars=_min_int(h["refit_every_bars"], f"{n}.refit_every_bars", 1),
+        seed=_min_int(h["seed"], f"{n}.seed", 0),
+        restarts=_min_int(h["restarts"], f"{n}.restarts", 1),
+        n_iter=_min_int(h["n_iter"], f"{n}.n_iter", 1),
+        symbols=tuple(str(x) for x in h["symbols"]),
+        intervals=tuple(str(x) for x in h["intervals"]),
+    )
+
+
+def _episodes(e: dict) -> tuple[Episode, ...]:
+    """``[episodes]``: ``name = [start, end]`` UTC dates, ``[start, end)``, in start order."""
+    out: list[Episode] = []
+    for name, span in e.items():
+        if not isinstance(span, list) or len(span) != 2:
+            raise ValueError(f"episodes.{name} must be [start, end], got {span!r}")
+        start, end = (pd.Timestamp(x, tz="UTC") for x in span)
+        if not start < end:
+            raise ValueError(f"episodes.{name} must start before it ends, got {span!r}")
+        out.append(Episode(str(name), start, end))
+    return tuple(sorted(out, key=lambda ep: ep.start))
 
 
 def _at_least_one(value: object, name: str) -> float:

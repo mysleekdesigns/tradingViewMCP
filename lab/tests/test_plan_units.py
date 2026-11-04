@@ -28,7 +28,7 @@ from lab.plan.units import (
 )
 from lab.registry import REGISTRY, fill_params
 from lab.registry.derivatives import DRV_INDEX_CLOSE, DRV_MARK_CLOSE
-from tests.synthetic import make_candles, with_derivatives
+from tests.synthetic import make_candles, with_derivatives, with_hmm
 
 FEATURES: dict[str, Any] = {
     "ema_fast": {"ema": {"period": 20}},
@@ -250,8 +250,10 @@ def test_declared_scales_match_the_registry_by_homogeneity() -> None:
     """Multiply prices by 8 and volume by 4 (powers of two, exact in floating point): each
     output must scale by 8 (price), 4 (volume) or 1 (dimensionless) exactly as declared.
     The derivatives mark and index closes are prices too; funding, premium, OI and the
-    long/short ratio do not move with the spot price level."""
-    candles = with_derivatives(make_candles(1200, seed=11, vol=0.02, drift=0.0004), seed=11)
+    long/short ratio do not move with the spot price level, and neither do the attached HMM
+    columns (a real HMM on scaled prices has the same log returns)."""
+    plain = with_derivatives(make_candles(1200, seed=11, vol=0.02, drift=0.0004), seed=11)
+    candles = with_hmm(plain, seed=11)
     scaled = candles.copy()
     for col in ("open", "high", "low", "close", DRV_MARK_CLOSE, DRV_INDEX_CLOSE):
         scaled[col] = candles[col] * 8.0

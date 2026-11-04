@@ -1,0 +1,103 @@
+{
+ "episodes": {
+  "basis": "returns are net of costs on the base trial's bars; max drawdowns are positive depths from equity 1.0 before the episode's first bar; exposure is the share of the episode's bars invested at the close; trades counts entries filled inside the episode",
+  "dropped_for_holdout": [
+   "crosses_holdout",
+   "inside_holdout"
+  ],
+  "note": "information only: not a criterion, not a trial",
+  "rows": [
+   {
+    "bars": 0,
+    "buy_hold_max_dd": null,
+    "buy_hold_return": null,
+    "end": 1485907200,
+    "exposure": null,
+    "name": "before_the_data",
+    "note": "no scored bars: this episode is outside the scored window",
+    "start": 1483228800,
+    "strategy_max_dd": null,
+    "strategy_return": null,
+    "trades": null
+   },
+   {
+    "bars": 186,
+    "buy_hold_max_dd": 0.05694550175268176,
+    "buy_hold_return": 0.4443926265054505,
+    "end": 1548979200,
+    "exposure": 1.0,
+    "name": "winter_2019",
+    "start": 1546300800,
+    "strategy_max_dd": 0.05694550175268187,
+    "strategy_return": 0.44439262650545075,
+    "trades": 0
+   },
+   {
+    "bars": 180,
+    "buy_hold_max_dd": 0.060796889091784045,
+    "buy_hold_return": 0.42018815586069924,
+    "end": 1569888000,
+    "exposure": 0.6833333333333333,
+    "name": "touches_holdout",
+    "start": 1567296000,
+    "strategy_max_dd": 0.060796889091784045,
+    "strategy_return": 0.3213116131995408,
+    "trades": 1
+   }
+  ],
+  "version": 1
+ },
+ "evidence_table": {
+  "basis": "returns are net of costs on the base trial's bars; max drawdowns are positive depths from equity 1.0 before the episode's first bar; exposure is the share of the episode's bars invested at the close; trades counts entries filled inside the episode",
+  "dropped_for_holdout": [
+   "crosses_holdout",
+   "inside_holdout"
+  ],
+  "rows": [
+   {
+    "bars": 0,
+    "buy_hold_max_dd": null,
+    "buy_hold_return": null,
+    "end": 1485907200,
+    "exposure": null,
+    "name": "before_the_data",
+    "note": "no scored bars: this episode is outside the scored window",
+    "start": 1483228800,
+    "strategy_max_dd": null,
+    "strategy_return": null,
+    "trades": null
+   },
+   {
+    "bars": 186,
+    "buy_hold_max_dd": 0.05694550175268176,
+    "buy_hold_return": 0.4443926265054505,
+    "end": 1548979200,
+    "exposure": 1.0,
+    "name": "winter_2019",
+    "start": 1546300800,
+    "strategy_max_dd": 0.05694550175268187,
+    "strategy_return": 0.44439262650545075,
+    "trades": 0
+   },
+   {
+    "bars": 180,
+    "buy_hold_max_dd": 0.060796889091784045,
+    "buy_hold_return": 0.42018815586069924,
+    "end": 1569888000,
+    "exposure": 0.6833333333333333,
+    "name": "touches_holdout",
+    "start": 1567296000,
+    "strategy_max_dd": 0.060796889091784045,
+    "strategy_return": 0.3213116131995408,
+    "trades": 1
+   }
+  ],
+  "version": 1
+ },
+ "turnover": {
+  "note": "per 365-day year of the base trial; traded_value_per_year is the sum of |change in position| as a multiple of equity, and each unit traded pays the per-side costs",
+  "persist_settings": [],
+  "traded_value_per_year": 18.36980306345733,
+  "trades_per_year": 9.584245076586432
+ }
+}

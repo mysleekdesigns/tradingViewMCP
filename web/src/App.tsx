@@ -153,7 +153,7 @@ import {
   type ReplayMark,
 } from './state/paperFeeds'
 import { savePrefs } from './state/prefs'
-import { regimeOnStored } from './state/regimePref'
+import { regimeHmmVenueBlocked, regimeOnStored, regimeSourceStored } from './state/regimePref'
 import { derivativesOnStored, derivativesVenueBlocked } from './state/derivativesPref'
 import { replayKeyAction } from './state/replay'
 import {
@@ -758,6 +758,8 @@ function App() {
   // ---- Regime ribbon (all panels; remembered across visits) ----
   const [regimeOn, setRegimeOn] = useStoredState(regimeOnStored)
   const toggleRegime = useCallback(() => setRegimeOn((on) => !on), [setRegimeOn])
+  const [regimeSource, setRegimeSource] = useStoredState(regimeSourceStored)
+  const regimeHmmBlocked = regimeHmmVenueBlocked(venue)
 
   // ---- Funding / OI panes (all panels; remembered; Binance global spot charts only) ----
   const [derivativesOn, setDerivativesOn] = useStoredState(derivativesOnStored)
@@ -1968,6 +1970,9 @@ function App() {
                 onTimeClick={isReplay && replayStatus === 'picking' ? pickReplayBar : undefined}
                 regimeEnabled={regimeOn}
                 regimeClient={labClient}
+                regimeModel={regimeSource}
+                onRegimeModel={setRegimeSource}
+                regimeHmmBlocked={regimeHmmBlocked}
                 derivativesEnabled={derivativesOn}
                 derivativesClient={labClient}
                 derivativesBlocked={derivativesBlocked}

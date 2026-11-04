@@ -114,7 +114,12 @@ def test_start_run_edge_default_is_unchanged(tmp_path: Path) -> None:
             run = led.research_run(out["run_id"])
         assert run is not None
         assert "question" not in run["config"] and "overlay_criteria" not in run["config"]
-        assert set(run["config"]) - {"derivatives", "universe_manifest"} == {
+        assert set(run["config"]) - {
+            "derivatives",
+            "universe_manifest",
+            "hmm",
+            "episodes",
+        } == {
             "criteria",
             "budget",
             "lab",

@@ -38,6 +38,16 @@ also calls :func:`check_software`: a run that froze a software record and whose 
 differs is refused with the changed entries named ("start a new run"); a run started before the
 record existed (no ``software`` key) is not checked.
 
+HMM and episodes (PLAN.md Phase 20): ``config["hmm"]`` = :func:`hmm_values` (the ``[regime.hmm]``
+settings, :data:`lab.registry.hmm.HMM_ALGO_VERSION`, the code a fit runs on
+(:func:`lab.data.hmm_columns.hmm_stack`) and ``gate_base_max_true_frac``, which an HMM-only plan
+otherwise has frozen nowhere) and ``config["episodes"]`` = :func:`episode_values` (only when
+``[episodes]`` is set) are frozen beside the fingerprint for the same reason: inside
+:func:`lab_values` they would refuse every existing run on every tool.
+:func:`check_lab_fingerprint` refuses a mismatch only when the run froze that key and names what
+changed. A run without the key is not checked, except that passing ``plan`` refuses an HMM plan
+in a run that froze no ``hmm`` key; every other plan in an old run behaves as before.
+
 Research question (PLAN.md Phase 15): a run asks ``"edge"`` (the success criteria, frozen as
 ``config["criteria"]``) or ``"risk_overlay"`` (the overlay rows, frozen as
 ``config["overlay_criteria"]`` beside ``config["question"] = "risk_overlay"``, with no
@@ -68,8 +78,10 @@ from lab.config import LabConfig
 from lab.data import derivatives as drv_data
 from lab.data.derivatives import manifest_sha256 as derivatives_manifest_sha256
 from lab.data.derivatives_columns import COLUMN_SOURCES, plan_derivative_columns
+from lab.data.hmm_columns import hmm_stack, require_frozen_hmm
 from lab.data.universe_build import manifest_path, manifest_sha256
 from lab.ledger import Ledger
+from lab.registry.hmm import HMM_ALGO_VERSION
 from lab.research.contract import (
     QUESTIONS,
     OverlayCriteria,
@@ -147,6 +159,32 @@ def software_values() -> dict[str, Any]:
     }
 
 
+def hmm_values(cfg: LabConfig) -> dict[str, Any] | None:
+    """``{"settings": fit key + symbols + intervals, "algo_version", "stack",
+    "gate_base_max_true_frac"}``, or None without a ``[regime.hmm]`` section. Frozen as
+    ``config["hmm"]`` beside the fingerprint (module docstring), never part of
+    :func:`lab_values`."""
+    if cfg.hmm is None:
+        return None
+    settings: dict[str, Any] = dict(cfg.hmm.fit_key())
+    settings["symbols"] = list(cfg.hmm.symbols)
+    settings["intervals"] = list(cfg.hmm.intervals)
+    return {
+        "settings": settings,
+        "algo_version": HMM_ALGO_VERSION,
+        "stack": hmm_stack(),
+        "gate_base_max_true_frac": float(cfg.derivatives.gate_base_max_true_frac),
+    }
+
+
+def episode_values(cfg: LabConfig) -> list[list[str]] | None:
+    """``[[name, start ISO, end ISO], ...]`` of ``[episodes]``, or None when none are set. Frozen
+    as ``config["episodes"]`` beside the fingerprint (module docstring)."""
+    if not cfg.episodes:
+        return None
+    return [[ep.name, ep.start.isoformat(), ep.end.isoformat()] for ep in cfg.episodes]
+
+
 def start_research_run(
     ledger: Ledger,
     research: ResearchConfig | OverlayResearchConfig,
@@ -161,7 +199,8 @@ def start_research_run(
     (:class:`OverlayResearchConfig`, no ``"criteria"`` key); ``config_sha256`` is the sha256 of
     the criteria file's bytes either way. Also ``config["lab"] = lab_fingerprint(cfg)`` and
     ``config["software"] = software_values()`` when ``cfg`` is given (and the universe manifest /
-    derivatives snapshot, when they exist on disk). Returns the run id.
+    derivatives snapshot, when they exist on disk, and the HMM settings and episodes, when set).
+    Returns the run id.
     Runs started without ``cfg`` fail :func:`check_lab_fingerprint`."""
     run_id = new_run_id(now)
     config = json.loads(research.to_json())
@@ -174,6 +213,12 @@ def start_research_run(
         derivatives = derivatives_snapshot(cfg)
         if derivatives is not None:
             config["derivatives"] = derivatives
+        hmm = hmm_values(cfg)
+        if hmm is not None:
+            config["hmm"] = hmm
+        episodes = episode_values(cfg)
+        if episodes is not None:
+            config["episodes"] = episodes
     ledger.start_research_run(
         run_id,
         label=label,
@@ -278,10 +323,12 @@ def check_question(ledger: Ledger, run_id: str, plan: Any) -> None:
         )
 
 
-def check_lab_fingerprint(ledger: Ledger, run_id: str, cfg: LabConfig) -> None:
+def check_lab_fingerprint(ledger: Ledger, run_id: str, cfg: LabConfig, *, plan: Any = None) -> None:
     """Raise ``ValueError`` unless ``run_id`` exists, froze a lab.toml fingerprint, and that
     fingerprint equals ``cfg``'s (the message names the changed sections); then
-    :func:`check_software` (the frozen software record, when the run has one)."""
+    :func:`check_software` (the frozen software record, when the run has one) and
+    :func:`check_hmm_values` (the frozen HMM settings and episodes, when the run has them, and
+    ``plan``, when given, against a run that froze no HMM settings)."""
     run = ledger.research_run(run_id)
     if run is None:
         raise ValueError(f"research run {run_id!r} was never started; call start_run first")
@@ -300,6 +347,51 @@ def check_lab_fingerprint(ledger: Ledger, run_id: str, cfg: LabConfig) -> None:
             f"{run_id!r}; changed: {', '.join(changed) or 'values'})"
         )
     check_software(run["config"], run_id)
+    check_hmm_values(run["config"], run_id, cfg, plan=plan)
+
+
+def check_hmm_values(
+    config: Mapping[str, Any], run_id: str, cfg: LabConfig, *, plan: Any = None
+) -> None:
+    """Raise ``ValueError`` when the run froze ``hmm`` or ``episodes`` and the values differ now;
+    the message names each changed entry and says to start a new run. A key the run did not
+    freeze is not checked, so runs started before these records existed stay usable, except that
+    a ``plan`` using an HMM feature is refused in a run with no ``hmm`` key."""
+    if plan is not None:
+        require_frozen_hmm(plan, config, run_id=run_id)
+    changed: list[str] = []
+    if "hmm" in config:
+        frozen = config["hmm"]
+        now = hmm_values(cfg) or {}
+        old = frozen if isinstance(frozen, Mapping) else {}
+        old_settings = old.get("settings") if isinstance(old.get("settings"), Mapping) else {}
+        new_settings = now.get("settings", {})
+        changed += [
+            f"[regime.hmm] {key} {old_settings.get(key)!r} -> {new_settings.get(key)!r}"
+            for key in sorted(set(old_settings) | set(new_settings))
+            if old_settings.get(key) != new_settings.get(key)
+        ]
+        if old.get("algo_version") != now.get("algo_version"):
+            changed.append(
+                f"HMM_ALGO_VERSION {old.get('algo_version')!r} -> {now.get('algo_version')!r}"
+            )
+        old_stack = old.get("stack") if isinstance(old.get("stack"), Mapping) else {}
+        new_stack = now.get("stack", {})
+        changed += [
+            f"{key} {old_stack.get(key)!r} -> {new_stack.get(key)!r}"
+            for key in sorted(set(old_stack) | set(new_stack))
+            if old_stack.get(key) != new_stack.get(key)
+        ]
+        limit = "gate_base_max_true_frac"
+        if old.get(limit) != now.get(limit):
+            changed.append(f"{limit} {old.get(limit)!r} -> {now.get(limit)!r}")
+    if "episodes" in config and config["episodes"] != episode_values(cfg):
+        changed.append(f"[episodes] {config['episodes']!r} -> {episode_values(cfg)!r}")
+    if changed:
+        raise ValueError(
+            "the HMM settings or episodes changed since this run started; start a new run "
+            f"(research run {run_id!r}; changed: {'; '.join(changed)})"
+        )
 
 
 def check_software(config: Mapping[str, Any], run_id: str) -> None:

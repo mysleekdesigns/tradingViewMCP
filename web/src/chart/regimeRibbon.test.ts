@@ -4,10 +4,15 @@ import type { RegimePoint, RegimeState } from '../data/labTypes'
 import type { Candle } from '../types'
 import {
   MAX_REGIME_BARS,
+  REGIME_ALPHA,
+  REGIME_LABELS,
+  REGIME_PROB_FLOOR,
   REGIME_RIBBON_PRICE_SCALE_ID,
+  REGIME_SIDEWAYS_ALPHA,
   RegimeRibbon,
   closedBarsForRegime,
   regimeColorsFor,
+  regimeProbStrength,
   regimeQueryKey,
   regimeRequestBars,
   regimeRibbonData,
@@ -18,7 +23,7 @@ import {
   regimeSourceBars,
   type RegimeColors,
 } from './regimeRibbon'
-import { paletteFor } from './theme'
+import { paletteFor, withHexAlpha } from './theme'
 
 const COLORS: RegimeColors = { bull: 'G', bear: 'R', sideways: 'S' }
 
@@ -39,6 +44,112 @@ describe('regimeColorsFor', () => {
       paletteFor({ theme: 'dark', upColor: '#00ff00', downColor: '#ff0000', timezone: 'UTC' }),
     )
     expect(dark).toEqual({ bull: '#00ff008c', bear: '#ff00008c', sideways: '#787b8659' })
+  })
+})
+
+describe('HMM ribbon opacity', () => {
+  const palette = paletteFor({
+    theme: 'dark',
+    upColor: '#00ff00',
+    downColor: '#ff0000',
+    timezone: 'UTC',
+  })
+  const colors = regimeColorsFor(palette)
+  const point = (state: RegimeState, prob: number | null): RegimePoint => ({
+    time: 100,
+    state,
+    prob,
+  })
+  const colorAt = (state: RegimeState, prob: number, n = 2): string | undefined => {
+    const [p] = regimeRibbonData([point(state, prob)], colors, undefined, n)
+    return 'color' in p ? p.color : undefined
+  }
+
+  it('is full at certainty and at the floor at chance, for two and three states', () => {
+    expect(regimeProbStrength(1, 2)).toBe(1)
+    expect(regimeProbStrength(0.5, 2)).toBe(REGIME_PROB_FLOOR)
+    expect(regimeProbStrength(1, 3)).toBe(1)
+    expect(regimeProbStrength(1 / 3, 3)).toBe(REGIME_PROB_FLOOR)
+  })
+
+  it('never drops below the floor, also below chance, and is linear in between', () => {
+    expect(regimeProbStrength(0.1, 2)).toBe(REGIME_PROB_FLOOR)
+    expect(regimeProbStrength(0, 3)).toBe(REGIME_PROB_FLOOR)
+    expect(regimeProbStrength(0.75, 2)).toBeCloseTo(0.5, 12)
+    expect(regimeProbStrength(2 / 3, 3)).toBeCloseTo(0.5, 12)
+  })
+
+  it('a certain bar matches the Markov strength', () => {
+    expect(colorAt(1, 1)).toBe(colors.bull)
+    expect(colorAt(-1, 1)).toBe(colors.bear)
+    expect(colorAt(0, 1, 3)).toBe(colors.sideways)
+  })
+
+  it('a coin-flip bar is faint but visible', () => {
+    expect(colorAt(1, 0.5)).toBe(withHexAlpha('#00ff00', REGIME_ALPHA * REGIME_PROB_FLOOR))
+    expect(colorAt(-1, 0.5)).toBe(withHexAlpha('#ff0000', REGIME_ALPHA * REGIME_PROB_FLOOR))
+    expect(colorAt(0, 1 / 3, 3)).toBe(
+      withHexAlpha(palette.mutedText, REGIME_SIDEWAYS_ALPHA * REGIME_PROB_FLOOR),
+    )
+    expect(colorAt(1, 0.5)).toBe('#00ff0023')
+  })
+
+  it('a null or missing prob is whitespace on the HMM source', () => {
+    const data = regimeRibbonData(
+      [point(1, null), { time: 200, state: 1 }, { time: 300, state: null, prob: null }],
+      colors,
+      undefined,
+      2,
+    )
+    expect(data).toEqual([{ time: 100 }, { time: 200 }, { time: 300 }])
+  })
+
+  it('names the two HMM states Bear and Bull', () => {
+    expect(REGIME_LABELS[-1]).toBe('Bear')
+    expect(REGIME_LABELS[1]).toBe('Bull')
+  })
+
+  it('leaves Markov colours as they were, whatever a point carries', () => {
+    const markov = regimeRibbonData([point(1, 0.51), point(-1, null)], colors)
+    expect(markov).toEqual([
+      { time: 100, value: 1, color: '#00ff008c' },
+      { time: 100, value: 1, color: '#ff00008c' },
+    ])
+    expect(regimeRibbonData([{ time: 1, state: 0 }], colors, undefined, null)).toEqual([
+      { time: 1, value: 1, color: '#787b8659' },
+    ])
+  })
+
+  it('perturbation: changing later points leaves earlier ribbon data identical', () => {
+    const states: RegimeState[] = [-1, 0, 1]
+    const base: RegimePoint[] = Array.from({ length: 40 }, (_, i) => ({
+      time: 100 * (i + 1),
+      state: i < 5 ? null : states[i % 3],
+      prob: i < 5 ? null : 0.4 + (i % 7) / 10,
+    }))
+    const cut = 25
+    const changed: RegimePoint[] = base.map((p, i) =>
+      i <= cut ? p : { ...p, state: states[(i + 1) % 3], prob: 0.99 },
+    )
+    const withExtra = [...changed, { time: 100_000, state: 1, prob: 1 } as RegimePoint]
+    const a = regimeRibbonData(base, colors, undefined, 3)
+    const b = regimeRibbonData(changed, colors, undefined, 3)
+    const c = regimeRibbonData(withExtra, colors, undefined, 3)
+    expect(b.slice(0, cut + 1)).toEqual(a.slice(0, cut + 1))
+    expect(c.slice(0, cut + 1)).toEqual(a.slice(0, cut + 1))
+    expect(b.slice(cut + 1)).not.toEqual(a.slice(cut + 1))
+    expect(regimeRun(base.slice(0, cut + 1))).toEqual(regimeRun(changed.slice(0, cut + 1)))
+  })
+
+  it('bars in regime works on HMM points', () => {
+    const run = regimeRun([
+      { time: 1, state: null, prob: null },
+      { time: 2, state: -1, prob: 0.7 },
+      { time: 3, state: 1, prob: 0.6 },
+      { time: 4, state: 1, prob: 0.9 },
+    ])
+    expect(run).toEqual({ state: 1, bars: 2 })
+    expect(run && regimeRunLabel(run)).toBe('Bull · 2 bars')
   })
 })
 
@@ -161,6 +272,12 @@ describe('regimeQueryKey', () => {
     expect(regimeQueryKey({ ...base, candles: fixed })).not.toBe(
       regimeQueryKey({ ...base, candles }),
     )
+  })
+
+  it('includes the model, so one source never answers for the other', () => {
+    const markov = regimeQueryKey({ ...base, candles })
+    expect(regimeQueryKey({ ...base, candles, model: 'markov' })).toBe(markov)
+    expect(regimeQueryKey({ ...base, candles, model: 'hmm' })).not.toBe(markov)
   })
 
   it('changes with symbol, timeframe, and parameters', () => {

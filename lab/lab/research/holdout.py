@@ -282,7 +282,7 @@ def run_holdout_check(
     if ledger.research_run(run_id) is None:
         raise HoldoutRefusedError(f"research run {run_id!r} was never started; call start_run")
     try:
-        check_lab_fingerprint(ledger, run_id, cfg)
+        check_lab_fingerprint(ledger, run_id, cfg, plan=plan)
     except ValueError as exc:
         raise HoldoutRefusedError(f"{exc}; no check was spent") from exc
     if plan_derivative_columns(plan):
@@ -448,7 +448,7 @@ def _overlay_holdout_check(
     h = plan_hash(plan)
     lh = logic_hash(plan)
     try:
-        check_lab_fingerprint(ledger, run_id, cfg)
+        check_lab_fingerprint(ledger, run_id, cfg, plan=plan)
     except ValueError as exc:
         raise HoldoutRefusedError(f"{exc}; no check was spent") from exc
     if plan_derivative_columns(plan):

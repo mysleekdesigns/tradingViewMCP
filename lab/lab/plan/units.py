@@ -14,7 +14,8 @@ A dimension is ``(price exponent, volume exponent)``:
 * ``DIMENSIONLESS`` ``(0, 0)``: bounded or normalised features (RSI, ROC in percent, z-score,
   realised volatility of log returns, regime outputs, the derivatives risk filters: funding,
   premium, basis %, OI % change, long/short ratio, the expanding percentile ranks
-  ``vol_rank`` / ``premium_mean_rank``) and nonzero numeric literals.
+  ``vol_rank`` / ``premium_mean_rank``), the causal HMM's state id and probability, and nonzero
+  numeric literals.
 
 Arithmetic: ``+``/``-`` need equal dimensions; ``*`` adds and ``/`` subtracts exponents, so
 ``close / ema_slow`` is dimensionless and ``4 * volume_sma`` is volume-scale. The literal
@@ -69,6 +70,9 @@ FEATURE_SCALES: Mapping[str, Mapping[str, Dim]] = MappingProxyType(
         # expanding percentile ranks in (0, 1] (risk-overlay features, PLAN.md Phase 15)
         "vol_rank": {"value": DIMENSIONLESS},  # rank of realized_vol in its own history
         "premium_mean_rank": {"value": DIMENSIONLESS},  # rank of the mean premium index
+        # causal HMM regime filters (lab/lab/registry/hmm.py)
+        "hmm_state": {"value": DIMENSIONLESS},  # ordered state id, 0 = lowest mean return
+        "hmm_bear_prob": {"value": DIMENSIONLESS},  # filtered probability in [0, 1]
     }
 )
 
