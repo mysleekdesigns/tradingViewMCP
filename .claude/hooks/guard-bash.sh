@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # PreToolUse hook (Bash): deny order/withdraw endpoints, live freqtrade, secret literals, writes to
-# .env, catastrophic deletes, system pip, and lab-lock bypasses; ask before history-rewriting git.
+# .env, catastrophic deletes, system pip, lab-lock bypasses, and clearing a paper halt.lock; ask before
+# history-rewriting git.
 # Decisions are JSON on stdout with exit 0. Best-effort pattern matching, not a sandbox.
 set -u
 
@@ -67,6 +68,11 @@ if [ -f "$root/.claude/lab.lock" ] && has 'lab/lab/(engine|registry|stats|resear
   if has '(^|[;&|[:space:]])(rm|mv|cp|sed[[:space:]]+-i|perl[[:space:]]+-[a-z]*i|truncate|tee|patch|git[[:space:]]+(checkout|restore|apply))[[:space:]]|>'; then
     deny "The lab is locked (.claude/lab.lock): engine, registry, stats, research, search, and the success and overlay criteria are read-only. Propose the change to the owner instead."
   fi
+fi
+
+# --- deny: clearing a paper circuit breaker (PLAN.md Phase 20 Part E)
+if has 'halt\.lock' && has '(^|[;&|[:space:]])(rm|mv|cp|tee|unlink|truncate)[[:space:]]|>[[:space:]]*[^[:space:]]*halt\.lock'; then
+  deny "halt.lock is cleared by the owner only, outside Claude Code."
 fi
 
 # --- ask: history rewriting or discarding work

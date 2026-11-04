@@ -1,6 +1,6 @@
 ---
 date: 2026-11-04
-status: proposal for the owner; nothing here is applied
+status: proposal for the owner; section 3 applied 2026-11-04, sections 1 and 2 not yet
 ---
 
 # Phase 20 lab lock proposal

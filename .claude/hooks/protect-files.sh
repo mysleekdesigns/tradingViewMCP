@@ -44,6 +44,8 @@ case "$rel" in
     block "'$rel' is the Jev shadow judge's frozen record (PLAN.md Phase 17). Only paper_trade.py shadow writes it." ;;
   .claude/lab.lock)
     block "the lab lock is controlled by the owner only." ;;
+  halt.lock|*/halt.lock)
+    block "halt.lock is a paper circuit breaker's stop. Only the owner clears it, outside Claude Code." ;;
   .claude/settings.json|.claude/hooks/*)
     ask "Editing Claude Code hooks/settings changes the project's safety guardrails. Confirm this edit is intended." ;;
 esac

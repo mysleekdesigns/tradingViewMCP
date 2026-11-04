@@ -24,6 +24,8 @@ Backtest honesty:
 - [ ] Robustness: ±20% parameter neighbours stay profitable; regime split (bull/bear/sideways)
 - [ ] Locked holdout: untouched by search; if checked, count against the budget and report separately
 - [ ] No LLM decision layer inside the backtest: an LLM take/skip judge (Jev or Claude) is evaluated forward only, on bars after its training cutoff, never on history it may remember
+- [ ] Sizing: state risk per trade, the exposure cap, and the largest single loss as a percentage of the wallet. Sizing does not change whether the plan has an edge
+- [ ] Correlation: confirmations across correlated coins are one piece of evidence, not N. Report N_eff next to per-coin verdicts, quoting the figure from the coins' own daily returns, because mostly-flat bots read as falsely independent
 - [ ] Disclaimer: historical, not forward-looking
 ```
 
