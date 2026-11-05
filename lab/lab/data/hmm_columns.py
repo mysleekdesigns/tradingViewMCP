@@ -105,7 +105,14 @@ _SERIES_CACHE_SIZE = 16  # design and holdout views of a few series, plus a char
 _SQLITE_TIMEOUT_SECONDS = 30.0  # the MCP server and the API can write the file at the same time
 _MAX_POOL_WORKERS = 4  # at most four: the seven live paper bots share this machine
 _SERIAL_MISSES = 2  # a growing series: spawning workers costs more than these fits
-_POOL_FAILURES = (OSError, BrokenProcessPool, NotImplementedError)  # e.g. semaphores denied
+
+
+class _StackChangedError(RuntimeError):
+    """A spawn worker imported other HMM code than this process runs, so its fit would be stored
+    under a key that does not describe it."""
+
+
+_POOL_FAILURES = (OSError, BrokenProcessPool, NotImplementedError, _StackChangedError)
 _FIT_ARRAYS = ("startprob", "transmat", "means", "covars")
 _HEDGEFUND_SOURCES = ("hmm.py", "hmm_filter.py", "hmm_features.py")  # the code behind every fit
 _STACK_PACKAGES = ("numpy", "scipy", "scikit-learn", "hmmlearn")
@@ -144,10 +151,14 @@ def _stack() -> tuple[tuple[str, str], ...]:
     return (("hedgefund_hmm_sources_sha256", digest.hexdigest()), *versions)
 
 
+_stack()  # now, not at the first fit: the digest must describe the code imported above
+
+
 def hmm_stack() -> dict[str, str]:
     """The code a fit depends on: the sha256 of hedgeFund's three HMM source files, and the
-    numpy, scipy, scikit-learn and hmmlearn versions. Read once per process, which is also when
-    that code was imported."""
+    numpy, scipy, scikit-learn and hmmlearn versions. Read once per process, on import, so it
+    describes the code this process runs. A later edit on disk needs a restart, and a spawn
+    worker that imports it refuses in :func:`_fit_block_checked`."""
     return dict(_stack())
 
 
@@ -277,6 +288,21 @@ def _pool_workers() -> int:
     return min(_MAX_POOL_WORKERS, (os.cpu_count() or 2) - 1)
 
 
+def _fit_block_checked(
+    block: np.ndarray,
+    columns: tuple[str, ...],
+    settings: HmmSettings,
+    stack: tuple[tuple[str, str], ...],
+) -> FittedBlock:
+    """``fit_block`` in a spawn worker, which imports the code afresh: refused unless that code
+    is what ``stack``, the parent's digest and part of every fit key, says it is."""
+    if _stack() != stack:
+        raise _StackChangedError(
+            "a worker imported other HMM code than this process runs; restart the lab"
+        )
+    return fit_block(block, columns, settings)
+
+
 def _fit_in_pool(
     missing: Mapping[str, RefitBlock],
     settings: HmmSettings,
@@ -291,7 +317,7 @@ def _fit_in_pool(
     try:
         with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
             futures = {
-                pool.submit(fit_block, item.block, item.columns, settings): key
+                pool.submit(_fit_block_checked, item.block, item.columns, settings, _stack()): key
                 for key, item in missing.items()
             }
             failure: Exception | None = None

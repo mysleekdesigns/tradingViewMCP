@@ -315,7 +315,12 @@ def hmm_regime(config: LabConfig, body: RegimeBody) -> Any:
             content={"detail": "the HMM ribbon is off: lab.toml has no [regime.hmm] settings"},
         )
 
-    def answer(points: list[dict[str, Any]], warmup_bars: int, bars_have: int) -> dict[str, Any]:
+    def answer(
+        points: list[dict[str, Any]],
+        warmup_bars: int,
+        bars_have: int,
+        bear_is_high_vol: bool | None = None,
+    ) -> dict[str, Any]:
         return {
             "points": points,
             "model": "hmm",
@@ -324,6 +329,7 @@ def hmm_regime(config: LabConfig, body: RegimeBody) -> Any:
             "warmup_bars": warmup_bars,
             "bars_needed": settings.train_bars + settings.vol_window_bars + 1,
             "bars_have": bars_have,
+            "bear_is_high_vol": bear_is_high_vol,
         }
 
     if not body.times:
@@ -376,7 +382,16 @@ def hmm_regime(config: LabConfig, body: RegimeBody) -> Any:
         ],
         int(series.warmup_bars),
         len(close),
+        latest_bear_is_high_vol(series.bear_high_vol[first:]),
     )
+
+
+def latest_bear_is_high_vol(flags: np.ndarray) -> bool | None:
+    """Whether the newest decided bar's "bear" (lowest mean return in its fit) is also that fit's
+    higher-volatility state; None without a decision. On BTC 4h it often is not, so the chart
+    says so instead of letting "Bear" read as the volatile regime."""
+    decided = flags[np.isfinite(flags)]
+    return bool(decided[-1] > 0.5) if decided.size else None
 
 
 def hmm_point(time: int, state: float, prob: float, n_states: int) -> dict[str, Any]:

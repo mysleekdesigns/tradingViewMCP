@@ -62,6 +62,9 @@ export function regimeHmmLabel(nStates: number | null): string {
 /** Chip text while the first fit runs. */
 export const REGIME_HMM_FITTING_TEXT = 'Fitting HMM, first run can take a minute or two'
 
+/** Chip text when the newest fit's lowest-mean-return state is the calmer of the two. */
+export const REGIME_HMM_CALM_BEAR_TEXT = 'Bear is the calmer state in this fit'
+
 /** Chip text when the lab has too few bars, e.g. "HMM needs 3,043 bars, has 1,200". */
 export function regimeHmmHistoryLabel(needed: number, have: number): string {
   return `HMM needs ${needed.toLocaleString('en-US')} bars, has ${have.toLocaleString('en-US')}`

@@ -11,7 +11,7 @@ import json
 import sys
 import types
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,7 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from lab.api import HMM_ENGINE, create_app
+from lab.api import HMM_ENGINE, create_app, latest_bear_is_high_vol
 from lab.config import LabConfig, load_config
 from lab.ledger import Ledger
 from lab.types import HmmSettings
@@ -49,6 +49,7 @@ class FakeSeries:
     bear_prob: np.ndarray
     state_prob: np.ndarray
     warmup_bars: int
+    bear_high_vol: np.ndarray = field(default_factory=lambda: np.empty(0))
 
 
 class FakeBusyError(RuntimeError):
@@ -319,12 +320,43 @@ def test_response_shape_settings_and_cache_dir(tmp_path: Path, fit: FakeFit) -> 
         "warmup_bars": 10,
         "bars_needed": BARS_NEEDED,
         "bars_have": ARCHIVE_BARS + 30,
+        "bear_is_high_vol": None,
     }
     assert HMM_ENGINE == "lab.registry.hmm.causal_hmm"
     call = fit.calls[0]
     assert call.settings == SETTINGS
     assert call.bar_seconds == H4
     assert call.cache_dir == cfg.hmm_cache_dir
+
+
+@pytest.mark.parametrize(
+    ("flags", "want"),
+    [
+        ([1.0, 0.0], False),  # the newest decided bar's fit, not an average
+        ([0.0, 1.0], True),
+        ([0.0, 1.0, np.nan], True),  # a gap is skipped, not read as an answer
+        ([np.nan, np.nan], None),
+        ([], None),
+    ],
+)
+def test_the_newest_decided_bar_says_whether_bear_is_the_volatile_state(
+    flags: list[float], want: bool | None
+) -> None:
+    assert latest_bear_is_high_vol(np.asarray(flags, dtype=float)) is want
+
+
+def test_the_answer_only_reads_the_posted_bars_label_meaning(tmp_path: Path, fit: FakeFit) -> None:
+    def answer(close: pd.Series) -> FakeSeries:
+        out = FakeFit.default(close)
+        flags = np.full(len(close), np.nan)
+        flags[: len(close) - 30] = 1.0  # decided in the archive prefix, nothing on the chart
+        return replace(out, bear_high_vol=flags)
+
+    fit.answer = answer
+    cfg = config(tmp_path)
+    write_archive(cfg, archive_closes(ARCHIVE_BARS, T0))
+    with make_client(cfg, tmp_path) as c:
+        assert post(c, hmm_body(30)).json()["bear_is_high_vol"] is None
 
 
 def test_warm_up_bars_are_null_and_decided_bars_carry_the_state_prob(

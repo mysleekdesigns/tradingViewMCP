@@ -509,7 +509,43 @@ class BreaksAfterOnePool:
         return future
 
 
-@pytest.mark.parametrize("pool", [DeniedPool, BreaksAfterOnePool])
+class OtherCodePool(BreaksAfterOnePool):
+    """Every worker imported another hedgeFund than this process runs."""
+
+    def submit(self, fn: Any, *args: Any) -> Future[Any]:
+        future: Future[Any] = Future()
+        future.set_exception(hc._StackChangedError("a worker imported other HMM code"))
+        return future
+
+
+def test_a_worker_refuses_to_fit_under_another_stack(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(hc, "fit_block", lambda *args: calls.append(args) or "fit")
+    stack = hc._stack()
+    other = (("hedgefund_hmm_sources_sha256", "edited on disk"), *stack[1:])
+    block = np.zeros((1, 2))
+    with pytest.raises(hc._StackChangedError, match="restart the lab"):
+        hc._fit_block_checked(block, ("a", "b"), SETTINGS, other)
+    assert calls == []
+    assert hc._fit_block_checked(block, ("a", "b"), SETTINGS, stack) == "fit"
+    assert len(calls) == 1
+
+
+def test_the_pool_sends_the_stack_of_this_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[tuple[Any, ...]] = []
+
+    class Recorder(BreaksAfterOnePool):
+        def submit(self, fn: Any, *args: Any) -> Future[Any]:
+            sent.append((fn, args[-1]))
+            return super().submit(fn, *args)
+
+    real_pool(monkeypatch)
+    monkeypatch.setattr(hc, "ProcessPoolExecutor", Recorder)
+    hmm_series(close_series(), SETTINGS, bar_seconds=BAR, cache_dir=None)
+    assert sent and all(item == (hc._fit_block_checked, hc._stack()) for item in sent)
+
+
+@pytest.mark.parametrize("pool", [DeniedPool, BreaksAfterOnePool, OtherCodePool])
 def test_a_pool_that_fails_falls_back_to_serial_with_one_warning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

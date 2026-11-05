@@ -25,6 +25,7 @@ import type { PanelState } from '../state/layout'
 import { atHistoryLimit } from '../state/liveCandles'
 import type { PanelMarket } from '../state/liveStore'
 import {
+  REGIME_HMM_CALM_BEAR_TEXT,
   REGIME_HMM_FITTING_TEXT,
   REGIME_THRESHOLD,
   REGIME_WINDOW_BARS,
@@ -570,8 +571,10 @@ export function RegimeChip({
           ? 'Causal hidden Markov model on returns and volatility, state of each closed bar. Each ' +
             'state uses only that bar and earlier ones, so it never changes later. The forming ' +
             'bar has none. Opacity follows the filtered probability of the state: faint near a ' +
-            'coin flip, solid when certain. Bars in regime counts the labelled closed bars since ' +
-            'the state last changed.'
+            'coin flip, solid when certain. Bear is the state with the lowest mean return in the ' +
+            'fit, which is not always the more volatile one, and which state that is can change ' +
+            'at a refit. Bars in regime counts the labelled closed bars since the state last ' +
+            'changed.'
           : `hedgeFund regime of each closed bar from its trailing ${REGIME_WINDOW_BARS}-bar return ` +
             `(±${REGIME_THRESHOLD * 100}% bands): bull, sideways, bear. Each label uses only that ` +
             'bar and earlier ones, so it never changes later. The forming bar has none. ' +
@@ -585,7 +588,9 @@ export function RegimeChip({
           ? regimeHmmHistoryLabel(hmm.bars_needed, hmm.bars_have)
           : loading && points === null
             ? REGIME_HMM_FITTING_TEXT
-            : null
+            : hmm?.bear_is_high_vol === false
+              ? REGIME_HMM_CALM_BEAR_TEXT
+              : null
   const run =
     points !== null && error === null
       ? regimeRunThrough(points, source.candles, source.formingLast)

@@ -1339,7 +1339,10 @@ def _guard(args: argparse.Namespace) -> int:
 
     def check() -> int:
         # an edited config ends the guard loudly; a halted folder still gets its stop
-        problem = _config_problem(folder, args.candidate, protocol, plan)
+        # as in compare: guarding a clean DB named in meta.json would read clear for ever
+        problem = _config_problem(folder, args.candidate, protocol, plan) or _meta_db_problem(
+            folder, args.candidate, False
+        )
         if problem is not None and not (folder / HALT_LOCK).exists():
             raise ValueError(problem)
         end = _floor(pd.Timestamp(datetime.now(UTC)), plan.interval)

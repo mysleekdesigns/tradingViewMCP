@@ -379,6 +379,7 @@ function parseHmmInfo(r: Record<string, unknown>): RegimeHmmInfo {
     bars_needed: numOr(r.bars_needed, 0),
     bars_have: numOr(r.bars_have, 0),
     unavailable: typeof r.unavailable === 'string' && r.unavailable !== '' ? r.unavailable : null,
+    bear_is_high_vol: typeof r.bear_is_high_vol === 'boolean' ? r.bear_is_high_vol : null,
   }
 }
 

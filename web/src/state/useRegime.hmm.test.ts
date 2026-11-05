@@ -47,6 +47,7 @@ const HMM: RegimeHmmInfo = {
   bars_needed: 3043,
   bars_have: 4000,
   unavailable: null,
+  bear_is_high_vol: null,
 }
 const BLOCKED = 'HMM needs Binance global data, this chart shows Coinbase'
 const BUSY = new LabError('busy', 'another HMM fit is running', 503)

@@ -84,6 +84,7 @@ describe('RegimeChip', () => {
     bars_needed: 3043,
     bars_have: 5000,
     unavailable: null,
+    bear_is_high_vol: null,
   }
   const closed = {
     candles: [1, 2, 3].map((time) => ({
@@ -211,6 +212,19 @@ describe('RegimeChip', () => {
   })
 
   it('shows Bear and Bull with no sideways swatch for two states', () => {
+    const calm = chip({
+      points: [{ time: 3, state: -1, prob: 0.8 }],
+      hmm: { ...FIT, bear_is_high_vol: false },
+    })
+    expect(calm).toContain('role="status">Bear is the calmer state in this fit</span>')
+    expect(calm).toContain('not always the more volatile one')
+    for (const known of [true, null]) {
+      const quiet = chip({
+        points: [{ time: 3, state: -1, prob: 0.8 }],
+        hmm: { ...FIT, bear_is_high_vol: known },
+      })
+      expect(quiet).not.toContain('calmer state')
+    }
     const html = chip({ points: [{ time: 3, state: -1, prob: 0.8 }], hmm: FIT })
     expect(html).toContain('Bear · 1 bar')
     expect(html).toContain('HMM 2 states')

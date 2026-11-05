@@ -217,6 +217,11 @@ export interface RegimeHmmInfo {
   bars_have: number
   /** Why nothing was fitted (e.g. the archive stops before the chart starts), or null. */
   unavailable: string | null
+  /**
+   * Whether "Bear", the lowest-mean-return state of the newest bar's fit, is also its more
+   * volatile state; null without a decision, or from a lab too old to say.
+   */
+  bear_is_high_vol: boolean | null
 }
 
 export interface RegimeResponse {

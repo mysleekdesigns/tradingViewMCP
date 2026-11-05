@@ -441,7 +441,16 @@ describe('regime', () => {
         bars_needed: 3043,
         bars_have: 5000,
         unavailable: null,
+        bear_is_high_vol: null, // a lab too old to say
       })
+    })
+
+    it.each([true, false])('carries whether bear is the volatile state: %s', async (flag) => {
+      const { fetchImpl } = fakeFetch(() =>
+        jsonResponse(200, { ...hmmAnswer, bear_is_high_vol: flag }),
+      )
+      const res = await createLabClient({ fetchImpl }).regime(request)
+      expect(res.hmm?.bear_is_high_vol).toBe(flag)
     })
 
     it('carries the reason when the lab fitted nothing', async () => {

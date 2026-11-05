@@ -1013,6 +1013,32 @@ def test_a_lock_outranks_late_candles(test: Test) -> None:
     assert test.run([100.0], [], end=START + 9 * H4) == EXIT_HALTED
 
 
+def test_cli_guard_refuses_a_meta_json_naming_a_clean_db(
+    cli: Test, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real DB holds a loss; a clean DB named in meta.json must not read clear for ever."""
+    make_db(
+        cli.folder / "dryrun.sqlite",
+        [
+            {
+                "pair": "BTC/USDT",
+                "is_open": 1,
+                "open_date": "2026-11-02 12:00:05",
+                "open_rate": 100.0,
+                "amount": 10.0,
+            }
+        ],
+    )
+    clean = tmp_path / "clean.sqlite"
+    make_db(clean, [])
+    meta = cli.folder / "meta.json"
+    named = json.loads(meta.read_text(encoding="utf-8")) if meta.is_file() else {}
+    meta.write_text(json.dumps({**named, "db_path": str(clean)}), encoding="utf-8")
+    assert paper_trade.main([*guard_argv(cli), "--candidate", "guarded"]) == 2
+    assert "names another dry-run DB" in capsys.readouterr().err
+    assert not (cli.folder / "halt.lock").exists()
+
+
 def test_cli_guard_exit_2_on_stale_candles(
     cli: Test, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
