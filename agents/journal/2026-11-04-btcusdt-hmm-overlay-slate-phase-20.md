@@ -5,7 +5,7 @@ question: risk_overlay
 symbols:
   - "BTCUSDT"
 interval: "4h"
-outcome: pending
+outcome: already_abandoned
 idea_ids: []
 criteria_sha256: "f88ea5ff6ffbfa48a9ffd72d85ace51919f35a14cfdc387a443a53911a6772d2"
 plan_hashes:
@@ -184,7 +184,101 @@ No HMM output has been computed on real BTC data. At this point `lab/data/hmm` d
 
 ## Results
 
-Written after the run.
+Written after the run. The pre-registration above is not edited.
+
+### Verdict
+
+**Both overlays: already abandoned (rule 1).** Their `pbo_max` rows name `73b34c074fa1`, the `vol_rank` overlay, so their design-window returns correlate at or above 0.8 with it. `run_adversarial` and `run_crosscheck` were not run, as rule 1 requires. No holdout check was spent: `pre_holdout_passed` is false for both.
+
+**This is not "HMM regimes were tested and failed", and it is not "no overlay benefit".** Rule 2 would also have returned inconclusive on both of its conditions, and rule 4 was not reached.
+
+| rule | result | plan `b8571030808a` | plan `6f92436eb9b2` |
+|---|---|---|---|
+| 1. Family check | fired, verdict set here | `73b34c074fa1` in family | `73b34c074fa1` in family |
+| 2. Label check | would also fire | share 0.615 &lt; 0.75; flips 17 &gt; 16.2 | same fit, same values |
+| 3. Testability | would pass | 5 episodes | 5 episodes |
+| 4. Criteria rows | not reached, shown below | 7 rows fail | 7 rows fail |
+
+### Strategy report: btc-4h-hmm-bear-092-flat: BTCUSDT 4h (design 2019-07-06 to 2025-10-01, costs 0.10% + 0.05% per side, slippage widened on wide bars)
+
+Hypothesis: being flat while the filtered bear probability is above 0.92 cuts drawdown without a significant Sharpe loss. Rationale: regimes persist, so a confident bear reading comes before more of the loss. Plan hash: `b8571030808ab88cda3adcdfc277d5fd60ecf30df64e53252ea4e1bdd7491a36`. Features: `hmm_bear_prob`. Tunable params: 0.
+
+### Strategy report: btc-4h-hmm-bear-050-persist3-flat: BTCUSDT 4h (same window and costs)
+
+Hypothesis: being flat while the bear probability has held above 0.5 for 3 closed bars cuts drawdown the same way. Rationale: the video's stability claim, second-hand. Plan hash: `6f92436eb9b22bf67d7b773d63d33ca2cd70d34e4c04cc3cd657208c1fc1f5c9`. Features: `hmm_bear_prob`. Tunable params: 0.
+
+### Metrics (both overlays)
+
+Design window, fixed parameters. Overlay runs have no tuned walk-forward; the stitched-fold row is a sub-window check on the same bars, not out-of-sample. The net ×2 Sharpe comes from the 2x cost row's Sharpe gap plus buy-and-hold's Sharpe.
+
+| metric | 0.92 gross | 0.92 net | 0.92 net ×2 | persist gross | persist net | persist net ×2 | buy&hold | vol-tgt B&H | random null (median) |
+|---|---|---|---|---|---|---|---|---|---|
+| CAGR | -1.4% | -20.3% | **missing** | 3.8% | -5.2% | **missing** | 44.6% | 38.1% | **missing** |
+| Sharpe (365d) | 0.22 | -0.20 | -0.62 | 0.33 | 0.14 | -0.04 | 0.91 | 0.99 | 0.49 / 0.59 |
+| Stitched-fold Sharpe | **missing** | -0.37 | **missing** | **missing** | -0.00 | **missing** | 0.80 / 0.79 | **missing** | **missing** |
+| Sortino | 0.31 | -0.27 | **missing** | 0.45 | 0.20 | **missing** | 1.29 | 1.41 | **missing** |
+| max DD | 80.6% | 88.6% | **missing** | 76.0% | 78.5% | **missing** | 77.0% | 64.7% | **missing** |
+| win rate | 42.8% | 42.8% | **missing** | 46.0% | 46.0% | **missing** | n/a | n/a | n/a |
+| profit factor | 0.75 | 0.75 | **missing** | 0.92 | 0.92 | **missing** | n/a | n/a | n/a |
+| trades | 194 | 194 | 194 | 113 | 113 | 113 | 1 | 1 | same count |
+| exposure | 68.0% | 68.0% | 68.0% | 66.6% | 66.6% | 66.6% | 100% | 100% | **missing** |
+| turnover /yr | 62.2x | 62.2x | 62.2x | 36.2x | 36.2x | 36.2x | 0.2x | 5.0x | **missing** |
+
+Ledger trials this run: 24, chain verified (head `cc97248d1332`). DSR N across every run: 5892. DSR: run-local 0.31 and 0.52 are dropped for overlay runs and neither is near 0.95. PBO: not computed (no tunable parameters); `pbo_max` fails on the family rule. Sharpe 95% CI: [-0.95, 0.58] and [-0.62, 0.92]. Random-entry percentile: 0 and 3.
+
+Permutation null: **missing** (not run, rule 1). Signal delay: **missing** (not run, rule 1). Sign flip: **missing** (not run, rule 1). Parameter neighbours: none, no tunable parameters. Regimes by bull, bear, sideways: **missing** (not read for this write-up). Top-5 trades removed: **missing** (not run, rule 1).
+Holdout: not checked (holdout checks used: 0/1). Cross-check engine: not run (rule 1).
+
+Success criteria: 2 of 11 rows pass for each overlay, 7 fail, 2 missing. Verdict: abandoned.
+
+### Criteria rows
+
+N_overlay 5, per-test level 0.01.
+
+| criterion | threshold | 0.92 status | 0.92 value | persist status | persist value |
+|---|---|---|---|---|---|
+| cdar_vs_buy_hold_max | 0.75 | fail | 1.185 | fail | 1.041 |
+| beat_exposure_matched | p 0.01 | fail | p 0.998 (CDaR 0.876 vs 0.580) | fail | p 0.979 (CDaR 0.769 vs 0.572) |
+| min_episodes_improved | above 0.5 | fail | 0 of 5 | fail | 0 of 5 |
+| sharpe_non_inferiority | -0.2 | fail | -1.538 | fail | -1.219 |
+| break_even_cost_multiple_min | 2 | fail | fails at every multiple | fail | fails at every multiple |
+| min_drawdown_episodes | 3 | pass | 5 | pass | 5 |
+| min_avg_exposure | 0.5 | pass | 0.680 | pass | 0.666 |
+| wf_rows_hold | yes | fail | no | fail | no |
+| pbo_max | 0.2 | fail | 3 alike overlays | fail | 3 alike overlays |
+| require_holdout_pass | yes | missing | n/a | missing | n/a |
+| require_crosscheck_match | yes | missing | n/a | missing | n/a |
+
+### Named crashes (information only, net of costs)
+
+| episode | buy-hold return | 0.92 return | 0.92 exposure | persist return | persist exposure |
+|---|---|---|---|---|---|
+| covid_crash_2020_03 | -24.8% | -37.2% | 0.21 | -38.9% | 0.21 |
+| deleveraging_2021_05 | -35.4% | -17.1% | 0.45 | -16.6% | 0.46 |
+| luna_2022_05 | -15.5% | -13.2% | 0.65 | -10.9% | 0.62 |
+| ftx_2022_11 | -16.2% | -16.0% | 0.72 | -8.6% | 0.71 |
+| carry_unwind_2024_08 | -8.7% | -6.6% | 0.98 | -6.6% | 0.98 |
+
+Four of five named crashes look better than buy-and-hold, and that is what holding less produces in any falling market. The rows that count compare with the same exposure held statically, and there the overlays improved 0 of 5 deep drawdowns. In March 2020 both were 79% flat and still lost more than buy-and-hold: the flat bars missed the rebound, not the fall.
+
+### Critic (fresh context): abandon
+
+`strategy-critic` agreed with the order and the verdicts: rule 1 sets the verdict, the rest are shown but not applied, and skipping `run_adversarial` and `run_crosscheck` was required. No look-ahead smell, since leakage flatters and these sit at the 0th and 3rd percentile of the random-entry null. Refinement is not available: `MAX_HMM_OVERLAY_LOGICS = 2` is used up, so a third logic is refused. A new state ordering would be a new hypothesis, needing the owner's decision and its own pre-registration; the critic does not recommend one. Its biggest concern is that "already abandoned" gets misread as "regimes tested and failed".
+
+### Notes
+
+- **What may be claimed.** On seen data, these two fixed rules lost to static BTC at the same exposure. Nothing more.
+- **What must not be claimed.** Nothing here is evidence about HMM regimes, because the bear label was the calmer state on about 38% of bars. Nothing is evidence about the thresholds: one value each, and the persist rule also changes the threshold, so 194 to 113 trades is not a `persist` effect. Costs are not the cause: gross Sharpe was 0.22 and 0.33 against 0.91.
+- **The family flag is unproven as shared logic.** The lab reports membership, not the correlation. Correlation through buy-and-hold alone is roughly the square root of the share of variance held: √0.68 = 0.82 and √0.67 = 0.82, just over 0.8. Flat bars that carry more than average variance would pull that lower, and the flag cannot be split between beta and logic. As Phase 15 warned, this check cannot separate them near this exposure. The verdict stands because the rule fails closed.
+- **The flips condition was close:** 17 against 16.2. The share condition was not: 0.615 against 0.75. Either one alone fails rule 2.
+- **Label failure is the likely mechanism, but it is not shown here.** With bear on the calmer state for about 38% of bars, the overlay is sometimes flat in calm markets. No run separated that effect.
+- **The 84 undecided bars are explained.** Checked on design bars only: two Binance 8-hour gaps, 2019-08-15 and 2020-02-19, each blank the 42-bar volatility window that follows, exactly as designed, and no fit failed. `hmm_bear_prob` is NaN on those bars, so the overlay stays invested there.
+- **Cost drag is larger than the nominal rate suggests.** The 0.92 overlay paid roughly 0.34% per side across 194 round trips, against a nominal 0.15%. That is consistent with `slippage_vol_mult` widening slippage on the wide bars where these rules switch, but it was not measured directly. The quoted 0.05% understates cost for a rule that trades in volatility spikes.
+- **Correction to the pre-registration's expectation, text not edited.** It said about 500 days of history would drop out and March 2020 might fall outside the window. Warm-up used pre-design history, so scoring began on 2019-07-06, March 2020 is included, and there were 5 deep episodes, not fewer than 3. The prediction was wrong; no rule or verdict depended on it.
+- **Disclosure.** Claude set the rule 2 numbers (0.75, one flip per 20 refits) before any real fit, as conventions. The verdict does not depend on them, because rule 1 applied first.
+- **Slots spent.** Both of the 2 HMM overlay slots are used, N_overlay is 5, and DSR N is 5892. The holdout is unspent.
+- **Lesson.** A mean-ordered two-state label was not a stable bear state on BTC 4h, and the family check alone cannot separate shared logic from beta near 0.67 exposure. Compare any regime overlay with static de-risking at the same exposure first.
+- Candidates entering paper trading: none. Results are historical and not forward-looking.
 
 ### Disclaimer
 
