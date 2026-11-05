@@ -25,3 +25,16 @@ Run by Claude after Part D, so nothing was read from BTC before the pre-register
 **Not checked.** A truly cold first fit in the browser: Part D had already filled the design-window cache. The cold case was timed earlier at 47.1 s on 15,000 synthetic bars, inside the 75 s budget. The 180 s client timeout and the busy retry are covered by `useRegime.hmm.test.ts`.
 
 The chart showed a regime label for today's bars. That is a display, it was not used for any research decision, and both HMM overlays were already abandoned.
+
+## Re-check after 7047a12
+
+The quant review's label warning added a chip message and title text, after the check above. Re-run on a production build with a throwaway lab on 8789 running the new code, so the owner's 8788 was left alone.
+
+| check | result |
+|---|---|
+| Real answer | `bear_is_high_vol: true` for today's newest bar, so the chip stays quiet, as it should |
+| Answer rewritten to `false` | Chip reads "Bear is the calmer state in this fit", 474 px wide, no page overflow, picker still visible |
+| Title | Explains that Bear is the lowest mean return, not always the more volatile state |
+| Main chunk | 157.49 KB gzip by Vite's own report, against 157.34 KB at 416caba measured the same way |
+
+The owner's lab needs a restart to send the new field. Until then the chip stays quiet, which is the "lab too old to say" case.
