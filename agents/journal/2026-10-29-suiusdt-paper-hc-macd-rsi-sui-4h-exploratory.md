@@ -210,3 +210,4 @@ Registered 2026-10-29T22:42:44+00:00 before the first dry-run trade. Venue: freq
 - 2026-11-03 (data to 2026-11-03 12:00 UTC): **continue**, 4.5 days. continue: 4.5 of 56.0 days elapsed; no fail rule tripped Comparison: `comparison-2026-11-03.json`.
 - 2026-11-04 (data to 2026-11-04 12:00 UTC): **continue**, 5.5 days. continue: 5.5 of 56.0 days elapsed; no fail rule tripped Comparison: `comparison-2026-11-04.json`.
 - 2026-11-06 (data to 2026-11-06 16:00 UTC): **continue**, 7.7 days. continue: 7.7 of 56.0 days elapsed; no fail rule tripped Comparison: `comparison-2026-11-06.json`.
+- 2026-11-10 (data to 2026-11-10 20:00 UTC): **continue**, 11.8 days. continue: 11.8 of 56.0 days elapsed; no fail rule tripped Comparison: `comparison-2026-11-10.json`.
