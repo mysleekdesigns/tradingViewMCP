@@ -202,3 +202,5 @@ it, so the anchor the final read relies on is the one in the shared git history.
   never trading on Jev verdicts. No edge claim.
 
 > Results are historical, not forward-looking.
+
+- 2026-11-24 14:02 UTC: **shadow recorder stopped early by the owner** (SIGTERM) together with all seven HC bots, at 25.5 of 56 days of the HC window. Every one of the 8 recorded decisions was "jev unavailable", so the run holds no Jev verdicts. The planned evaluation on 2027-01-08 has no data to judge; this run ends without a result.

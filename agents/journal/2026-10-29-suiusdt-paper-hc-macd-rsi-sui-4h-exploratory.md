@@ -215,3 +215,5 @@ Registered 2026-10-29T22:42:44+00:00 before the first dry-run trade. Venue: freq
 - 2026-11-16 (data to 2026-11-16 20:00 UTC): **continue**, 17.8 days. continue: 17.8 of 56.0 days elapsed; no fail rule tripped Comparison: `comparison-2026-11-16.json`.
 - 2026-11-19 (data to 2026-11-19 12:00 UTC): **continue**, 20.5 days. continue: 20.5 of 56.0 days elapsed; no fail rule tripped Comparison: `comparison-2026-11-19.json`.
 - 2026-11-22 (data to 2026-11-22 20:00 UTC): **continue**, 23.8 days. continue: 23.8 of 56.0 days elapsed; no fail rule tripped Comparison: `comparison-2026-11-22.json`.
+- 2026-11-24 (data to 2026-11-24 12:00 UTC): **continue**, 25.5 days. continue: 25.5 of 56.0 days elapsed; no fail rule tripped Comparison: `comparison-2026-11-24.json`.
+- 2026-11-24 14:02 UTC: **stopped early by the owner** (SIGTERM, clean shutdown, no open dry-run trades) at 25.5 of 56 days, before the 2026-12-25 decision bar. No fail rule had tripped. The protocol verdict is therefore incomplete: this test ends without a final judgment, and the 2026-11-24 comparison is the last one. A restart would be a new, separately registered test.
